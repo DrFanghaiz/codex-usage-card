@@ -1,0 +1,16 @@
+__pycache__/
+.pytest_cache/
+*.py[cod]
+native-patch/*.exe
+native-patch/api-proxy.dat
+auth.json
+config.toml
+api-proxy.dat
+.env
+.env.*
+*.log
+.codex/
+dist/
+task_plan.md
+findings.md
+progress.md

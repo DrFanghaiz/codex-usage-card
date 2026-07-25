@@ -1,0 +1,1 @@
+"""Codex quota card application."""
