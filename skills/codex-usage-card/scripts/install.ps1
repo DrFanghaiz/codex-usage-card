@@ -1,20 +1,28 @@
 [CmdletBinding()]
 param(
-  [string]$TaskName = 'Codex Quota Card Repair',
-  [string]$InstallRoot = (Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'CodexBar'),
+  [string]$TaskName = 'Codex Usage Card',
+  [string]$InstallRoot = (Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'CodexUsageCard'),
   [switch]$SkipTaskRegistration
 )
 
 $ErrorActionPreference = 'Stop'
 
 if ($env:OS -ne 'Windows_NT') {
-  throw 'Codex Bar supports Windows only.'
+  throw 'Codex Usage Card supports Windows only.'
 }
 
+$InstallRoot = [IO.Path]::GetFullPath($InstallRoot)
 $skillRoot = Split-Path -Parent $PSScriptRoot
 $sourceDirectory = Join-Path $skillRoot 'assets\native-patch'
 $installDirectory = Join-Path $InstallRoot 'native-patch'
 $executable = Join-Path $installDirectory 'CodexNativeQuotaPatch.next.exe'
+$legacyTaskName = 'Codex Quota Card Repair'
+$legacyInstallRoot = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'CodexBar'
+$legacyInstallDirectory = Join-Path $legacyInstallRoot 'native-patch'
+$legacyExecutable = Join-Path $legacyInstallDirectory 'CodexNativeQuotaPatch.next.exe'
+if ([String]::Equals($TaskName, $legacyTaskName, [StringComparison]::OrdinalIgnoreCase)) {
+  throw ('The task name is reserved for migration: {0}' -f $legacyTaskName)
+}
 $fileNames = @(
   'CodexNativeQuotaPatch.cs',
   'CodexNativeQuotaPatch.next.exe',
@@ -28,7 +36,30 @@ foreach ($fileName in $fileNames) {
   }
 }
 
+$stopExactProcesses = {
+  param([string]$Path)
+  $matchingProcesses = @(Get-CimInstance Win32_Process | Where-Object {
+    $_.ExecutablePath -and
+    [String]::Equals([IO.Path]::GetFullPath($_.ExecutablePath), $Path, [StringComparison]::OrdinalIgnoreCase)
+  })
+  foreach ($process in $matchingProcesses) {
+    $nativeProcess = Get-Process -Id $process.ProcessId -ErrorAction Stop
+    Stop-Process -Id $nativeProcess.Id -Force
+    if (-not $nativeProcess.WaitForExit(5000)) {
+      throw ('Helper process did not exit: {0}' -f $nativeProcess.Id)
+    }
+  }
+  $remaining = @(Get-CimInstance Win32_Process | Where-Object {
+    $_.ExecutablePath -and
+    [String]::Equals([IO.Path]::GetFullPath($_.ExecutablePath), $Path, [StringComparison]::OrdinalIgnoreCase)
+  })
+  if ($remaining.Count -ne 0) {
+    throw ('Helper process still owns the executable: {0}' -f $Path)
+  }
+}
+
 $existingTask = $null
+$legacyTask = $null
 if (-not $SkipTaskRegistration) {
   $existingTask = Get-ScheduledTask -TaskPath '\' -TaskName $TaskName -ErrorAction SilentlyContinue
   if ($existingTask) {
@@ -41,13 +72,17 @@ if (-not $SkipTaskRegistration) {
     }
     Stop-ScheduledTask -TaskPath '\' -TaskName $TaskName
   }
+  & $stopExactProcesses $executable
 
-  $matchingProcesses = @(Get-CimInstance Win32_Process | Where-Object {
-    $_.ExecutablePath -and
-    [String]::Equals([IO.Path]::GetFullPath($_.ExecutablePath), $executable, [StringComparison]::OrdinalIgnoreCase)
-  })
-  foreach ($process in $matchingProcesses) {
-    Stop-Process -Id $process.ProcessId -Force
+  $legacyTask = Get-ScheduledTask -TaskPath '\' -TaskName $legacyTaskName -ErrorAction SilentlyContinue
+  if ($legacyTask) {
+    if ($legacyTask.Actions.Count -ne 1) {
+      throw 'The legacy task has an unexpected number of actions.'
+    }
+    $actualLegacyExecutable = [IO.Path]::GetFullPath($legacyTask.Actions[0].Execute)
+    if (-not [String]::Equals($actualLegacyExecutable, $legacyExecutable, [StringComparison]::OrdinalIgnoreCase)) {
+      throw ('The legacy task points to another path: {0}' -f $actualLegacyExecutable)
+    }
   }
 }
 
@@ -85,7 +120,7 @@ Register-ScheduledTask `
   -Trigger $trigger `
   -Principal $principal `
   -Settings $settings `
-  -Description 'Restores the Codex quota card without a console window.' `
+  -Description 'Runs Codex Usage Card without a console window.' `
   -Force | Out-Null
 
 Start-ScheduledTask -TaskPath '\' -TaskName $TaskName
@@ -109,6 +144,24 @@ if ($running.Count -ne 1) {
 $windowHandle = (Get-Process -Id $running[0].ProcessId).MainWindowHandle
 if ($windowHandle -ne 0) {
   throw 'The helper unexpectedly created a window.'
+}
+
+if ($legacyTask) {
+  Stop-ScheduledTask -TaskPath '\' -TaskName $legacyTaskName
+  & $stopExactProcesses $legacyExecutable
+  Unregister-ScheduledTask -TaskPath '\' -TaskName $legacyTaskName -Confirm:$false
+  foreach ($fileName in $fileNames) {
+    $legacyPath = Join-Path $legacyInstallDirectory $fileName
+    if (Test-Path -LiteralPath $legacyPath -PathType Leaf) {
+      Remove-Item -LiteralPath $legacyPath -Force
+    }
+  }
+  foreach ($legacyDirectory in @($legacyInstallDirectory, $legacyInstallRoot)) {
+    if ((Test-Path -LiteralPath $legacyDirectory -PathType Container) -and
+        @(Get-ChildItem -LiteralPath $legacyDirectory -Force).Count -eq 0) {
+      Remove-Item -LiteralPath $legacyDirectory -Force
+    }
+  }
 }
 
 [pscustomobject]@{

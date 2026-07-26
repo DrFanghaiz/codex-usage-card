@@ -1,6 +1,6 @@
-# Codex Bar
+# Codex Usage Card
 
-Codex Bar 在 Codex 桌面端侧栏账号行上方显示额度。它不修改 Codex 安装目录，不改变主题和模型列表，也不会记录或输出 API Key。
+Codex Usage Card 在 Codex 桌面端侧栏账号行上方显示用量与剩余额度。它不修改 Codex 安装目录，不改变主题和模型列表，也不会记录或输出 API Key。
 
 ## 一键安装
 
@@ -9,15 +9,15 @@ Codex Bar 在 Codex 桌面端侧栏账号行上方显示额度。它不修改 Co
 在 PowerShell 7 中运行：
 
 ```powershell
-$installer = Join-Path $env:TEMP 'install-codex-bar.ps1'; Invoke-WebRequest 'https://raw.githubusercontent.com/DrFanghaiz/Codex-bar/v1.1.0/install.ps1' -OutFile $installer; Unblock-File -LiteralPath $installer; & $installer
+$installer = Join-Path $env:TEMP 'install-codex-usage-card.ps1'; Invoke-WebRequest 'https://raw.githubusercontent.com/DrFanghaiz/codex-usage-card/v1.2.0/install.ps1' -OutFile $installer; Unblock-File -LiteralPath $installer; & $installer
 ```
 
-安装器会校验发布包的 SHA-256，把 Skill 安装到 `$CODEX_HOME\skills`（未设置时为 `$env:USERPROFILE\.codex\skills`），把无窗口修复器部署到 `$env:LOCALAPPDATA\CodexBar`，并注册当前用户的计划任务 `Codex Quota Card Repair`。
+安装器会校验发布包的 SHA-256，把 Skill 安装到 `$CODEX_HOME\skills`（未设置时为 `$env:USERPROFILE\.codex\skills`），把无窗口修复器部署到 `$env:LOCALAPPDATA\CodexUsageCard`，并注册当前用户的计划任务 `Codex Usage Card`。从旧版升级时，只迁移路径与动作完全匹配的旧任务。
 
 如果只安装 Skill，不立即部署控件：
 
 ```powershell
-python "$env:USERPROFILE\.codex\skills\.system\skill-installer\scripts\install-skill-from-github.py" --repo 'DrFanghaiz/Codex-bar' --path 'skills/codex-quota-card-repair'
+python "$env:USERPROFILE\.codex\skills\.system\skill-installer\scripts\install-skill-from-github.py" --repo 'DrFanghaiz/codex-usage-card' --path 'skills/codex-usage-card'
 ```
 
 安装后重新启动 Codex，使新 Skill 出现在可用 Skill 列表中。
@@ -38,7 +38,7 @@ Codex 必须暴露本机调试端口，修复器才能向页面注入控件。�
 只有在明确需要卸载时运行：
 
 ```powershell
-& "$env:USERPROFILE\.codex\skills\codex-quota-card-repair\scripts\uninstall.ps1"
+& "$env:USERPROFILE\.codex\skills\codex-usage-card\scripts\uninstall.ps1"
 ```
 
 卸载脚本只删除该 Skill 部署的精确计划任务、进程和三个运行文件，不操作 Codex 客户端或其他进程。
@@ -51,4 +51,4 @@ python -m pytest -q tests
 node --check native-patch\native_patch.js
 ```
 
-完整维护流程与安全约束见 [`skills/codex-quota-card-repair/SKILL.md`](skills/codex-quota-card-repair/SKILL.md)。
+完整维护流程与安全约束见 [`skills/codex-usage-card/SKILL.md`](skills/codex-usage-card/SKILL.md)。

@@ -1,7 +1,0 @@
-interface:
-  display_name: "Codex Quota Card Repair"
-  short_description: "Repair and verify Codex quota cards on Windows"
-  default_prompt: "Use $codex-quota-card-repair to install or repair Codex Bar on this Windows computer, then verify the task, process, and visible quota card."
-
-policy:
-  allow_implicit_invocation: true

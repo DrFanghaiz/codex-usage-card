@@ -1,0 +1,7 @@
+interface:
+  display_name: "Codex Usage Card"
+  short_description: "Display and verify Codex usage on Windows"
+  default_prompt: "Use $codex-usage-card to install or repair Codex Usage Card on this Windows computer, then verify the task, process, and visible usage card."
+
+policy:
+  allow_implicit_invocation: true

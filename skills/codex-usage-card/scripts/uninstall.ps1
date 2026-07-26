@@ -1,10 +1,11 @@
 [CmdletBinding()]
 param(
-  [string]$TaskName = 'Codex Quota Card Repair',
-  [string]$InstallRoot = (Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'CodexBar')
+  [string]$TaskName = 'Codex Usage Card',
+  [string]$InstallRoot = (Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'CodexUsageCard')
 )
 
 $ErrorActionPreference = 'Stop'
+$InstallRoot = [IO.Path]::GetFullPath($InstallRoot)
 $installDirectory = Join-Path $InstallRoot 'native-patch'
 $executable = Join-Path $installDirectory 'CodexNativeQuotaPatch.next.exe'
 $task = Get-ScheduledTask -TaskPath '\' -TaskName $TaskName -ErrorAction SilentlyContinue
@@ -26,7 +27,11 @@ $matchingProcesses = @(Get-CimInstance Win32_Process | Where-Object {
   [String]::Equals([IO.Path]::GetFullPath($_.ExecutablePath), $executable, [StringComparison]::OrdinalIgnoreCase)
 })
 foreach ($process in $matchingProcesses) {
-  Stop-Process -Id $process.ProcessId -Force
+  $nativeProcess = Get-Process -Id $process.ProcessId -ErrorAction Stop
+  Stop-Process -Id $nativeProcess.Id -Force
+  if (-not $nativeProcess.WaitForExit(5000)) {
+    throw ('Helper process did not exit: {0}' -f $nativeProcess.Id)
+  }
 }
 
 foreach ($fileName in @('CodexNativeQuotaPatch.cs', 'CodexNativeQuotaPatch.next.exe', 'native_patch.js')) {

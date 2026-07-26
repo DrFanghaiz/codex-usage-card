@@ -1,5 +1,5 @@
 param(
-  [string]$TaskName = 'Codex Quota Card Repair',
+  [string]$TaskName = 'Codex Usage Card',
   [string]$Helper = ''
 )
 
@@ -37,7 +37,7 @@ Register-ScheduledTask `
   -Trigger $trigger `
   -Principal $principal `
   -Settings $settings `
-  -Description 'Enables the built-in Codex quota alert without a console window.' `
+  -Description 'Runs Codex Usage Card without a console window.' `
   -Force | Out-Null
 
 Start-ScheduledTask -TaskName $TaskName

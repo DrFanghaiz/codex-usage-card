@@ -1,17 +1,17 @@
 ---
-name: codex-quota-card-repair
-description: Install, repair, build, deploy, and verify Codex Bar, a Codex quota card for Windows. Use when another Windows computer needs one-click installation, a Codex desktop quota card is missing, used and remaining values are reversed, official-account or API-mode support is required, or the helper must recover after a Codex update without modifying WindowsApps, themes, or exposing API keys.
+name: codex-usage-card
+description: Install, build, deploy, repair, and verify Codex Usage Card for Windows. Use when another Windows computer needs one-click installation, the Codex desktop usage card is missing, used and remaining values are reversed, official-account or API-mode support is required, or the helper must recover after a Codex update without modifying WindowsApps, themes, or exposing API keys.
 ---
 
-# Codex quota card repair
+# Codex Usage Card
 
 Use this skill to install the bundled helper on another Windows computer or maintain the existing implementation in a checked-out project. Treat the project as the source of truth; do not redesign the card or invent a second authentication flow.
 
 ## Install on another Windows computer
 
-When this skill is installed without a source checkout, run `scripts/install.ps1`. It copies the bundled native helper to `%LOCALAPPDATA%\CodexBar`, registers the current-user task `Codex Quota Card Repair`, and starts one windowless instance. If the same task name points somewhere else, stop and report the path instead of overwriting it.
+When this skill is installed without a source checkout, run `scripts/install.ps1`. It copies the bundled native helper to `%LOCALAPPDATA%\CodexUsageCard`, registers the current-user task `Codex Usage Card`, and starts one windowless instance. It migrates the legacy `Codex Quota Card Repair` task only when that task points to the exact legacy install path. If either task name points somewhere else, stop and report the path instead of overwriting it.
 
-Use `scripts/uninstall.ps1` only when the user explicitly asks to remove Codex Bar. It removes only the exact task and files installed by this skill.
+Use `scripts/uninstall.ps1` only when the user explicitly asks to remove Codex Usage Card. It removes only the exact task and files installed by this skill.
 
 ## Scope
 
@@ -28,11 +28,11 @@ Inspect these relative paths before changing code:
 - `native-patch/CodexNativeQuotaPatch.cs`
 - `native-patch/native_patch.js`
 - `codex_quota/page_injector.py`
-- `scripts/register_repair_task.ps1`
+- `scripts/register_usage_card_task.ps1`
 - `scripts/repair_codex.ps1`
 - `tests/`
 
-The implementation must continue to use the task name `Codex Quota Card Repair` and the deployable output `native-patch/CodexNativeQuotaPatch.next.exe`. Never overwrite the old `CodexNativeQuotaPatch.exe` when Windows has it locked.
+The implementation must continue to use the task name `Codex Usage Card` and the deployable output `native-patch/CodexNativeQuotaPatch.next.exe`. Never overwrite the old `CodexNativeQuotaPatch.exe` when Windows has it locked.
 
 ## Non-negotiable safety rules
 
@@ -93,7 +93,7 @@ Use the existing references: `System.dll`, `System.Core.dll`, `System.Management
 
 ### 4. Replace the background instance safely
 
-Operate only on `Codex Quota Card Repair`:
+Operate only on `Codex Usage Card`. During a verified upgrade, the installer may remove the legacy `Codex Quota Card Repair` task only when its single action points to the exact legacy install path:
 
 1. Verify its action points to the exact `.next.exe` path, then stop the task.
 2. Resolve processes by exact executable path, not by process name alone.
@@ -110,7 +110,7 @@ Use the active Codex debugging target only when it is available. Without a runni
 
 For official mode, verify the visible native card, Weekly remaining/used complement, account-row placement, absence of the API card, unchanged theme, and `card_present() == True`.
 
-For API mode, verify the visible API card, absence of the official card, language-independent account-row lookup, Daily used progress semantics, refresh state, and that no key enters the page. Do not switch the user's real login configuration merely to create a screenshot.
+For API mode, verify the visible API card, absence of the official card, language-independent account-row lookup, Daily remaining progress semantics, refresh state, and that no key enters the page. Do not switch the user's real login configuration merely to create a screenshot.
 
 ### 6. Record and review
 
@@ -138,4 +138,4 @@ This skill is a workflow layer, not a copy of a user's login state. Keep the rep
 - keep the source project and this skill directory separate so the skill can be installed from the repository;
 - document required user approval for scheduled-task changes and any missing compiler/debug-port dependency.
 
-The quota skill must never alter the Codex model picker. A duplicate model label such as `5.6 Luna` is outside this skill's scope and should be investigated in Codex's own model catalog.
+The usage-card skill must never alter the Codex model picker. A duplicate model label such as `5.6 Luna` is outside this skill's scope and should be investigated in Codex's own model catalog.

@@ -1,32 +1,34 @@
 [CmdletBinding()]
 param(
   [string]$SkillRoot,
-  [string]$InstallRoot = (Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'CodexBar'),
+  [string]$InstallRoot = (Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'CodexUsageCard'),
   [switch]$SkipTaskRegistration
 )
 
 $ErrorActionPreference = 'Stop'
-$releaseTag = 'v1.1.0'
-$archiveName = 'codex-quota-card-repair.skill.zip'
-$expectedSha256 = '423AF38037DEF5E980EACE86BE748F1952B8C1BA176CEE386C14DF36CE457B63'
-$archiveUrl = 'https://github.com/DrFanghaiz/Codex-bar/releases/download/{0}/{1}' -f $releaseTag, $archiveName
+$releaseTag = 'v1.2.0'
+$archiveName = 'codex-usage-card.skill.zip'
+$expectedSha256 = 'AAA6F5799D079780A6B365D5725EB257C7024200D666165631F3B1507EB8D270'
+$archiveUrl = 'https://github.com/DrFanghaiz/codex-usage-card/releases/download/{0}/{1}' -f $releaseTag, $archiveName
 
 if ($env:OS -ne 'Windows_NT') {
-  throw 'Codex Bar supports Windows only.'
+  throw 'Codex Usage Card supports Windows only.'
 }
 
+$legacySkillRoot = $null
 if ([String]::IsNullOrWhiteSpace($SkillRoot)) {
   $codexHome = if ([String]::IsNullOrWhiteSpace($env:CODEX_HOME)) {
     Join-Path ([Environment]::GetFolderPath('UserProfile')) '.codex'
   } else {
     $env:CODEX_HOME
   }
-  $SkillRoot = Join-Path $codexHome 'skills\codex-quota-card-repair'
+  $SkillRoot = Join-Path $codexHome 'skills\codex-usage-card'
+  $legacySkillRoot = Join-Path $codexHome 'skills\codex-quota-card-repair'
 }
 
 $SkillRoot = [IO.Path]::GetFullPath($SkillRoot)
 $InstallRoot = [IO.Path]::GetFullPath($InstallRoot)
-$stagingRoot = Join-Path ([IO.Path]::GetTempPath()) ('codex-bar-' + [Guid]::NewGuid().ToString('N'))
+$stagingRoot = Join-Path ([IO.Path]::GetTempPath()) ('codex-usage-card-' + [Guid]::NewGuid().ToString('N'))
 $archivePath = Join-Path $stagingRoot $archiveName
 $extractRoot = Join-Path $stagingRoot 'expanded'
 $relativeFiles = @(
@@ -49,7 +51,7 @@ try {
   }
 
   Expand-Archive -LiteralPath $archivePath -DestinationPath $extractRoot
-  $sourceRoot = Join-Path $extractRoot 'codex-quota-card-repair'
+  $sourceRoot = Join-Path $extractRoot 'codex-usage-card'
   foreach ($relativePath in $relativeFiles) {
     $sourcePath = Join-Path $sourceRoot $relativePath
     if (-not (Test-Path -LiteralPath $sourcePath -PathType Leaf)) {
@@ -68,6 +70,33 @@ try {
   & (Join-Path $SkillRoot 'scripts\install.ps1') `
     -InstallRoot $InstallRoot `
     -SkipTaskRegistration:$SkipTaskRegistration
+
+  if ($legacySkillRoot -and (Test-Path -LiteralPath $legacySkillRoot -PathType Container)) {
+    $legacyManifest = Join-Path $legacySkillRoot 'SKILL.md'
+    if (Test-Path -LiteralPath $legacyManifest -PathType Leaf) {
+      $legacyText = Get-Content -LiteralPath $legacyManifest -Raw
+      if ($legacyText -notmatch '(?m)^name:\s*codex-quota-card-repair\s*$') {
+        throw ('Legacy skill identity is unexpected: {0}' -f $legacySkillRoot)
+      }
+      foreach ($relativePath in $relativeFiles) {
+        $legacyPath = Join-Path $legacySkillRoot $relativePath
+        if (Test-Path -LiteralPath $legacyPath -PathType Leaf) {
+          Remove-Item -LiteralPath $legacyPath -Force
+        }
+      }
+      foreach ($relativeDirectory in @('assets\native-patch', 'assets', 'agents', 'scripts', '')) {
+        $legacyDirectory = if ($relativeDirectory) {
+          Join-Path $legacySkillRoot $relativeDirectory
+        } else {
+          $legacySkillRoot
+        }
+        if ((Test-Path -LiteralPath $legacyDirectory -PathType Container) -and
+            @(Get-ChildItem -LiteralPath $legacyDirectory -Force).Count -eq 0) {
+          Remove-Item -LiteralPath $legacyDirectory -Force
+        }
+      }
+    }
+  }
 } finally {
   if (Test-Path -LiteralPath $stagingRoot -PathType Container) {
     $resolvedTemp = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())

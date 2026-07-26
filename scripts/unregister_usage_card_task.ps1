@@ -1,5 +1,5 @@
 param(
-  [string]$TaskName = 'Codex Quota Card Repair'
+  [string]$TaskName = 'Codex Usage Card'
 )
 
 $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
