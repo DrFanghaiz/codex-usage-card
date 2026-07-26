@@ -63,10 +63,10 @@ Check `WaitForLoginConfigurationChangeAsync()` and its callers:
 Review the page script for these invariants:
 
 - Official mode uses the native quota component and remains language-independent.
-- Official Weekly text is the remaining percentage; its black progress bar is the used percentage, and dynamic native progress updates keep the two values summing to 100.
+- Official Weekly Folio uses the compact split layout: remaining number, vertical divider, left-aligned reset metadata, and remaining progress line. The hidden native progress keeps the used percentage, and dynamic updates keep the two values summing to 100.
 - Never fabricate a 5h row. Compact only the single-window Weekly native card; if the official component exposes additional windows again, preserve its complete native UI so restored limits remain visible.
 - Hide the quota card when the sidebar account row is absent; restore it when the row returns. Do not hide unrelated status notifications.
-- API mode creates one card above the account row, never the official card. Its Daily bar is `used / total`; account `remaining` is displayed separately and is never used as the Daily ratio.
+- API mode creates one card above the account row, never the official card. Its Folio number and compact line show `100 - used / total`; the remaining amount is displayed separately.
 - API refresh is event-driven: initial load, manual refresh, stale successful data on focus, and server-directed cooldowns only. Do not add a timer that polls continuously.
 - `card_present()` checks a visible real card, not merely an internal patch marker.
 - The script does not touch model pickers, model labels, menus, or option lists.

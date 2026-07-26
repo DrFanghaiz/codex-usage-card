@@ -6,9 +6,9 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$releaseTag = 'v1.0.0'
+$releaseTag = 'v1.1.0'
 $archiveName = 'codex-quota-card-repair.skill.zip'
-$expectedSha256 = 'DF50B2AB4BC9A19CD96EC3B5C1432D0AE0EA723CA06F13E82059C51FF4903A3C'
+$expectedSha256 = '423AF38037DEF5E980EACE86BE748F1952B8C1BA176CEE386C14DF36CE457B63'
 $archiveUrl = 'https://github.com/DrFanghaiz/Codex-bar/releases/download/{0}/{1}' -f $releaseTag, $archiveName
 
 if ($env:OS -ne 'Windows_NT') {

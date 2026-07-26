@@ -9,7 +9,7 @@ Codex Bar 在 Codex 桌面端侧栏账号行上方显示额度。它不修改 Co
 在 PowerShell 7 中运行：
 
 ```powershell
-$installer = Join-Path $env:TEMP 'install-codex-bar.ps1'; Invoke-WebRequest 'https://raw.githubusercontent.com/DrFanghaiz/Codex-bar/v1.0.0/install.ps1' -OutFile $installer; Unblock-File -LiteralPath $installer; & $installer
+$installer = Join-Path $env:TEMP 'install-codex-bar.ps1'; Invoke-WebRequest 'https://raw.githubusercontent.com/DrFanghaiz/Codex-bar/v1.1.0/install.ps1' -OutFile $installer; Unblock-File -LiteralPath $installer; & $installer
 ```
 
 安装器会校验发布包的 SHA-256，把 Skill 安装到 `$CODEX_HOME\skills`（未设置时为 `$env:USERPROFILE\.codex\skills`），把无窗口修复器部署到 `$env:LOCALAPPDATA\CodexBar`，并注册当前用户的计划任务 `Codex Quota Card Repair`。
@@ -24,9 +24,9 @@ python "$env:USERPROFILE\.codex\skills\.system\skill-installer\scripts\install-s
 
 ## 工作方式
 
-- 官方账户模式复用 Codex 原生额度组件；Weekly 数字表示剩余额度，黑色进度条表示已使用额度。
+- 官方账户模式复用 Codex 原生额度组件；方案 B 以“剩余大数字—竖向分隔—重置时间”排版，底部细线同样表示剩余额度。
 - 官方没有返回 5h 窗口时不显示 5h；未来恢复该窗口时保留完整原生组件并自动显示。
-- API 模式显示一张自定义卡，Daily 进度按 `daily_usage_usd / daily_limit_usd` 计算。
+- API 模式显示一张自定义卡，主数字和细线表示每日剩余额度。
 - 登录配置短暂不完整时通过文件系统事件等待恢复，不做每秒轮询，也不会永久退出。
 - Codex 更新、重启、调试端口变化或页面重载后，后台修复器会重新发现页面并注入控件。
 - 侧栏收起、账号行不存在时自动隐藏卡片，重新展开后恢复。

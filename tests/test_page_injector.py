@@ -43,24 +43,45 @@ class PageInjectorTests(unittest.TestCase):
         self.assertIn("remainingMatch", NATIVE_QUOTA_SCRIPT)
         self.assertIn("if (progresses.length !== 1", NATIVE_QUOTA_SCRIPT)
         self.assertIn("progress.value = 100 - remaining", NATIVE_QUOTA_SCRIPT)
-        self.assertIn("% used", NATIVE_QUOTA_SCRIPT)
+        self.assertIn("weeklyUsedAria", NATIVE_QUOTA_SCRIPT)
         self.assertIn("syncCompactProgress(card)", NATIVE_QUOTA_SCRIPT)
         self.assertIn("const used = Number(progress.value)", NATIVE_QUOTA_SCRIPT)
         self.assertIn('attributeFilter: ["value"]', NATIVE_QUOTA_SCRIPT)
         self.assertNotIn("client._setStatus", NATIVE_QUOTA_SCRIPT)
-        self.assertNotIn("font-family", NATIVE_QUOTA_SCRIPT)
+        self.assertIn('--cq-serif: "Noto Serif SC"', NATIVE_QUOTA_SCRIPT)
         self.assertIn("new MutationObserver", NATIVE_QUOTA_SCRIPT)
         self.assertIn("__codexQuotaOfficialCardObserver", NATIVE_QUOTA_SCRIPT)
         self.assertIn("__codexQuotaOfficialCardObserver?.disconnect()", NATIVE_QUOTA_SCRIPT)
         self.assertNotIn('addWindow("5h"', NATIVE_QUOTA_SCRIPT)
         self.assertNotIn("5h unavailable", NATIVE_QUOTA_SCRIPT)
 
+    def test_folio_layout_uses_one_percentage_source_and_theme_safe_tokens(self):
+        self.assertIn("#FCFAF4", NATIVE_QUOTA_SCRIPT)
+        self.assertIn("#B4552D", NATIVE_QUOTA_SCRIPT)
+        self.assertIn("html.electron-dark", NATIVE_QUOTA_SCRIPT)
+        self.assertIn("const used = 100 - remaining", NATIVE_QUOTA_SCRIPT)
+        self.assertIn('weeklyKicker: "每周"', NATIVE_QUOTA_SCRIPT)
+        self.assertIn('weeklyKicker: "WEEKLY"', NATIVE_QUOTA_SCRIPT)
+        self.assertIn('content.querySelector(".cq-number-value").textContent = text', NATIVE_QUOTA_SCRIPT)
+        self.assertIn('content.style.setProperty("--cq-remaining", `${remaining}%`)', NATIVE_QUOTA_SCRIPT)
+        self.assertIn('data-cq-layout="folio-v4"', NATIVE_QUOTA_SCRIPT)
+        self.assertIn("cq-divider", NATIVE_QUOTA_SCRIPT)
+        self.assertIn("cq-rule-marker", NATIVE_QUOTA_SCRIPT)
+        self.assertIn('@media (prefers-reduced-motion: reduce)', NATIVE_QUOTA_SCRIPT)
+        self.assertIn("style.textContent !== css", NATIVE_QUOTA_SCRIPT)
+        self.assertIn("legacyProgresses", NATIVE_QUOTA_SCRIPT)
+        self.assertIn('existing.querySelector(".cq-folio-note b")', NATIVE_QUOTA_SCRIPT)
+        self.assertNotIn("cq-scale", NATIVE_QUOTA_SCRIPT)
+        self.assertIn("linear-gradient(180deg", NATIVE_QUOTA_SCRIPT)
+        self.assertIn("linear-gradient(90deg", NATIVE_QUOTA_SCRIPT)
+        self.assertNotIn("backdrop-filter", NATIVE_QUOTA_SCRIPT)
+
     def test_official_five_hour_window_is_never_fabricated(self):
         self.assertIn("const progresses = [...card.querySelectorAll", NATIVE_QUOTA_SCRIPT)
         self.assertIn("preserve its complete native UI", NATIVE_QUOTA_SCRIPT)
         self.assertIn('label === "5h"', NATIVE_QUOTA_SCRIPT)
         self.assertIn('reset === "Unavailable"', NATIVE_QUOTA_SCRIPT)
-        self.assertIn("card.setAttribute(\"aria-label\", `Usage. Weekly", NATIVE_QUOTA_SCRIPT)
+        self.assertIn('card.setAttribute("aria-label", `${copy.weeklyTitle}', NATIVE_QUOTA_SCRIPT)
 
     def test_reinstall_replaces_the_previous_page_observer(self):
         self.assertGreaterEqual(
@@ -79,10 +100,12 @@ class PageInjectorTests(unittest.TestCase):
         self.assertNotIn("OPENAI_API_KEY", NATIVE_QUOTA_SCRIPT)
         self.assertNotIn("Authorization", NATIVE_QUOTA_SCRIPT)
 
-    def test_api_progress_represents_daily_used_amount(self):
+    def test_api_card_emphasizes_daily_remaining_amount(self):
         self.assertIn("(data.used / data.total) * 100", NATIVE_QUOTA_SCRIPT)
-        self.assertIn('aria-label", "API daily usage"', NATIVE_QUOTA_SCRIPT)
-        self.assertNotIn('aria-label", "API remaining quota"', NATIVE_QUOTA_SCRIPT)
+        self.assertIn("const remainingPercent = 100 - usedPercent", NATIVE_QUOTA_SCRIPT)
+        self.assertIn('apiRemainingAria: "API 每日剩余"', NATIVE_QUOTA_SCRIPT)
+        self.assertIn('apiRemainingAria: "API daily remaining"', NATIVE_QUOTA_SCRIPT)
+        self.assertIn("copy.remainingAvailable", NATIVE_QUOTA_SCRIPT)
 
     def test_api_refresh_is_focus_driven_and_rate_limited(self):
         self.assertIn("const staleAfterMs = 5 * 60 * 1000", NATIVE_QUOTA_SCRIPT)
@@ -103,6 +126,7 @@ class PageInjectorTests(unittest.TestCase):
         self.assertIn("codexQuotaSidebarHidden", NATIVE_QUOTA_SCRIPT)
         self.assertIn("card.hidden = true", NATIVE_QUOTA_SCRIPT)
         self.assertIn("card.hidden = false", NATIVE_QUOTA_SCRIPT)
+        self.assertIn("host.hidden = false", NATIVE_QUOTA_SCRIPT)
         self.assertIn("if (!bar)", NATIVE_QUOTA_SCRIPT)
         self.assertIn("const card = nativeQuotaCard()", NATIVE_QUOTA_SCRIPT)
 
