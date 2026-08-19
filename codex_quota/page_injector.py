@@ -370,12 +370,15 @@ def card_present(port: int, target: dict[str, Any] | None = None) -> bool:
             connection,
             """Boolean(
               document.getElementById('codex-api-usage-host') ||
-              [...document.querySelectorAll("[role='status']")].some((card) =>
+              [...document.querySelectorAll("[role='status']")].filter((card) =>
                 card instanceof HTMLElement &&
                 card.offsetParent !== null &&
                 card.classList.contains("rounded-2xl") &&
-                card.classList.contains("border") &&
-                card.classList.contains("bg-token-main-surface-primary"))
+                Boolean(card.querySelector("progress[max='100']")) &&
+                ((card.classList.contains("border") &&
+                  card.classList.contains("bg-token-main-surface-primary")) ||
+                 (card.classList.contains("ring-border") &&
+                  card.classList.contains("bg-surface/80")))).length === 1
             )""",
             1,
         )
