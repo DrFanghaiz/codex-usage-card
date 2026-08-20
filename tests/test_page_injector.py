@@ -59,7 +59,7 @@ class PageInjectorTests(unittest.TestCase):
         self.assertNotIn('addWindow("5h"', NATIVE_QUOTA_SCRIPT)
         self.assertNotIn("5h unavailable", NATIVE_QUOTA_SCRIPT)
 
-    def test_folio_layout_uses_one_percentage_source_and_theme_safe_tokens(self):
+    def test_thread_layout_uses_one_percentage_source_and_theme_safe_tokens(self):
         self.assertIn("--cq-surface: var(--color-background-elevated-secondary", NATIVE_QUOTA_SCRIPT)
         self.assertIn("--cq-border: var(--color-token-border-default", NATIVE_QUOTA_SCRIPT)
         self.assertIn("--cq-accent: var(--codex-base-accent", NATIVE_QUOTA_SCRIPT)
@@ -70,12 +70,23 @@ class PageInjectorTests(unittest.TestCase):
         self.assertIn("const used = 100 - remaining", NATIVE_QUOTA_SCRIPT)
         self.assertIn('weeklyKicker: "每周"', NATIVE_QUOTA_SCRIPT)
         self.assertIn('weeklyKicker: "Weekly"', NATIVE_QUOTA_SCRIPT)
-        self.assertIn('content.querySelector(".cq-number-value").textContent = text', NATIVE_QUOTA_SCRIPT)
-        self.assertIn('content.style.setProperty("--cq-remaining", `${remaining}%`)', NATIVE_QUOTA_SCRIPT)
-        self.assertIn('data-cq-layout="folio-v5"', NATIVE_QUOTA_SCRIPT)
+        self.assertIn('content.querySelector(".cq-number-value").textContent = usedText', NATIVE_QUOTA_SCRIPT)
+        self.assertIn('content.querySelector(".cq-remaining-value").textContent = `${remainingText}%`', NATIVE_QUOTA_SCRIPT)
+        self.assertIn('content.style.setProperty("--cq-used", `${used}%`)', NATIVE_QUOTA_SCRIPT)
+        self.assertIn('data-cq-layout="thread-v1"', NATIVE_QUOTA_SCRIPT)
         self.assertIn('replace(/^.*下次重置时间为\\s*/', NATIVE_QUOTA_SCRIPT)
-        self.assertIn("if (detail && detail.textContent !== reset)", NATIVE_QUOTA_SCRIPT)
-        self.assertIn("cq-divider", NATIVE_QUOTA_SCRIPT)
+        self.assertIn("cq-thread-meta", NATIVE_QUOTA_SCRIPT)
+        self.assertIn("cq-thread-separator", NATIVE_QUOTA_SCRIPT)
+        self.assertIn("font-size: 22px; font-weight: 600", NATIVE_QUOTA_SCRIPT)
+        self.assertIn("height: 1px; margin-top: 9px", NATIVE_QUOTA_SCRIPT)
+        self.assertIn("background: transparent !important", NATIVE_QUOTA_SCRIPT)
+        self.assertIn("box-shadow: none !important", NATIVE_QUOTA_SCRIPT)
+        self.assertIn("width: calc(100% - 16px) !important", NATIVE_QUOTA_SCRIPT)
+        self.assertIn("margin: 0 8px 8px !important", NATIVE_QUOTA_SCRIPT)
+        self.assertIn("padding: 8px 10px 7px !important", NATIVE_QUOTA_SCRIPT)
+        self.assertIn("border: 1px solid var(--cq-border) !important", NATIVE_QUOTA_SCRIPT)
+        self.assertIn("border-radius: 10px !important", NATIVE_QUOTA_SCRIPT)
+        self.assertIn("background: var(--cq-surface) !important", NATIVE_QUOTA_SCRIPT)
         self.assertNotIn("cq-rule-marker", NATIVE_QUOTA_SCRIPT)
         self.assertIn('@media (prefers-reduced-motion: reduce)', NATIVE_QUOTA_SCRIPT)
         self.assertIn("style.textContent !== css", NATIVE_QUOTA_SCRIPT)
@@ -84,6 +95,7 @@ class PageInjectorTests(unittest.TestCase):
         self.assertNotIn("cq-scale", NATIVE_QUOTA_SCRIPT)
         self.assertNotIn("linear-gradient", NATIVE_QUOTA_SCRIPT)
         self.assertNotIn("backdrop-filter", NATIVE_QUOTA_SCRIPT)
+        self.assertNotIn("#8E4617", NATIVE_QUOTA_SCRIPT)
 
     def test_official_five_hour_window_is_never_fabricated(self):
         self.assertIn("const progresses = [...card.querySelectorAll", NATIVE_QUOTA_SCRIPT)
@@ -108,6 +120,17 @@ class PageInjectorTests(unittest.TestCase):
         self.assertIn("Number(value).toFixed(2)", NATIVE_QUOTA_SCRIPT)
         self.assertNotIn("OPENAI_API_KEY", NATIVE_QUOTA_SCRIPT)
         self.assertNotIn("Authorization", NATIVE_QUOTA_SCRIPT)
+
+    def test_official_fallback_uses_helper_payload_without_page_credentials(self):
+        self.assertIn('const officialHostId = "codex-official-usage-host"', NATIVE_QUOTA_SCRIPT)
+        self.assertIn("__codexQuotaUpdateOfficial", NATIVE_QUOTA_SCRIPT)
+        self.assertIn("__codexQuotaOfficialRequest__", NATIVE_QUOTA_SCRIPT)
+        self.assertIn("requestOfficialData", NATIVE_QUOTA_SCRIPT)
+        self.assertIn("renderOfficial", NATIVE_QUOTA_SCRIPT)
+        self.assertIn('windows.length === 1 && windows[0].label === "Weekly"', NATIVE_QUOTA_SCRIPT)
+        self.assertIn("removeOfficialCard()", NATIVE_QUOTA_SCRIPT)
+        self.assertNotIn("access_token", NATIVE_QUOTA_SCRIPT)
+        self.assertNotIn("account_id", NATIVE_QUOTA_SCRIPT)
 
     def test_api_card_emphasizes_daily_remaining_amount(self):
         self.assertIn("(data.used / data.total) * 100", NATIVE_QUOTA_SCRIPT)
@@ -146,6 +169,8 @@ class PageInjectorTests(unittest.TestCase):
             self.assertTrue(card_present(9222, {"webSocketDebuggerUrl": "ws://test"}))
         expression = evaluate.call_args.args[1]
         self.assertIn("codex-api-usage-host", expression)
+        self.assertIn("codex-official-usage-host", expression)
+        self.assertIn('data-cq-layout="thread-v1"', expression)
         self.assertIn("bg-token-main-surface-primary", expression)
         self.assertIn("ring-border", expression)
         self.assertIn("bg-surface/80", expression)

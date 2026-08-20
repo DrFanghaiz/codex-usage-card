@@ -23,6 +23,15 @@ class NativeHelperTests(unittest.TestCase):
         self.assertIn("Win32_ProcessStartTrace", NATIVE_SOURCE)
         self.assertIn("if (IsCodexRunning()) return", NATIVE_SOURCE)
 
+    def test_official_usage_is_fetched_by_the_helper_and_only_payload_enters_the_page(self):
+        self.assertIn("https://chatgpt.com/backend-api/wham/usage", NATIVE_SOURCE)
+        self.assertIn('request.Headers["ChatGPT-Account-ID"]', NATIVE_SOURCE)
+        self.assertIn("__codexQuotaOfficialRequest__", NATIVE_SOURCE)
+        self.assertIn("__codexQuotaUpdateOfficial", NATIVE_SOURCE)
+        self.assertIn('"usedPercent"', NATIVE_SOURCE)
+        self.assertIn('"resetAt"', NATIVE_SOURCE)
+        self.assertNotIn("Console.WriteLine", NATIVE_SOURCE)
+
     def test_scheduled_task_uses_the_current_project_helper(self):
         self.assertIn("Split-Path -Parent $PSScriptRoot", REGISTER_SCRIPT)
         self.assertIn("Codex Usage Card", REGISTER_SCRIPT)

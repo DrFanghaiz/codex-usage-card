@@ -60,8 +60,11 @@ internal static class CodexNativeQuotaPatch
                     using (var loginWatcher = WatchLoginConfiguration(socket, api, official))
                     {
                         InstallForCurrentAndFuturePages(socket, official ? "account" : "api");
-                        if (ApiDataRequested(socket)) PublishApiPayload(socket, api);
-                        KeepSessionOpen(socket, api);
+                        if (official && PageDataRequested(socket, "__codexQuotaOfficialNeedsData"))
+                            PublishOfficialPayload(socket);
+                        if (!official && PageDataRequested(socket, "__codexQuotaApiNeedsData"))
+                            PublishApiPayload(socket, api);
+                        KeepSessionOpen(socket, api, official);
                     }
                 }
             }
@@ -199,22 +202,51 @@ internal static class CodexNativeQuotaPatch
             String.Equals(left.ApiKey, right.ApiKey, StringComparison.Ordinal);
     }
 
-    private static void KeepSessionOpen(CdpSocket socket, ApiConfiguration api)
+    private static void KeepSessionOpen(CdpSocket socket, ApiConfiguration api, bool official)
     {
         while (true)
         {
             // Page events are consumed so they cannot build up in the local socket buffer.
             var message = socket.ReceiveText();
-            if (message.IndexOf("__codexQuotaApiRequest__", StringComparison.Ordinal) >= 0)
+            if (official && message.IndexOf("__codexQuotaOfficialRequest__", StringComparison.Ordinal) >= 0)
+                PublishOfficialPayload(socket);
+            else if (!official && message.IndexOf("__codexQuotaApiRequest__", StringComparison.Ordinal) >= 0)
                 PublishApiPayload(socket, api);
         }
     }
 
-    private static bool ApiDataRequested(CdpSocket socket)
+    private static bool PageDataRequested(CdpSocket socket, string name)
     {
-        var result = Evaluate(socket, "globalThis.__codexQuotaApiNeedsData === true");
+        var result = Evaluate(socket, "globalThis[" + Json.Serialize(name) + "] === true");
         var value = result.ContainsKey("result") ? result["result"] as Dictionary<string, object> : null;
         return value != null && value.ContainsKey("value") && value["value"] is bool && (bool)value["value"];
+    }
+
+    private static void PublishOfficialPayload(CdpSocket socket)
+    {
+        Dictionary<string, object> payload;
+        try
+        {
+            var official = LoadOfficialConfiguration();
+            if (official == null) throw new InvalidOperationException();
+            payload = FetchOfficialPayload(official);
+        }
+        catch (WebException exception)
+        {
+            payload = new Dictionary<string, object> { { "error", "Official usage network request failed" } };
+            var response = exception.Response as HttpWebResponse;
+            if (response != null && (int)response.StatusCode == 429)
+            {
+                int retryAfter;
+                if (Int32.TryParse(response.Headers["Retry-After"], out retryAfter) && retryAfter > 0)
+                    payload["retryAfterSeconds"] = retryAfter;
+            }
+        }
+        catch
+        {
+            payload = new Dictionary<string, object> { { "error", "Official usage response is invalid" } };
+        }
+        Evaluate(socket, "globalThis.__codexQuotaUpdateOfficial(" + Json.Serialize(payload) + ")");
     }
 
     private static void PublishApiPayload(CdpSocket socket, ApiConfiguration api)
@@ -278,12 +310,24 @@ internal static class CodexNativeQuotaPatch
 
     private static bool HasOfficialAccount()
     {
+        return LoadOfficialConfiguration() != null;
+    }
+
+    private static OfficialConfiguration LoadOfficialConfiguration()
+    {
         var path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".codex", "auth.json");
-        if (!File.Exists(path)) return false;
+        if (!File.Exists(path)) return null;
         var auth = Json.DeserializeObject(File.ReadAllText(path, Encoding.UTF8)) as Dictionary<string, object>;
         var tokens = auth != null && auth.ContainsKey("tokens") ? auth["tokens"] as Dictionary<string, object> : null;
-        return tokens != null && !String.IsNullOrWhiteSpace(StringValue(tokens, "access_token")) &&
-            !String.IsNullOrWhiteSpace(StringValue(tokens, "account_id"));
+        var accessToken = tokens == null ? "" : StringValue(tokens, "access_token");
+        var accountId = tokens == null ? "" : StringValue(tokens, "account_id");
+        if (String.IsNullOrWhiteSpace(accessToken) || String.IsNullOrWhiteSpace(accountId)) return null;
+        return new OfficialConfiguration
+        {
+            Url = "https://chatgpt.com/backend-api/wham/usage",
+            AccessToken = accessToken,
+            AccountId = accountId,
+        };
     }
 
     private static Dictionary<string, object> FetchApiPayload(ApiConfiguration api)
@@ -326,6 +370,62 @@ internal static class CodexNativeQuotaPatch
         };
     }
 
+    private static Dictionary<string, object> FetchOfficialPayload(OfficialConfiguration official)
+    {
+        var request = (HttpWebRequest)WebRequest.Create(official.Url);
+        request.Method = "GET";
+        request.Proxy = ApiProxy();
+        request.Timeout = 10000;
+        request.ReadWriteTimeout = 10000;
+        request.Accept = "application/json";
+        request.Headers[HttpRequestHeader.Authorization] = "Bearer " + official.AccessToken;
+        request.Headers["ChatGPT-Account-ID"] = official.AccountId;
+        Dictionary<string, object> response;
+        using (var http = (HttpWebResponse)request.GetResponse())
+        using (var reader = new StreamReader(http.GetResponseStream()))
+            response = Json.DeserializeObject(reader.ReadToEnd()) as Dictionary<string, object>;
+        var planName = response == null ? "" : StringValue(response, "plan_type");
+        var rateLimit = response != null && response.ContainsKey("rate_limit")
+            ? response["rate_limit"] as Dictionary<string, object>
+            : null;
+        bool allowed, limitReached;
+        if (String.IsNullOrWhiteSpace(planName) || rateLimit == null ||
+            !BooleanValue(rateLimit, "allowed", out allowed) ||
+            !BooleanValue(rateLimit, "limit_reached", out limitReached))
+            throw new InvalidOperationException();
+        var windows = new List<object>();
+        var primary = OfficialWindowPayload(rateLimit, "primary_window", true);
+        var secondary = OfficialWindowPayload(rateLimit, "secondary_window", false);
+        if (primary != null) windows.Add(primary);
+        if (secondary != null) windows.Add(secondary);
+        return new Dictionary<string, object> { { "planName", planName }, { "windows", windows } };
+    }
+
+    private static Dictionary<string, object> OfficialWindowPayload(
+        Dictionary<string, object> rateLimit,
+        string name,
+        bool required)
+    {
+        var window = rateLimit.ContainsKey(name) ? rateLimit[name] as Dictionary<string, object> : null;
+        if (window == null)
+        {
+            if (required) throw new InvalidOperationException();
+            return null;
+        }
+        double used, seconds, resetAt;
+        if (!NumberValue(window, "used_percent", out used) || used < 0 || used > 100 ||
+            !NumberValue(window, "limit_window_seconds", out seconds) || seconds <= 0 ||
+            !NumberValue(window, "reset_at", out resetAt) || resetAt < 0)
+            throw new InvalidOperationException();
+        var label = Math.Abs(seconds - 18000) < 0.5
+            ? "5h"
+            : Math.Abs(seconds - 604800) < 0.5 ? "Weekly" : (seconds / 60).ToString("0") + " min";
+        return new Dictionary<string, object>
+        {
+            { "label", label }, { "usedPercent", used }, { "resetAt", resetAt }
+        };
+    }
+
     private static IWebProxy ApiProxy()
     {
         var value = Environment.GetEnvironmentVariable("HTTPS_PROXY");
@@ -359,6 +459,14 @@ internal static class CodexNativeQuotaPatch
     private static bool BooleanValue(Dictionary<string, object> values, string key)
     {
         return values.ContainsKey(key) && values[key] is bool && (bool)values[key];
+    }
+
+    private static bool BooleanValue(Dictionary<string, object> values, string key, out bool value)
+    {
+        value = false;
+        if (!values.ContainsKey(key) || !(values[key] is bool)) return false;
+        value = (bool)values[key];
+        return true;
     }
 
     private static bool IsCodexRunning()
@@ -541,6 +649,13 @@ internal static class CodexNativeQuotaPatch
     {
         public string Url;
         public string ApiKey;
+    }
+
+    private sealed class OfficialConfiguration
+    {
+        public string Url;
+        public string AccessToken;
+        public string AccountId;
     }
 
     // A small CDP WebSocket client avoids the .NET Framework ClientWebSocket
