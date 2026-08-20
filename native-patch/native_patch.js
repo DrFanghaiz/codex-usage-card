@@ -31,14 +31,14 @@
       }
     : {
         weeklyTitle: "Weekly usage",
-        weeklyKicker: "WEEKLY",
+        weeklyKicker: "Weekly",
         remainingAvailable: "Remaining",
         used: "Used",
         weeklyRemainingAria: "Weekly remaining",
         weeklyUsedAria: "Weekly used",
         resetUnavailable: "Reset unavailable",
         apiTitle: "API usage",
-        dailyKicker: "DAILY",
+        dailyKicker: "Daily",
         apiRemainingAria: "API daily remaining",
         plan: "Plan",
         daily: "Daily",
@@ -57,58 +57,40 @@
     const style = document.getElementById(styleId) || document.createElement("style");
     const css = `
       .${compactClass}, .${apiCardClass} {
-        --cq-paper-top: #FCFAF4;
-        --cq-paper-bottom: #F8F3EA;
-        --cq-border: #E3DACA;
-        --cq-track: #EAE2D0;
-        --cq-ink: #1C1917;
-        --cq-muted: #74695C;
-        --cq-weak: #756A59;
-        --cq-muted-strong: #6B6152;
-        --cq-accent: #B4552D;
-        --cq-accent-start: #C96A3B;
-        --cq-serif: "Noto Serif SC", "Songti SC", Georgia, serif;
-        --cq-sans: "Inter", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+        --cq-surface: var(--color-background-elevated-secondary, var(--color-token-main-surface-primary));
+        --cq-border: var(--color-token-border-default, currentColor);
+        --cq-track: var(--color-background-primary-soft-active, var(--color-background-primary-soft-alpha));
+        --cq-ink: var(--vscode-foreground, currentColor);
+        --cq-muted: var(--color-text-secondary-solid, var(--cq-ink));
+        --cq-accent: var(--codex-base-accent, var(--cq-ink));
+        --cq-sans: var(--default-font-family, inherit);
         box-sizing: border-box !important;
         min-height: 0 !important;
         padding: 8px 12px !important;
         overflow: hidden;
-        border-color: var(--cq-border) !important;
+        border: 0 !important;
         border-radius: 12px !important;
-        background: linear-gradient(180deg, var(--cq-paper-top) 0%, var(--cq-paper-bottom) 100%) !important;
-        box-shadow: none !important;
+        outline: .5px solid var(--cq-border);
+        outline-offset: -.5px;
+        background: var(--cq-surface) !important;
+        box-shadow: var(--shadow-sm, none) !important;
         color: var(--cq-ink) !important;
         font-family: var(--cq-sans) !important;
-      }
-      html.electron-dark .${compactClass}, html.electron-dark .${apiCardClass},
-      html.dark .${compactClass}, html.dark .${apiCardClass} {
-        --cq-paper-top: #211E1A;
-        --cq-paper-bottom: #1C1916;
-        --cq-border: #4A4034;
-        --cq-track: #40372E;
-        --cq-ink: #F4EEE3;
-        --cq-muted: #B8AA96;
-        --cq-weak: #A99B87;
-        --cq-muted-strong: #D0C4B1;
-        --cq-accent: #D9784C;
-        --cq-accent-start: #E08A61;
       }
       .${compactContentClass} { display: grid; min-width: 0; }
       .${compactContentClass} .cq-folio-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
       .${compactContentClass} .cq-head-end { display: flex; align-items: baseline; gap: 8px; }
-      .${compactContentClass} .cq-title { font-family: var(--cq-serif); font-size: 13px; font-weight: 600; line-height: 16px; letter-spacing: .04em; }
-      .${compactContentClass} .cq-kicker { flex: none; color: var(--cq-weak); font-size: 9px; font-weight: 500; line-height: 12px; letter-spacing: .16em; }
-      .${compactContentClass} .cq-folio-main { display: flex; align-items: stretch; justify-content: flex-start; gap: 10px; min-width: 0; margin: 4px 0; }
-      .${compactContentClass} .cq-number { display: flex; flex: none; align-self: center; align-items: baseline; font-family: var(--cq-serif); font-variant-numeric: tabular-nums; line-height: 1; }
-      .${compactContentClass} .cq-number-value { font-size: 32px; font-weight: 600; letter-spacing: -.02em; }
-      .${compactContentClass} .cq-number-unit { margin-left: 1px; color: var(--cq-accent); font-size: 14px; font-weight: 600; }
+      .${compactContentClass} .cq-title { font-size: 12px; font-weight: 600; line-height: 16px; letter-spacing: 0; }
+      .${compactContentClass} .cq-kicker { flex: none; color: var(--cq-muted); font-size: 10px; font-weight: 500; line-height: 14px; letter-spacing: 0; }
+      .${compactContentClass} .cq-folio-main { display: flex; align-items: stretch; justify-content: flex-start; gap: 10px; min-width: 0; margin: 3px 0 4px; }
+      .${compactContentClass} .cq-number { display: flex; flex: none; align-self: center; align-items: baseline; font-variant-numeric: tabular-nums; line-height: 1; }
+      .${compactContentClass} .cq-number-value { font-size: 30px; font-weight: 500; letter-spacing: -.02em; }
+      .${compactContentClass} .cq-number-unit { margin-left: 2px; color: var(--cq-accent); font-size: 12px; font-weight: 500; }
       .${compactContentClass} .cq-divider { flex: none; width: 1px; margin: 2px 0; background: var(--cq-border); }
-      .${compactContentClass} .cq-folio-note { position: relative; min-width: 0; align-self: center; padding-left: 10px; color: var(--cq-muted); font-size: 10px; line-height: 14px; text-align: left; text-wrap: pretty; }
-      .${compactContentClass} .cq-folio-note::before { position: absolute; top: 5px; left: 0; width: 4px; height: 4px; background: var(--cq-accent); content: ""; opacity: .75; transform: rotate(45deg); }
-      .${compactContentClass} .cq-folio-note b { display: block; overflow-wrap: anywhere; color: var(--cq-muted-strong); font-weight: 500; }
-      .${compactContentClass} .cq-rule { position: relative; height: 2px; border-radius: 2px; background: var(--cq-track); }
-      .${compactContentClass} .cq-rule::before { position: absolute; inset: 0 auto 0 0; width: var(--cq-remaining, 0%); border-radius: 2px; background: linear-gradient(90deg, var(--cq-accent-start), var(--cq-accent)); content: ""; transition: width .6s cubic-bezier(.22,.9,.3,1); }
-      .${compactContentClass} .cq-rule-marker { position: absolute; top: 50%; left: calc(var(--cq-remaining, 0%) - 2.5px); width: 5px; height: 5px; background: var(--cq-accent); transform: translateY(-50%) rotate(45deg); transition: left .6s cubic-bezier(.22,.9,.3,1); }
+      .${compactContentClass} .cq-folio-note { min-width: 0; align-self: center; color: var(--cq-muted); font-size: 11px; line-height: 14px; text-align: left; text-wrap: pretty; }
+      .${compactContentClass} .cq-folio-note b { display: block; overflow-wrap: anywhere; color: var(--cq-ink); font-weight: 500; }
+      .${compactContentClass} .cq-rule { position: relative; height: 3px; border-radius: 999px; background: var(--cq-track); }
+      .${compactContentClass} .cq-rule::before { position: absolute; inset: 0 auto 0 0; width: var(--cq-remaining, 0%); border-radius: inherit; background: var(--cq-accent); content: ""; transition: width .25s cubic-bezier(.16,1,.3,1); }
       .${compactContentClass} .cq-status { margin-top: 8px; color: var(--cq-muted); font-size: 10px; line-height: 16px; }
       .${compactContentClass} .cq-source-progress { display: none !important; }
       .${compactContentClass}.cq-compact-fallback { gap: 8px; }
@@ -125,7 +107,7 @@
       .${compactContentClass} .cq-refresh:focus-visible { border-radius: 4px; outline: 2px solid var(--cq-accent); outline-offset: 1px; }
       .${compactContentClass} .cq-refresh:disabled { cursor: wait; opacity: .65; }
       @media (prefers-reduced-motion: reduce) {
-        .${compactContentClass} .cq-rule::before, .${compactContentClass} .cq-rule-marker { transition: none !important; }
+        .${compactContentClass} .cq-rule::before { transition: none !important; }
       }
     `;
     if (style.textContent !== css) style.textContent = css;
@@ -136,7 +118,8 @@
   };
 
   const resetElement = (card) => [...card.querySelectorAll("div")].find((element) =>
-    element.classList.contains("text-sm") && element.classList.contains("text-token-text-secondary"));
+    (element.classList.contains("text-sm") && element.classList.contains("text-token-text-secondary")) ||
+    (element.classList.contains("text-xs") && element.classList.contains("text-secondary")));
 
   const resetValue = (card) => {
     const reset = resetElement(card);
@@ -162,7 +145,7 @@
   const createFolioContent = ({title, kicker, note, detail, action = null}) => {
     const content = document.createElement("div");
     content.className = compactContentClass;
-    content.dataset.cqLayout = "folio-v4";
+    content.dataset.cqLayout = "folio-v5";
     content.innerHTML = `
       <div class="cq-folio-head">
         <span class="cq-title"></span>
@@ -173,7 +156,7 @@
         <div class="cq-divider" aria-hidden="true"></div>
         <div class="cq-folio-note"><span></span><b></b></div>
       </div>
-      <div class="cq-rule" role="progressbar" aria-valuemin="0" aria-valuemax="100"><span class="cq-rule-marker" aria-hidden="true"></span></div>`;
+      <div class="cq-rule" role="progressbar" aria-valuemin="0" aria-valuemax="100"></div>`;
     content.querySelector(".cq-title").textContent = title;
     content.querySelector(".cq-kicker").textContent = kicker;
     content.querySelector(".cq-folio-note span").textContent = note;
@@ -195,7 +178,7 @@
   const resetText = (value) => {
     if (value === "Unavailable") return copy.resetUnavailable;
     if (!isChinese) return value;
-    const time = value.replace(/^下次重置时间为\s*/, "").replace(/\s*重置$/, "");
+    const time = value.replace(/^.*下次重置时间为\s*/, "").replace(/\s*重置$/, "");
     return `${time} 重置`;
   };
 
@@ -228,7 +211,7 @@
         window.remove();
       }
     }
-    const content = card.querySelector(`.${compactContentClass}[data-cq-layout="folio-v4"]`);
+    const content = card.querySelector(`.${compactContentClass}[data-cq-layout="folio-v5"]`);
     const progress = content?.querySelector("progress.cq-source-progress");
     if (!progress) return;
     const used = Number(progress.value);
@@ -236,13 +219,15 @@
     const remaining = 100 - used;
     if (content.dataset.cqRemaining !== formatPercent(remaining)) setFolioRemaining(content, remaining);
     progress.setAttribute("aria-label", `${copy.weeklyUsedAria} ${formatPercent(used)}%`);
-    const reset = (content.querySelector(".cq-folio-note b")?.textContent || "").trim();
+    const detail = content.querySelector(".cq-folio-note b");
+    const reset = resetText((detail?.textContent || "").trim());
+    if (detail && detail.textContent !== reset) detail.textContent = reset;
     card.setAttribute("aria-label", `${copy.weeklyTitle}. ${copy.remainingAvailable} ${formatPercent(remaining)}%. ${reset}`);
   };
 
   const compactCard = (card) => {
     const existing = card.querySelector(`.${compactContentClass}`);
-    if (existing?.dataset.cqLayout === "folio-v4") {
+    if (existing?.dataset.cqLayout === "folio-v5") {
       syncCompactProgress(card);
       return;
     }
@@ -266,7 +251,7 @@
     if (progresses.length !== 1 || !resetElement(card)) return;
     const progress = progresses[0];
     const remainingElement = [...card.querySelectorAll("span")].find((element) =>
-      element.classList.contains("text-base") && element.classList.contains("font-medium"));
+      element.classList.contains("font-medium") && /(\d+(?:\.\d+)?)\s*%/.test(element.textContent || ""));
     const remainingMatch = (remainingElement?.textContent || "").match(/(\d+(?:\.\d+)?)\s*%/);
     if (!remainingMatch) return;
     const remaining = Number(remainingMatch[1]);
@@ -411,9 +396,14 @@
     if (Date.now() - lastSuccessAt >= staleAfterMs) requestApiData(false);
   };
 
-  const nativeQuotaCard = () => [...document.querySelectorAll("[role='status']")].find((card) =>
-    card.classList.contains("rounded-2xl") && card.classList.contains("border") &&
-    card.classList.contains("bg-token-main-surface-primary")) || null;
+  const nativeQuotaCard = () => {
+    const cards = [...document.querySelectorAll("[role='status']")].filter((card) =>
+      card instanceof HTMLElement && card.classList.contains("rounded-2xl") &&
+      Boolean(card.querySelector("progress[max='100']")) &&
+      ((card.classList.contains("border") && card.classList.contains("bg-token-main-surface-primary")) ||
+       (card.classList.contains("ring-border") && card.classList.contains("bg-surface/80"))));
+    return cards.length === 1 ? cards[0] : null;
+  };
 
   globalThis.__codexQuotaUpdateApi = (data) => {
     globalThis.__codexQuotaApiNeedsData = false;
