@@ -9,7 +9,7 @@ Codex Usage Card 在 Codex 桌面端侧栏账号行上方显示用量与剩余�
 在 PowerShell 7 中运行：
 
 ```powershell
-$installer = Join-Path $env:TEMP 'install-codex-usage-card.ps1'; Invoke-WebRequest 'https://raw.githubusercontent.com/DrFanghaiz/codex-usage-card/v1.4.0/install.ps1' -OutFile $installer; Unblock-File -LiteralPath $installer; & $installer
+$installer = Join-Path $env:TEMP 'install-codex-usage-card.ps1'; Invoke-WebRequest 'https://raw.githubusercontent.com/DrFanghaiz/codex-usage-card/v1.4.1/install.ps1' -OutFile $installer; Unblock-File -LiteralPath $installer; & $installer
 ```
 
 安装器会校验发布包的 SHA-256，把 Skill 安装到 `$CODEX_HOME\skills`（未设置时为 `$env:USERPROFILE\.codex\skills`），把无窗口修复器部署到 `$env:LOCALAPPDATA\CodexUsageCard`，并注册当前用户的计划任务 `Codex Usage Card`。从旧版升级时，只迁移路径与动作完全匹配的旧任务。
@@ -24,7 +24,7 @@ python "$env:USERPROFILE\.codex\skills\.system\skill-installer\scripts\install-s
 
 ## 工作方式
 
-- 官方账户模式优先复用 Codex 原生额度组件；原生卡缺失时由无窗口修复器获取真实官方额度窗口并渲染同款 Thread。Weekly 以“已用百分比—剩余与重置元信息—1px 进度线”排版，使用轻量主题边界与 surface 和侧栏内容分区，无阴影、渐变或动效。
+- 官方账户模式优先复用 Codex 原生额度组件；原生卡缺失时由无窗口修复器获取真实官方额度窗口并渲染同款 Thread。Weekly 左侧显示标题与已用百分比，右侧三行显示周期、剩余比例和基于官方 `reset_at` 计算的 `d / h` 自然重置倒计时；底部保留 1px 进度线，并使用轻量主题边界与 surface 和侧栏内容分区，无阴影、渐变或动效。
 - 官方没有返回 5h 窗口时不显示 5h；未来恢复该窗口时保留完整原生组件并自动显示。
 - API 模式显示一张自定义卡，主数字和细线表示每日剩余额度。
 - 登录配置短暂不完整时通过文件系统事件等待恢复，不做每秒轮询，也不会永久退出。

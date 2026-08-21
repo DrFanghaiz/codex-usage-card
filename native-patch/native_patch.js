@@ -16,6 +16,8 @@
         remainingAvailable: "剩余可用",
         remainingSuffix: "可用",
         resetSuffix: "重置",
+        resetAtPrefix: "重置时间",
+        resetCountdownPrefix: "距离自然重置",
         used: "已用",
         weeklyUsedAria: "每周已用",
         resetUnavailable: "重置时间不可用",
@@ -40,6 +42,8 @@
         remainingAvailable: "Remaining",
         remainingSuffix: "available",
         resetSuffix: "reset",
+        resetAtPrefix: "Reset at",
+        resetCountdownPrefix: "Until reset",
         used: "Used",
         weeklyUsedAria: "Weekly used",
         resetUnavailable: "Reset unavailable",
@@ -91,7 +95,7 @@
       #${officialHostId} {
         width: calc(100% - 16px) !important;
         margin: 0 8px 8px !important;
-        padding: 8px 10px 7px !important;
+        padding: 9px 10px 8px !important;
         border: 1px solid var(--cq-border) !important;
         border-radius: 10px !important;
         background: var(--cq-surface) !important;
@@ -107,17 +111,18 @@
         box-shadow: var(--shadow-sm, none) !important;
       }
       .${compactContentClass} { display: grid; min-width: 0; }
-      .${compactContentClass} .cq-thread-head { display: flex; align-items: baseline; justify-content: space-between; }
-      .${compactContentClass} .cq-thread-head .cq-title { font-size: 11.5px; font-weight: 500; line-height: 14px; letter-spacing: .02em; }
-      .${compactContentClass} .cq-thread-head .cq-kicker { color: var(--cq-faint); font-size: 8.5px; font-weight: 500; line-height: 12px; letter-spacing: .22em; }
-      .${compactContentClass} .cq-thread-row { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; min-width: 0; margin-top: 6px; }
-      .${compactContentClass} .cq-thread-row .cq-number { display: flex; flex: none; align-items: baseline; font-variant-numeric: tabular-nums; line-height: 1; }
-      .${compactContentClass} .cq-thread-row .cq-number-value { font-size: 22px; font-weight: 600; letter-spacing: -.01em; }
-      .${compactContentClass} .cq-thread-row .cq-number-unit { margin-left: 1px; color: var(--cq-muted); font-size: 11.5px; font-weight: 500; }
-      .${compactContentClass} .cq-thread-meta { min-width: 0; color: var(--cq-faint); font-size: 9.5px; line-height: 12px; white-space: nowrap; font-variant-numeric: tabular-nums; }
-      .${compactContentClass} .cq-thread-meta b { color: var(--cq-ink); font-weight: 600; }
-      .${compactContentClass} .cq-thread-separator { margin: 0 5px; color: var(--cq-border); font-style: normal; }
-      .${compactContentClass} .cq-thread-rule { position: relative; height: 1px; margin-top: 9px; background: var(--cq-track); }
+      .${compactContentClass} .cq-thread-main { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: start; column-gap: 12px; min-width: 0; }
+      .${compactContentClass} .cq-thread-primary { display: flex; flex-direction: column; gap: 7px; }
+      .${compactContentClass} .cq-thread-primary .cq-title { font-size: 11.5px; font-weight: 500; line-height: 14px; letter-spacing: .02em; }
+      .${compactContentClass} .cq-thread-primary .cq-number { display: flex; align-items: baseline; font-variant-numeric: tabular-nums; line-height: 1; }
+      .${compactContentClass} .cq-thread-primary .cq-number-value { font-size: 22px; font-weight: 600; letter-spacing: -.01em; }
+      .${compactContentClass} .cq-thread-primary .cq-number-unit { margin-left: 1px; color: var(--cq-muted); font-size: 11.5px; font-weight: 500; }
+      .${compactContentClass} .cq-thread-info { display: flex; min-width: 0; flex-direction: column; align-items: flex-end; gap: 2px; padding-top: 1px; color: var(--cq-faint); font-size: 9.5px; line-height: 13px; text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+      .${compactContentClass} .cq-thread-info .cq-kicker { color: var(--cq-faint); font-size: 8.5px; font-weight: 500; line-height: 12px; letter-spacing: .18em; }
+      .${compactContentClass} .cq-thread-meta { color: var(--cq-muted); }
+      .${compactContentClass} .cq-thread-reset { color: var(--cq-faint); }
+      .${compactContentClass} .cq-thread-info b { color: var(--cq-ink); font-weight: 600; }
+      .${compactContentClass} .cq-thread-rule { position: relative; height: 1px; margin-top: 8px; background: var(--cq-track); }
       .${compactContentClass} .cq-thread-rule::before { position: absolute; inset: 0 auto 0 0; width: var(--cq-used, 0%); background: var(--cq-accent); content: ""; }
       .${compactContentClass} .cq-folio-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
       .${compactContentClass} .cq-head-end { display: flex; align-items: baseline; gap: 8px; }
@@ -195,26 +200,35 @@
     return time === copy.resetUnavailable ? time : `${time} ${copy.resetSuffix}`;
   };
 
-  const createThreadContent = ({title, kicker, reset}) => {
+  const setThreadReset = (content, prefix, detail) => {
+    const prefixNode = content.querySelector(".cq-reset-prefix");
+    const valueNode = content.querySelector(".cq-reset-value");
+    if (prefixNode && prefixNode.textContent !== prefix) prefixNode.textContent = prefix;
+    if (valueNode && valueNode.textContent !== detail) valueNode.textContent = detail;
+  };
+
+  const createThreadContent = ({title, kicker, resetPrefix, resetDetail}) => {
     const content = document.createElement("div");
     content.className = compactContentClass;
-    content.dataset.cqLayout = "thread-v1";
+    content.dataset.cqLayout = "thread-v2";
     content.innerHTML = `
-      <div class="cq-thread-head">
-        <span class="cq-title"></span><span class="cq-kicker"></span>
-      </div>
-      <div class="cq-thread-row">
-        <div class="cq-number"><span class="cq-number-value">0</span><span class="cq-number-unit">%</span></div>
-        <div class="cq-thread-meta"><span class="cq-remaining-prefix"></span> <b class="cq-remaining-value">0%</b> <span class="cq-remaining-suffix"></span><i class="cq-thread-separator">·</i><b class="cq-reset-value"></b> <span class="cq-reset-suffix"></span></div>
+      <div class="cq-thread-main">
+        <div class="cq-thread-primary">
+          <span class="cq-title"></span>
+          <div class="cq-number"><span class="cq-number-value">0</span><span class="cq-number-unit">%</span></div>
+        </div>
+        <div class="cq-thread-info">
+          <span class="cq-kicker"></span>
+          <div class="cq-thread-meta"><span class="cq-remaining-prefix"></span> <b class="cq-remaining-value">0%</b> <span class="cq-remaining-suffix"></span></div>
+          <div class="cq-thread-reset"><span class="cq-reset-prefix"></span> <b class="cq-reset-value"></b></div>
+        </div>
       </div>
       <div class="cq-thread-rule" role="progressbar" aria-valuemin="0" aria-valuemax="100"></div>`;
     content.querySelector(".cq-title").textContent = title;
     content.querySelector(".cq-kicker").textContent = kicker;
     content.querySelector(".cq-remaining-prefix").textContent = copy.remainingPrefix;
     content.querySelector(".cq-remaining-suffix").textContent = copy.remainingSuffix;
-    const time = resetTime(reset);
-    content.querySelector(".cq-reset-value").textContent = time;
-    content.querySelector(".cq-reset-suffix").textContent = time === copy.resetUnavailable ? "" : copy.resetSuffix;
+    setThreadReset(content, resetPrefix, resetDetail);
     return content;
   };
 
@@ -268,7 +282,8 @@
     const content = createThreadContent({
       title: copy.weeklyTitle,
       kicker: copy.weeklyKicker,
-      reset,
+      resetPrefix: copy.resetAtPrefix,
+      resetDetail: resetTime(reset),
     });
     setThreadUsage(content, used);
     content.querySelector(".cq-thread-rule").setAttribute("aria-label", copy.weeklyUsedAria);
@@ -291,7 +306,7 @@
         window.remove();
       }
     }
-    const content = card.querySelector(`.${compactContentClass}[data-cq-layout="thread-v1"]`);
+    const content = card.querySelector(`.${compactContentClass}[data-cq-layout="thread-v2"]`);
     const progress = content?.querySelector("progress.cq-source-progress");
     if (!progress) return;
     const used = Number(progress.value);
@@ -305,7 +320,7 @@
 
   const compactCard = (card) => {
     const existing = card.querySelector(`.${compactContentClass}`);
-    if (existing?.dataset.cqLayout === "thread-v1") {
+    if (existing?.dataset.cqLayout === "thread-v2") {
       syncCompactProgress(card);
       return;
     }
@@ -417,6 +432,27 @@
     }).format(date);
   };
 
+  const formatResetCountdown = (value) => {
+    const remainingMs = Math.max(0, Number(value) * 1000 - Date.now());
+    if (!Number.isFinite(remainingMs)) return copy.resetUnavailable;
+    const days = Math.floor(remainingMs / 86400000);
+    const hours = Math.floor((remainingMs % 86400000) / 3600000);
+    return `${days} d ${hours} h`;
+  };
+
+  const applyOfficialCountdown = (card, data) => {
+    const windows = Array.isArray(data?.windows) ? data.windows : [];
+    const weekly = windows.length === 1 && windows[0]?.label === "Weekly" ? windows[0] : null;
+    const content = card?.querySelector(`.${compactContentClass}[data-cq-layout="thread-v2"]`);
+    if (!weekly || !Number.isFinite(weekly.resetAt) || !content) return;
+    const countdown = formatResetCountdown(weekly.resetAt);
+    setThreadReset(content, copy.resetCountdownPrefix, countdown);
+    const used = Number(content.dataset.cqUsed);
+    if (Number.isFinite(used)) {
+      card.setAttribute("aria-label", `${copy.weeklyTitle}. ${copy.weeklyUsedAria} ${formatPercent(used)}%. ${copy.remainingPrefix} ${formatPercent(100 - used)}% ${copy.remainingSuffix}. ${copy.resetCountdownPrefix} ${countdown}`);
+    }
+  };
+
   const addFallbackRow = (content, label, value, small = false) => {
     const row = document.createElement("div");
     row.className = "cq-window";
@@ -439,11 +475,12 @@
         Number.isFinite(window?.resetAt) && window.resetAt >= 0);
     const weekly = valid && windows.length === 1 && windows[0].label === "Weekly" ? windows[0] : null;
     if (weekly) {
-      const reset = formatOfficialReset(weekly.resetAt);
+      const countdown = formatResetCountdown(weekly.resetAt);
       const content = createThreadContent({
         title: copy.weeklyTitle,
         kicker: copy.weeklyKicker,
-        reset,
+        resetPrefix: copy.resetCountdownPrefix,
+        resetDetail: countdown,
       });
       setThreadUsage(content, weekly.usedPercent);
       content.querySelector(".cq-thread-rule").setAttribute("aria-label", copy.weeklyUsedAria);
@@ -453,13 +490,14 @@
         status.textContent = copy.stale;
         content.append(status);
       }
-      card.setAttribute("aria-label", `${copy.weeklyTitle}. ${copy.weeklyUsedAria} ${formatPercent(weekly.usedPercent)}%. ${copy.remainingPrefix} ${formatPercent(100 - weekly.usedPercent)}% ${copy.remainingSuffix}. ${resetLabel(reset)}`);
+      card.setAttribute("aria-label", `${copy.weeklyTitle}. ${copy.weeklyUsedAria} ${formatPercent(weekly.usedPercent)}%. ${copy.remainingPrefix} ${formatPercent(100 - weekly.usedPercent)}% ${copy.remainingSuffix}. ${copy.resetCountdownPrefix} ${countdown}`);
       card.replaceChildren(content);
       return;
     }
 
     const content = document.createElement("div");
     content.className = `${compactContentClass} cq-compact-fallback`;
+    content.dataset.cqLayout = "thread-v2-fallback";
     addHeading(content, copy.weeklyTitle);
     if (!valid) {
       addFallbackRow(content, copy.status, error || copy.officialUnavailable, true);
@@ -558,7 +596,7 @@
   };
 
   const refreshStaleOfficialData = () => {
-    if (apiMode() || nativeQuotaCard()) return;
+    if (apiMode()) return;
     const lastSuccessAt = Number(globalThis.__codexQuotaOfficialLastSuccessAt || 0);
     if (Date.now() - lastSuccessAt >= staleAfterMs) requestOfficialData();
   };
@@ -593,12 +631,18 @@
         globalThis.__codexQuotaOfficialCooldownUntil = now + retryMs;
       }
     }
-    const card = document.getElementById(officialHostId);
-    if (!apiMode() && card && !nativeQuotaCard()) renderOfficial(
-      card,
-      globalThis.__codexQuotaOfficialPayload || null,
-      globalThis.__codexQuotaOfficialError || null
-    );
+    const nativeCard = nativeQuotaCard();
+    if (!apiMode() && nativeCard) {
+      compactCard(nativeCard);
+      applyOfficialCountdown(nativeCard, globalThis.__codexQuotaOfficialPayload || null);
+    } else {
+      const card = document.getElementById(officialHostId);
+      if (!apiMode() && card) renderOfficial(
+        card,
+        globalThis.__codexQuotaOfficialPayload || null,
+        globalThis.__codexQuotaOfficialError || null
+      );
+    }
   };
 
   globalThis.__codexQuotaUpdateApi = (data) => {
@@ -657,7 +701,15 @@
     const card = nativeQuotaCard();
     if (card) {
       removeOfficialCard();
-      if (setOfficialCardSidebarVisibility(card, Boolean(bar))) compactCard(card);
+      if (setOfficialCardSidebarVisibility(card, Boolean(bar))) {
+        compactCard(card);
+        applyOfficialCountdown(card, globalThis.__codexQuotaOfficialPayload || null);
+      }
+      if (!globalThis.__codexQuotaOfficialLoaded) requestOfficialData();
+      if (!globalThis.__codexQuotaOfficialFocusRefreshInstalled) {
+        window.addEventListener("focus", refreshStaleOfficialData);
+        globalThis.__codexQuotaOfficialFocusRefreshInstalled = true;
+      }
       return;
     }
     if (!bar) {
@@ -667,11 +719,16 @@
     }
     const host = officialCard();
     host.hidden = false;
-    if (!host.firstElementChild) renderOfficial(
-      host,
-      globalThis.__codexQuotaOfficialPayload || null,
-      globalThis.__codexQuotaOfficialError || null
-    );
+    const currentLayout = host.firstElementChild?.dataset.cqLayout;
+    if (currentLayout !== "thread-v2" && currentLayout !== "thread-v2-fallback") {
+      renderOfficial(
+        host,
+        globalThis.__codexQuotaOfficialPayload || null,
+        globalThis.__codexQuotaOfficialError || null
+      );
+    } else if (currentLayout === "thread-v2") {
+      applyOfficialCountdown(host, globalThis.__codexQuotaOfficialPayload || null);
+    }
     if (!globalThis.__codexQuotaOfficialLoaded) requestOfficialData();
     if (!globalThis.__codexQuotaOfficialFocusRefreshInstalled) {
       window.addEventListener("focus", refreshStaleOfficialData);

@@ -372,7 +372,7 @@ def card_present(port: int, target: dict[str, Any] | None = None) -> bool:
               document.getElementById('codex-api-usage-host') ||
               (document.getElementById('codex-official-usage-host')?.offsetParent !== null &&
                 document.getElementById('codex-official-usage-host')?.querySelector(
-                  '[data-cq-layout="thread-v1"], .cq-compact-fallback'
+                  '[data-cq-layout="thread-v2"], .cq-compact-fallback'
                 )) ||
               [...document.querySelectorAll("[role='status']")].filter((card) =>
                 card instanceof HTMLElement &&

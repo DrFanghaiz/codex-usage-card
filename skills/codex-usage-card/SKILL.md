@@ -63,7 +63,7 @@ Check `WaitForLoginConfigurationChangeAsync()` and its callers:
 Review the page script for these invariants:
 
 - Official mode prefers the native quota component. When Codex does not render it, the helper fetches the validated official usage window and sends only the sanitized quota payload to a language-independent fallback card; credentials never enter the page.
-- Official Weekly uses the quiet Thread layout: used percentage, inline remaining/reset metadata, and a 1px used-progress line. The fallback host uses the current theme's subtle boundary and surface without a shadow; the hidden native progress remains the single percentage source when the native card exists, and dynamic updates keep used and remaining summing to 100.
+- Official Weekly uses the quiet Thread layout: title and used percentage on the left; period, remaining percentage, and an official `reset_at`-based `d / h` countdown in three lines on the right; and a 1px used-progress line below. The fallback host uses the current theme's subtle boundary and surface without a shadow; the hidden native progress remains the single percentage source when the native card exists, and dynamic updates keep used and remaining summing to 100.
 - Never fabricate a 5h row. Compact only the single-window Weekly native card; if the official component exposes additional windows again, preserve its complete native UI so restored limits remain visible.
 - Hide the quota card when the sidebar account row is absent; restore it when the row returns. Do not hide unrelated status notifications.
 - API mode creates one card above the account row, never the official card. Its Folio number and compact line show `100 - used / total`; the remaining amount is displayed separately.
