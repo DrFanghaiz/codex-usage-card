@@ -164,6 +164,8 @@ if ($legacyTask) {
   }
 }
 
+$diagnosis = & (Join-Path $PSScriptRoot 'doctor.ps1') -TaskName $TaskName -InstallRoot $InstallRoot
+
 [pscustomobject]@{
   Installed = $true
   InstallRoot = $InstallRoot
@@ -171,4 +173,14 @@ if ($legacyTask) {
   TaskState = $task.State
   ProcessId = $running[0].ProcessId
   MainWindowHandle = $windowHandle
+  ActivationState = $diagnosis.ActivationState
+  StageCodes = $diagnosis.StageCodes
+  TaskActionMatches = $diagnosis.TaskActionMatches
+  HelperProcessCount = $diagnosis.HelperProcessCount
+  HelperWindowless = $diagnosis.HelperWindowless
+  CodexRunning = $diagnosis.CodexRunning
+  CdpEndpointFound = $diagnosis.CdpEndpointFound
+  MainPageFound = $diagnosis.MainPageFound
+  CardVisible = $diagnosis.CardVisible
+  CardKind = $diagnosis.CardKind
 } | Format-List

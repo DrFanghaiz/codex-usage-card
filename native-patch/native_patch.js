@@ -10,8 +10,8 @@
   const isChinese = /^zh\b/i.test(navigator.language || "");
   const copy = isChinese
     ? {
-        weeklyTitle: "周用量",
-        weeklyKicker: "每周",
+        weeklyTitle: "本周已用",
+        weeklyKicker: "官方",
         remainingPrefix: "剩余",
         remainingAvailable: "剩余可用",
         remainingSuffix: "可用",
@@ -22,7 +22,7 @@
         weeklyUsedAria: "每周已用",
         resetUnavailable: "重置时间不可用",
         officialUnavailable: "周用量不可用",
-        apiTitle: "API 用量",
+        apiTitle: "API 剩余",
         dailyKicker: "每日",
         apiRemainingAria: "API 每日剩余",
         plan: "套餐",
@@ -31,13 +31,18 @@
         unavailable: "API 用量不可用",
         invalid: "API 用量响应无效",
         noLimit: "未设置每日限额",
+        loading: "正在读取…",
         stale: "更新失败，显示上次数据",
+        stalePrefix: "更新失败，显示 ",
+        staleSuffix: " 的数据",
+        cooldownPrefix: "暂时不可用，",
+        cooldownSuffix: " 后重试",
         refresh: "刷新",
         refreshing: "刷新中…",
       }
     : {
-        weeklyTitle: "Weekly usage",
-        weeklyKicker: "Weekly",
+        weeklyTitle: "Weekly used",
+        weeklyKicker: "Official",
         remainingPrefix: "Remaining",
         remainingAvailable: "Remaining",
         remainingSuffix: "available",
@@ -48,7 +53,7 @@
         weeklyUsedAria: "Weekly used",
         resetUnavailable: "Reset unavailable",
         officialUnavailable: "Weekly usage unavailable",
-        apiTitle: "API usage",
+        apiTitle: "API remaining",
         dailyKicker: "Daily",
         apiRemainingAria: "API daily remaining",
         plan: "Plan",
@@ -57,7 +62,12 @@
         unavailable: "API usage unavailable",
         invalid: "Invalid API usage response",
         noLimit: "No daily limit",
+        loading: "Loading…",
         stale: "Update failed; showing last result",
+        stalePrefix: "Update failed; showing data from ",
+        staleSuffix: "",
+        cooldownPrefix: "Unavailable; retry after ",
+        cooldownSuffix: "",
         refresh: "Refresh",
         refreshing: "Refreshing…",
       };
@@ -72,8 +82,8 @@
         --cq-border: var(--color-token-border-default, currentColor);
         --cq-track: var(--color-background-primary-soft-active, var(--color-background-primary-soft-alpha));
         --cq-ink: var(--vscode-foreground, currentColor);
-        --cq-muted: var(--color-text-secondary-solid, var(--cq-ink));
-        --cq-faint: var(--color-text-tertiary, var(--cq-muted));
+        --cq-muted: var(--color-text-secondary-solid, color-mix(in srgb, var(--cq-ink) 78%, transparent));
+        --cq-faint: var(--cq-muted);
         --cq-accent: var(--codex-base-accent, var(--cq-ink));
         --cq-sans: var(--default-font-family, inherit);
         box-sizing: border-box !important;
@@ -117,13 +127,14 @@
       .${compactContentClass} .cq-thread-primary .cq-number { display: flex; align-items: baseline; font-variant-numeric: tabular-nums; line-height: 1; }
       .${compactContentClass} .cq-thread-primary .cq-number-value { font-size: 22px; font-weight: 600; letter-spacing: -.01em; }
       .${compactContentClass} .cq-thread-primary .cq-number-unit { margin-left: 1px; color: var(--cq-muted); font-size: 11.5px; font-weight: 500; }
-      .${compactContentClass} .cq-thread-info { display: flex; min-width: 0; flex-direction: column; align-items: flex-end; gap: 2px; padding-top: 1px; color: var(--cq-faint); font-size: 9.5px; line-height: 13px; text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
-      .${compactContentClass} .cq-thread-info .cq-kicker { color: var(--cq-faint); font-size: 8.5px; font-weight: 500; line-height: 12px; letter-spacing: .18em; }
+      .${compactContentClass} .cq-thread-info { display: flex; min-width: 0; flex-direction: column; align-items: flex-end; gap: 2px; padding-top: 1px; color: var(--cq-faint); font-size: 10.5px; line-height: 14px; text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+      .${compactContentClass} .cq-thread-actions { display: flex; align-items: baseline; gap: 8px; }
+      .${compactContentClass} .cq-thread-info .cq-kicker { color: var(--cq-faint); font-size: 10.5px; font-weight: 500; line-height: 14px; letter-spacing: 0; }
       .${compactContentClass} .cq-thread-meta { color: var(--cq-muted); }
       .${compactContentClass} .cq-thread-reset { color: var(--cq-faint); }
       .${compactContentClass} .cq-thread-info b { color: var(--cq-ink); font-weight: 600; }
       .${compactContentClass} .cq-thread-rule { position: relative; height: 1px; margin-top: 8px; background: var(--cq-track); }
-      .${compactContentClass} .cq-thread-rule::before { position: absolute; inset: 0 auto 0 0; width: var(--cq-used, 0%); background: var(--cq-accent); content: ""; }
+      .${compactContentClass} .cq-thread-rule::before { position: absolute; inset: 0 auto 0 0; width: var(--cq-used, 0%); background: var(--cq-accent); content: ""; transition: width .18s cubic-bezier(.16,1,.3,1); }
       .${compactContentClass} .cq-folio-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
       .${compactContentClass} .cq-head-end { display: flex; align-items: baseline; gap: 8px; }
       .${compactContentClass} .cq-title { font-size: 12px; font-weight: 600; line-height: 16px; letter-spacing: 0; }
@@ -136,24 +147,31 @@
       .${compactContentClass} .cq-folio-note { min-width: 0; align-self: center; color: var(--cq-muted); font-size: 11px; line-height: 14px; text-align: left; text-wrap: pretty; }
       .${compactContentClass} .cq-folio-note b { display: block; overflow-wrap: anywhere; color: var(--cq-ink); font-weight: 500; }
       .${compactContentClass} .cq-rule { position: relative; height: 3px; border-radius: 999px; background: var(--cq-track); }
-      .${compactContentClass} .cq-rule::before { position: absolute; inset: 0 auto 0 0; width: var(--cq-remaining, 0%); border-radius: inherit; background: var(--cq-accent); content: ""; transition: width .25s cubic-bezier(.16,1,.3,1); }
-      .${compactContentClass} .cq-status { margin-top: 8px; color: var(--cq-muted); font-size: 10px; line-height: 16px; }
+      .${compactContentClass} .cq-rule::before { position: absolute; inset: 0 auto 0 0; width: var(--cq-remaining, 0%); border-radius: inherit; background: var(--cq-accent); content: ""; transition: width .18s cubic-bezier(.16,1,.3,1); }
+      .${compactContentClass} .cq-status { margin-top: 8px; color: var(--cq-muted); font-size: 10.5px; line-height: 16px; }
       .${compactContentClass} .cq-source-progress { display: none !important; }
       .${compactContentClass}.cq-compact-fallback { gap: 8px; }
       .${compactContentClass} .cq-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
       .${compactContentClass} .cq-window { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 8px; min-width: 0; }
       .${compactContentClass} .cq-label, .${compactContentClass} .cq-value { font-size: 11px; line-height: 16px; }
       .${compactContentClass} .cq-value { text-align: right; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
-      .${compactContentClass} .cq-reset, .${compactContentClass} .cq-reset-value { color: var(--cq-muted); font-size: 10px; line-height: 16px; }
+      .${compactContentClass} .cq-reset, .${compactContentClass} .cq-reset-value { color: var(--cq-muted); font-size: 10.5px; line-height: 16px; }
       .${compactContentClass} .cq-reset-value { text-align: right; overflow-wrap: anywhere; }
       .${compactContentClass} .cq-window > progress { grid-column: 1 / -1; height: 4px !important; margin: 0; }
-      .${compactContentClass} .cq-refresh { position: relative; margin: 0; padding: 0; border: 0; background: transparent; color: var(--cq-muted); cursor: pointer; font: inherit; font-size: 10px; line-height: 14px; }
-      .${compactContentClass} .cq-refresh::before { position: absolute; inset: -12px; content: ""; }
+      .${compactContentClass} .cq-refresh { position: relative; margin: 0; padding: 0; border: 0; background: transparent; color: var(--cq-muted); cursor: pointer; font: inherit; font-size: 10.5px; line-height: 14px; transition: color .16s ease-out, opacity .16s ease-out; }
+      .${compactContentClass} .cq-refresh::before { position: absolute; inset: -10px; content: ""; }
       .${compactContentClass} .cq-refresh:hover { color: var(--cq-ink); }
       .${compactContentClass} .cq-refresh:focus-visible { border-radius: 4px; outline: 2px solid var(--cq-accent); outline-offset: 1px; }
       .${compactContentClass} .cq-refresh:disabled { cursor: wait; opacity: .65; }
+      @media (prefers-contrast: more) {
+        .${compactClass}, .${apiCardClass} { --cq-muted: var(--cq-ink); --cq-faint: var(--cq-ink); }
+        #${officialHostId}, .${apiCardClass} { border-color: var(--cq-ink) !important; outline-color: var(--cq-ink); }
+      }
+      @media (forced-colors: active) {
+        .${compactClass}, .${apiCardClass} { --cq-surface: Canvas; --cq-border: CanvasText; --cq-track: GrayText; --cq-ink: CanvasText; --cq-muted: CanvasText; --cq-faint: CanvasText; --cq-accent: Highlight; forced-color-adjust: auto; }
+      }
       @media (prefers-reduced-motion: reduce) {
-        .${compactContentClass} .cq-rule::before { transition: none !important; }
+        .${compactContentClass} .cq-thread-rule::before, .${compactContentClass} .cq-rule::before, .${compactContentClass} .cq-refresh { transition: none !important; }
       }
     `;
     if (style.textContent !== css) style.textContent = css;
@@ -200,6 +218,100 @@
     return time === copy.resetUnavailable ? time : `${time} ${copy.resetSuffix}`;
   };
 
+  const quotaErrorCode = (kind) => kind === "api"
+    ? globalThis.__codexQuotaApiErrorCode || (globalThis.__codexQuotaApiError ? "UNAVAILABLE" : null)
+    : globalThis.__codexQuotaOfficialErrorCode || (globalThis.__codexQuotaOfficialError ? "UNAVAILABLE" : null);
+
+  const formatStatusTime = (value) => {
+    const date = new Date(Number(value));
+    if (!Number.isFinite(date.getTime())) return "";
+    return new Intl.DateTimeFormat(navigator.language, {
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    }).format(date);
+  };
+
+  const quotaState = (kind, data, errorCode = quotaErrorCode(kind)) => {
+    const isApi = kind === "api";
+    const needsData = isApi
+      ? globalThis.__codexQuotaApiNeedsData === true
+      : globalThis.__codexQuotaOfficialNeedsData === true;
+    const loaded = isApi
+      ? globalThis.__codexQuotaApiLoaded === true
+      : globalThis.__codexQuotaOfficialLoaded === true;
+    const lastSuccessAt = Number(isApi
+      ? globalThis.__codexQuotaApiLastSuccessAt || 0
+      : globalThis.__codexQuotaOfficialLastSuccessAt || 0);
+    const cooldownUntil = Number(isApi
+      ? globalThis.__codexQuotaApiCooldownUntil || 0
+      : globalThis.__codexQuotaOfficialCooldownUntil || 0);
+    if (needsData) return {busy: true, text: data ? null : copy.loading};
+    if (errorCode && data) {
+      const time = formatStatusTime(lastSuccessAt);
+      return {busy: false, text: time ? `${copy.stalePrefix}${time}${copy.staleSuffix}` : copy.stale};
+    }
+    if (!data) {
+      if (!loaded) return {busy: true, text: copy.loading};
+      const retryAt = cooldownUntil > Date.now() ? formatStatusTime(cooldownUntil) : "";
+      return {
+        busy: false,
+        text: retryAt
+          ? `${copy.cooldownPrefix}${retryAt}${copy.cooldownSuffix}`
+          : isApi ? copy.unavailable : copy.officialUnavailable,
+      };
+    }
+    return {busy: false, text: null};
+  };
+
+  const createRefreshButton = (kind) => {
+    const button = document.createElement("button");
+    const busy = kind === "api"
+      ? globalThis.__codexQuotaApiNeedsData === true
+      : globalThis.__codexQuotaOfficialNeedsData === true;
+    button.type = "button";
+    button.className = "cq-refresh";
+    button.disabled = busy;
+    button.textContent = busy ? copy.refreshing : copy.refresh;
+    button.addEventListener("click", () => kind === "api" ? requestApiData(true) : requestOfficialData(true));
+    return button;
+  };
+
+  const setCardAccessibility = (card, busy) => {
+    card.setAttribute("role", "region");
+    card.removeAttribute("aria-live");
+    card.removeAttribute("aria-atomic");
+    card.setAttribute("aria-busy", String(busy));
+  };
+
+  const setContentStatus = (content, text) => {
+    let status = content.querySelector(".cq-status");
+    if (!text) {
+      status?.remove();
+      return;
+    }
+    if (!status) {
+      status = document.createElement("div");
+      status.className = "cq-status";
+      status.setAttribute("role", "status");
+      status.setAttribute("aria-live", "polite");
+      status.setAttribute("aria-atomic", "true");
+      content.append(status);
+    }
+    status.textContent = text;
+  };
+
+  const showCooldown = (kind, cooldownUntil) => {
+    const card = kind === "api"
+      ? document.getElementById(apiHostId)
+      : nativeQuotaCard() || document.getElementById(officialHostId);
+    const content = card?.querySelector(`.${compactContentClass}`);
+    const retryAt = formatStatusTime(cooldownUntil);
+    if (!card || !content || !retryAt) return;
+    setContentStatus(content, `${copy.cooldownPrefix}${retryAt}${copy.cooldownSuffix}`);
+    setCardAccessibility(card, false);
+  };
+
   const setThreadReset = (content, prefix, detail) => {
     const prefixNode = content.querySelector(".cq-reset-prefix");
     const valueNode = content.querySelector(".cq-reset-value");
@@ -207,7 +319,7 @@
     if (valueNode && valueNode.textContent !== detail) valueNode.textContent = detail;
   };
 
-  const createThreadContent = ({title, kicker, resetPrefix, resetDetail}) => {
+  const createThreadContent = ({title, kicker, resetPrefix, resetDetail, action = null}) => {
     const content = document.createElement("div");
     content.className = compactContentClass;
     content.dataset.cqLayout = "thread-v2";
@@ -218,7 +330,7 @@
           <div class="cq-number"><span class="cq-number-value">0</span><span class="cq-number-unit">%</span></div>
         </div>
         <div class="cq-thread-info">
-          <span class="cq-kicker"></span>
+          <div class="cq-thread-actions"><span class="cq-kicker"></span><span class="cq-head-action"></span></div>
           <div class="cq-thread-meta"><span class="cq-remaining-prefix"></span> <b class="cq-remaining-value">0%</b> <span class="cq-remaining-suffix"></span></div>
           <div class="cq-thread-reset"><span class="cq-reset-prefix"></span> <b class="cq-reset-value"></b></div>
         </div>
@@ -228,6 +340,7 @@
     content.querySelector(".cq-kicker").textContent = kicker;
     content.querySelector(".cq-remaining-prefix").textContent = copy.remainingPrefix;
     content.querySelector(".cq-remaining-suffix").textContent = copy.remainingSuffix;
+    if (action instanceof Node) content.querySelector(".cq-head-action").append(action);
     setThreadReset(content, resetPrefix, resetDetail);
     return content;
   };
@@ -241,7 +354,9 @@
     content.querySelector(".cq-number-value").textContent = usedText;
     content.querySelector(".cq-remaining-value").textContent = `${remainingText}%`;
     content.style.setProperty("--cq-used", `${used}%`);
-    content.querySelector(".cq-thread-rule").setAttribute("aria-valuenow", usedText);
+    const progress = content.querySelector(".cq-thread-rule");
+    progress.setAttribute("aria-valuenow", usedText);
+    progress.setAttribute("aria-valuetext", `${copy.weeklyUsedAria} ${usedText}%`);
   };
 
   const createFolioContent = ({title, kicker, note, detail, action = null}) => {
@@ -274,7 +389,9 @@
     content.dataset.cqRemaining = text;
     content.querySelector(".cq-number-value").textContent = text;
     content.style.setProperty("--cq-remaining", `${remaining}%`);
-    content.querySelector(".cq-rule").setAttribute("aria-valuenow", text);
+    const progress = content.querySelector(".cq-rule");
+    progress.setAttribute("aria-valuenow", text);
+    progress.setAttribute("aria-valuetext", `${copy.apiRemainingAria} ${text}%`);
   };
 
   const renderOfficialThread = (card, progress, remaining, reset) => {
@@ -284,6 +401,7 @@
       kicker: copy.weeklyKicker,
       resetPrefix: copy.resetAtPrefix,
       resetDetail: resetTime(reset),
+      action: createRefreshButton("official"),
     });
     setThreadUsage(content, used);
     content.querySelector(".cq-thread-rule").setAttribute("aria-label", copy.weeklyUsedAria);
@@ -293,6 +411,9 @@
     progress.setAttribute("aria-label", `${copy.weeklyUsedAria} ${formatPercent(used)}%`);
     content.append(progress);
     card.classList.add(compactClass);
+    const state = quotaState("official", globalThis.__codexQuotaOfficialPayload || null);
+    setContentStatus(content, state.text);
+    setCardAccessibility(card, state.busy);
     card.setAttribute("aria-label", `${copy.weeklyTitle}. ${copy.weeklyUsedAria} ${formatPercent(used)}%. ${copy.remainingPrefix} ${formatPercent(remaining)}% ${copy.remainingSuffix}. ${resetLabel(reset)}`);
     card.replaceChildren(content);
   };
@@ -321,6 +442,16 @@
   const compactCard = (card) => {
     const existing = card.querySelector(`.${compactContentClass}`);
     if (existing?.dataset.cqLayout === "thread-v2") {
+      const progress = existing.querySelector("progress.cq-source-progress");
+      const used = Number(progress?.value);
+      const staleThread = !existing.querySelector(".cq-refresh") ||
+        existing.querySelector(".cq-title")?.textContent !== copy.weeklyTitle ||
+        existing.querySelector(".cq-kicker")?.textContent !== copy.weeklyKicker;
+      if (progress && staleThread && Number.isFinite(used)) {
+        const reset = (existing.querySelector(".cq-reset-value")?.textContent || "").trim() || "Unavailable";
+        renderOfficialThread(card, progress, 100 - used, reset);
+        return;
+      }
       syncCompactProgress(card);
       return;
     }
@@ -397,6 +528,7 @@
       bar.parentElement?.insertBefore(host, bar);
     }
     host.id = apiHostId;
+    setCardAccessibility(host, false);
     return host;
   };
 
@@ -437,7 +569,7 @@
     if (!Number.isFinite(remainingMs)) return copy.resetUnavailable;
     const days = Math.floor(remainingMs / 86400000);
     const hours = Math.floor((remainingMs % 86400000) / 3600000);
-    return `${days} d ${hours} h`;
+    return isChinese ? `${days}天 ${hours}小时` : `${days} d ${hours} h`;
   };
 
   const applyOfficialCountdown = (card, data) => {
@@ -467,7 +599,8 @@
     return row;
   };
 
-  const renderOfficial = (card, data, error = null) => {
+  const renderOfficial = (card, data, errorCode = null) => {
+    const state = quotaState("official", data, errorCode);
     const windows = Array.isArray(data?.windows) ? data.windows : [];
     const valid = typeof data?.planName === "string" && data.planName && windows.length > 0 &&
       windows.every((window) => typeof window?.label === "string" &&
@@ -481,15 +614,12 @@
         kicker: copy.weeklyKicker,
         resetPrefix: copy.resetCountdownPrefix,
         resetDetail: countdown,
+        action: createRefreshButton("official"),
       });
       setThreadUsage(content, weekly.usedPercent);
       content.querySelector(".cq-thread-rule").setAttribute("aria-label", copy.weeklyUsedAria);
-      if (error) {
-        const status = document.createElement("div");
-        status.className = "cq-status";
-        status.textContent = copy.stale;
-        content.append(status);
-      }
+      setContentStatus(content, state.text);
+      setCardAccessibility(card, state.busy);
       card.setAttribute("aria-label", `${copy.weeklyTitle}. ${copy.weeklyUsedAria} ${formatPercent(weekly.usedPercent)}%. ${copy.remainingPrefix} ${formatPercent(100 - weekly.usedPercent)}% ${copy.remainingSuffix}. ${copy.resetCountdownPrefix} ${countdown}`);
       card.replaceChildren(content);
       return;
@@ -498,9 +628,9 @@
     const content = document.createElement("div");
     content.className = `${compactContentClass} cq-compact-fallback`;
     content.dataset.cqLayout = "thread-v2-fallback";
-    addHeading(content, copy.weeklyTitle);
+    addHeading(content, copy.weeklyTitle, createRefreshButton("official"));
     if (!valid) {
-      addFallbackRow(content, copy.status, error || copy.officialUnavailable, true);
+      addFallbackRow(content, copy.status, data ? copy.officialUnavailable : state.text, true);
     } else {
       for (const window of windows) {
         const row = addFallbackRow(content, window.label, `${formatPercent(window.usedPercent)}%`);
@@ -508,22 +638,21 @@
         progress.max = 100;
         progress.value = window.usedPercent;
         progress.setAttribute("aria-label", `${window.label} ${copy.used} ${formatPercent(window.usedPercent)}%`);
+        progress.setAttribute("aria-valuetext", `${window.label} ${copy.used} ${formatPercent(window.usedPercent)}%`);
         row.append(progress);
         addFallbackRow(content, copy.resetSuffix, formatOfficialReset(window.resetAt), true);
       }
-      if (error) addFallbackRow(content, copy.status, copy.stale, true);
+      if (state.text) addFallbackRow(content, copy.status, state.text, true);
     }
+    setCardAccessibility(card, state.busy);
     card.setAttribute("aria-label", copy.weeklyTitle);
     card.replaceChildren(content);
   };
 
-  const renderApi = (card, data, error = null) => {
-    const refresh = document.createElement("button");
-    refresh.type = "button";
-    refresh.className = "cq-refresh";
-    refresh.disabled = globalThis.__codexQuotaApiNeedsData === true;
-    refresh.textContent = refresh.disabled ? copy.refreshing : copy.refresh;
-    refresh.addEventListener("click", () => requestApiData(true));
+  const renderApi = (card, data, errorCode = null) => {
+    const state = quotaState("api", data, errorCode);
+    const refresh = createRefreshButton("api");
+    setCardAccessibility(card, state.busy);
 
     const valid = data &&
       [data.used, data.remaining].every((value) => Number.isFinite(value)) &&
@@ -536,15 +665,15 @@
       const content = createFolioContent({
         title: copy.apiTitle,
         kicker: copy.dailyKicker,
-        note: error ? copy.stale : `${copy.remainingAvailable} ${remainingAmount}`,
-        detail: error ? `${copy.remainingAvailable} ${remainingAmount}` : `${copy.used} ${format(data.used)} / ${format(data.total)} ${data.unit}`,
+        note: state.text || `${copy.remainingAvailable} ${remainingAmount}`,
+        detail: state.text ? `${copy.remainingAvailable} ${remainingAmount}` : `${copy.used} ${format(data.used)} / ${format(data.total)} ${data.unit}`,
         action: refresh,
       });
       setFolioRemaining(content, remainingPercent);
       content.querySelector(".cq-rule").setAttribute("aria-label", copy.apiRemainingAria);
       card.setAttribute(
         "aria-label",
-        `${copy.apiTitle}. ${copy.remainingAvailable} ${formatPercent(remainingPercent)}%. ${remainingAmount}.`,
+        `${copy.apiTitle}. ${copy.remainingAvailable} ${formatPercent(remainingPercent)}%. ${remainingAmount}.${state.text ? ` ${state.text}.` : ""}`,
       );
       card.replaceChildren(content);
       return;
@@ -554,7 +683,7 @@
     content.className = `${compactContentClass} cq-compact-fallback`;
     addHeading(content, copy.apiTitle, refresh);
     if (!data) {
-      addFallbackRow(content, copy.status, error || copy.unavailable, true);
+      addFallbackRow(content, copy.status, state.text, true);
     } else if (!valid) {
       addFallbackRow(content, copy.status, copy.invalid, true);
     } else {
@@ -562,7 +691,7 @@
       addFallbackRow(content, copy.daily, `${format(data.used)} ${data.unit}`);
       addFallbackRow(content, copy.remainingAvailable, `${format(data.remaining)} ${data.unit}`);
       addFallbackRow(content, copy.status, copy.noLimit, true);
-      if (error) addFallbackRow(content, copy.status, copy.stale, true);
+      if (state.text) addFallbackRow(content, copy.status, state.text, true);
     }
     card.setAttribute("aria-label", copy.apiTitle);
     card.replaceChildren(content);
@@ -572,11 +701,14 @@
     if (globalThis.__codexQuotaApiNeedsData === true) return;
     const now = Date.now();
     const cooldownUntil = Number(globalThis.__codexQuotaApiCooldownUntil || 0);
-    if (now < cooldownUntil) return;
+    if (now < cooldownUntil) {
+      showCooldown("api", cooldownUntil);
+      return;
+    }
     if (!manual && now < Number(globalThis.__codexQuotaApiNextAutoAttemptAt || 0)) return;
     globalThis.__codexQuotaApiNeedsData = true;
     const card = document.getElementById(apiHostId);
-    if (card) renderApi(card, globalThis.__codexQuotaApiPayload || null, globalThis.__codexQuotaApiError || null);
+    if (card) renderApi(card, globalThis.__codexQuotaApiPayload || null, quotaErrorCode("api"));
     console.info("__codexQuotaApiRequest__");
   };
 
@@ -586,12 +718,32 @@
     if (Date.now() - lastSuccessAt >= staleAfterMs) requestApiData(false);
   };
 
-  const requestOfficialData = () => {
+  const requestOfficialData = (manual = false) => {
     if (globalThis.__codexQuotaOfficialNeedsData === true) return;
     const now = Date.now();
     const cooldownUntil = Number(globalThis.__codexQuotaOfficialCooldownUntil || 0);
-    if (now < cooldownUntil || now < Number(globalThis.__codexQuotaOfficialNextAutoAttemptAt || 0)) return;
+    if (now < cooldownUntil) {
+      showCooldown("official", cooldownUntil);
+      return;
+    }
+    if (!manual && now < Number(globalThis.__codexQuotaOfficialNextAutoAttemptAt || 0)) return;
     globalThis.__codexQuotaOfficialNeedsData = true;
+    const nativeCard = nativeQuotaCard();
+    if (nativeCard) {
+      compactCard(nativeCard);
+      const content = nativeCard.querySelector(`.${compactContentClass}[data-cq-layout="thread-v2"]`);
+      const state = quotaState("official", globalThis.__codexQuotaOfficialPayload || null);
+      if (content) setContentStatus(content, state.text);
+      setCardAccessibility(nativeCard, state.busy);
+      const refresh = content?.querySelector(".cq-refresh");
+      if (refresh) {
+        refresh.disabled = true;
+        refresh.textContent = copy.refreshing;
+      }
+    } else {
+      const card = document.getElementById(officialHostId);
+      if (card) renderOfficial(card, globalThis.__codexQuotaOfficialPayload || null, quotaErrorCode("official"));
+    }
     console.info("__codexQuotaOfficialRequest__");
   };
 
@@ -602,7 +754,7 @@
   };
 
   const nativeQuotaCard = () => {
-    const cards = [...document.querySelectorAll("[role='status']")].filter((card) =>
+    const cards = [...document.querySelectorAll(`[role='status'], .${compactClass}[role='region']`)].filter((card) =>
       card instanceof HTMLElement && card.classList.contains("rounded-2xl") &&
       Boolean(card.querySelector("progress[max='100']")) &&
       ((card.classList.contains("border") && card.classList.contains("bg-token-main-surface-primary")) ||
@@ -614,14 +766,16 @@
     globalThis.__codexQuotaOfficialNeedsData = false;
     globalThis.__codexQuotaOfficialLoaded = true;
     const now = Date.now();
-    if (data && !data.error && Array.isArray(data.windows)) {
+    if (data && !data.errorCode && !data.error && Array.isArray(data.windows)) {
       globalThis.__codexQuotaOfficialPayload = data;
+      globalThis.__codexQuotaOfficialErrorCode = null;
       globalThis.__codexQuotaOfficialError = null;
       globalThis.__codexQuotaOfficialLastSuccessAt = now;
       globalThis.__codexQuotaOfficialNextAutoAttemptAt = now + staleAfterMs;
       globalThis.__codexQuotaOfficialCooldownUntil = 0;
     } else {
-      globalThis.__codexQuotaOfficialError = data?.error || copy.officialUnavailable;
+      globalThis.__codexQuotaOfficialErrorCode = data?.errorCode || "UNAVAILABLE";
+      globalThis.__codexQuotaOfficialError = null;
       const retrySeconds = Number(data?.retryAfterSeconds);
       const retryMs = Number.isFinite(retrySeconds) && retrySeconds > 0
         ? Math.max(failureRetryMs, retrySeconds * 1000)
@@ -635,12 +789,16 @@
     if (!apiMode() && nativeCard) {
       compactCard(nativeCard);
       applyOfficialCountdown(nativeCard, globalThis.__codexQuotaOfficialPayload || null);
+      const content = nativeCard.querySelector(`.${compactContentClass}[data-cq-layout="thread-v2"]`);
+      const state = quotaState("official", globalThis.__codexQuotaOfficialPayload || null);
+      if (content) setContentStatus(content, state.text);
+      setCardAccessibility(nativeCard, state.busy);
     } else {
       const card = document.getElementById(officialHostId);
       if (!apiMode() && card) renderOfficial(
         card,
         globalThis.__codexQuotaOfficialPayload || null,
-        globalThis.__codexQuotaOfficialError || null
+        quotaErrorCode("official")
       );
     }
   };
@@ -649,14 +807,16 @@
     globalThis.__codexQuotaApiNeedsData = false;
     globalThis.__codexQuotaApiLoaded = true;
     const now = Date.now();
-    if (data && !data.error) {
+    if (data && !data.errorCode && !data.error) {
       globalThis.__codexQuotaApiPayload = data;
+      globalThis.__codexQuotaApiErrorCode = null;
       globalThis.__codexQuotaApiError = null;
       globalThis.__codexQuotaApiLastSuccessAt = now;
       globalThis.__codexQuotaApiNextAutoAttemptAt = now + staleAfterMs;
       globalThis.__codexQuotaApiCooldownUntil = 0;
     } else {
-      globalThis.__codexQuotaApiError = data?.error || "API usage unavailable";
+      globalThis.__codexQuotaApiErrorCode = data?.errorCode || "UNAVAILABLE";
+      globalThis.__codexQuotaApiError = null;
       const retrySeconds = Number(data?.retryAfterSeconds);
       const retryMs = Number.isFinite(retrySeconds) && retrySeconds > 0
         ? Math.max(failureRetryMs, retrySeconds * 1000)
@@ -669,7 +829,7 @@
     if (apiMode()) renderApi(
       apiCard(nativeQuotaCard()),
       globalThis.__codexQuotaApiPayload || null,
-      globalThis.__codexQuotaApiError || null
+      quotaErrorCode("api")
     );
   };
 
@@ -688,7 +848,7 @@
       renderApi(
         apiCard(nativeQuotaCard()),
         globalThis.__codexQuotaApiPayload || null,
-        globalThis.__codexQuotaApiError || null
+        quotaErrorCode("api")
       );
       if (!globalThis.__codexQuotaApiLoaded) requestApiData();
       if (!globalThis.__codexQuotaFocusRefreshInstalled) {
@@ -720,11 +880,18 @@
     const host = officialCard();
     host.hidden = false;
     const currentLayout = host.firstElementChild?.dataset.cqLayout;
-    if (currentLayout !== "thread-v2" && currentLayout !== "thread-v2-fallback") {
+    const staleThread = currentLayout === "thread-v2" &&
+      (!host.querySelector(".cq-refresh") ||
+       host.querySelector(".cq-title")?.textContent !== copy.weeklyTitle ||
+       host.querySelector(".cq-kicker")?.textContent !== copy.weeklyKicker);
+    const staleFallback = currentLayout === "thread-v2-fallback" &&
+      (!host.querySelector(".cq-refresh") || host.getAttribute("role") !== "region");
+    if ((currentLayout !== "thread-v2" && currentLayout !== "thread-v2-fallback") ||
+        staleThread || staleFallback) {
       renderOfficial(
         host,
         globalThis.__codexQuotaOfficialPayload || null,
-        globalThis.__codexQuotaOfficialError || null
+        quotaErrorCode("official")
       );
     } else if (currentLayout === "thread-v2") {
       applyOfficialCountdown(host, globalThis.__codexQuotaOfficialPayload || null);

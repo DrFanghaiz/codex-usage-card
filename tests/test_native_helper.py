@@ -4,6 +4,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 NATIVE_SOURCE = (ROOT / "native-patch" / "CodexNativeQuotaPatch.cs").read_text(encoding="utf-8")
+SKILL_NATIVE_SOURCE = (
+    ROOT / "skills" / "codex-usage-card" / "assets" / "native-patch" / "CodexNativeQuotaPatch.cs"
+).read_text(encoding="utf-8")
 REGISTER_SCRIPT = (ROOT / "scripts" / "register_usage_card_task.ps1").read_text(encoding="utf-8")
 SKILL_INSTALL_SCRIPT = (
     ROOT / "skills" / "codex-usage-card" / "scripts" / "install.ps1"
@@ -32,6 +35,46 @@ class NativeHelperTests(unittest.TestCase):
         self.assertIn('"resetAt"', NATIVE_SOURCE)
         self.assertNotIn("Console.WriteLine", NATIVE_SOURCE)
 
+    def test_complete_official_login_precedes_api_and_partial_official_login_waits(self):
+        self.assertIn(
+            """            official = HasOfficialAccount();
+            if (official) return true;
+            api = LoadApiConfiguration();
+            return api != null;""",
+            NATIVE_SOURCE,
+        )
+        self.assertNotIn("return official != (api != null);", NATIVE_SOURCE)
+        self.assertIn('!auth.ContainsKey("tokens") || auth["tokens"] == null', NATIVE_SOURCE)
+        self.assertIn("if (tokens == null) throw new InvalidOperationException();", NATIVE_SOURCE)
+        self.assertIn(
+            'if (!tokens.ContainsKey("access_token") && !tokens.ContainsKey("account_id")) return null;',
+            NATIVE_SOURCE,
+        )
+        self.assertIn(
+            'tokens.ContainsKey("access_token") ? tokens["access_token"] as string : null',
+            NATIVE_SOURCE,
+        )
+        self.assertIn(
+            'tokens.ContainsKey("account_id") ? tokens["account_id"] as string : null',
+            NATIVE_SOURCE,
+        )
+        self.assertIn(
+            """        if (String.IsNullOrWhiteSpace(accessToken) || String.IsNullOrWhiteSpace(accountId))
+            throw new InvalidOperationException();""",
+            NATIVE_SOURCE,
+        )
+
+    def test_page_error_payloads_are_stable_codes_without_raw_messages(self):
+        self.assertEqual(NATIVE_SOURCE.count('{ "errorCode", "NETWORK_ERROR" }'), 2)
+        self.assertEqual(NATIVE_SOURCE.count('{ "errorCode", "INVALID_RESPONSE" }'), 2)
+        self.assertIn('payload["retryAfterSeconds"] = retryAfter;', NATIVE_SOURCE)
+        self.assertNotIn("usage network request failed", NATIVE_SOURCE)
+        self.assertNotIn("usage response is invalid", NATIVE_SOURCE)
+        self.assertNotIn("exception.Message", NATIVE_SOURCE)
+
+    def test_skill_helper_source_matches_the_project_source(self):
+        self.assertEqual(NATIVE_SOURCE, SKILL_NATIVE_SOURCE)
+
     def test_scheduled_task_uses_the_current_project_helper(self):
         self.assertIn("Split-Path -Parent $PSScriptRoot", REGISTER_SCRIPT)
         self.assertIn("Codex Usage Card", REGISTER_SCRIPT)
@@ -53,9 +96,10 @@ class NativeHelperTests(unittest.TestCase):
                 "Unregister-ScheduledTask -TaskPath '\\' -TaskName $legacyTaskName"
             ),
         )
-        self.assertIn("$releaseTag = 'v1.4.1'", ROOT_INSTALL_SCRIPT)
+        self.assertIn("$releaseTag = 'v1.5.0'", ROOT_INSTALL_SCRIPT)
         self.assertIn("$archiveName = 'codex-usage-card.skill.zip'", ROOT_INSTALL_SCRIPT)
-        self.assertIn("52B7C6A266813EB9BD7F5C7BCA84D13C008B2CE2DE0361F2F6FCCAADA3E39880", ROOT_INSTALL_SCRIPT)
+        self.assertIn("'scripts\\doctor.ps1'", ROOT_INSTALL_SCRIPT)
+        self.assertIn("C78AF141567BA7D9A049E6330C9DA0E3FF86DD7494C42DC3F497FDA4E0ACC490", ROOT_INSTALL_SCRIPT)
 
 
 if __name__ == "__main__":

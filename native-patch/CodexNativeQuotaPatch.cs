@@ -147,9 +147,10 @@ internal static class CodexNativeQuotaPatch
         official = false;
         try
         {
-            api = LoadApiConfiguration();
             official = HasOfficialAccount();
-            return official != (api != null);
+            if (official) return true;
+            api = LoadApiConfiguration();
+            return api != null;
         }
         catch (ArgumentException)
         {
@@ -233,7 +234,7 @@ internal static class CodexNativeQuotaPatch
         }
         catch (WebException exception)
         {
-            payload = new Dictionary<string, object> { { "error", "Official usage network request failed" } };
+            payload = new Dictionary<string, object> { { "errorCode", "NETWORK_ERROR" } };
             var response = exception.Response as HttpWebResponse;
             if (response != null && (int)response.StatusCode == 429)
             {
@@ -244,7 +245,7 @@ internal static class CodexNativeQuotaPatch
         }
         catch
         {
-            payload = new Dictionary<string, object> { { "error", "Official usage response is invalid" } };
+            payload = new Dictionary<string, object> { { "errorCode", "INVALID_RESPONSE" } };
         }
         Evaluate(socket, "globalThis.__codexQuotaUpdateOfficial(" + Json.Serialize(payload) + ")");
     }
@@ -259,7 +260,7 @@ internal static class CodexNativeQuotaPatch
         }
         catch (WebException exception)
         {
-            payload = new Dictionary<string, object> { { "error", "API network request failed" } };
+            payload = new Dictionary<string, object> { { "errorCode", "NETWORK_ERROR" } };
             var response = exception.Response as HttpWebResponse;
             if (response != null && (int)response.StatusCode == 429)
             {
@@ -270,7 +271,7 @@ internal static class CodexNativeQuotaPatch
         }
         catch
         {
-            payload = new Dictionary<string, object> { { "error", "API response is invalid" } };
+            payload = new Dictionary<string, object> { { "errorCode", "INVALID_RESPONSE" } };
         }
         Evaluate(socket, "globalThis.__codexQuotaUpdateApi(" + Json.Serialize(payload) + ")");
     }
@@ -318,10 +319,14 @@ internal static class CodexNativeQuotaPatch
         var path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".codex", "auth.json");
         if (!File.Exists(path)) return null;
         var auth = Json.DeserializeObject(File.ReadAllText(path, Encoding.UTF8)) as Dictionary<string, object>;
-        var tokens = auth != null && auth.ContainsKey("tokens") ? auth["tokens"] as Dictionary<string, object> : null;
-        var accessToken = tokens == null ? "" : StringValue(tokens, "access_token");
-        var accountId = tokens == null ? "" : StringValue(tokens, "account_id");
-        if (String.IsNullOrWhiteSpace(accessToken) || String.IsNullOrWhiteSpace(accountId)) return null;
+        if (auth == null || !auth.ContainsKey("tokens") || auth["tokens"] == null) return null;
+        var tokens = auth["tokens"] as Dictionary<string, object>;
+        if (tokens == null) throw new InvalidOperationException();
+        if (!tokens.ContainsKey("access_token") && !tokens.ContainsKey("account_id")) return null;
+        var accessToken = tokens.ContainsKey("access_token") ? tokens["access_token"] as string : null;
+        var accountId = tokens.ContainsKey("account_id") ? tokens["account_id"] as string : null;
+        if (String.IsNullOrWhiteSpace(accessToken) || String.IsNullOrWhiteSpace(accountId))
+            throw new InvalidOperationException();
         return new OfficialConfiguration
         {
             Url = "https://chatgpt.com/backend-api/wham/usage",
