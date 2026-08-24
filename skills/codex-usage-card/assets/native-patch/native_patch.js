@@ -11,10 +11,10 @@
   const copy = isChinese
     ? {
         weeklyTitle: "本周已用",
-        weeklyKicker: "官方",
+        officialSourceAria: "官方账户",
         remainingPrefix: "剩余",
         remainingAvailable: "剩余可用",
-        remainingSuffix: "可用",
+        remainingSuffix: "",
         resetSuffix: "重置",
         resetAtPrefix: "重置时间",
         resetCountdownPrefix: "距离自然重置",
@@ -37,15 +37,15 @@
         staleSuffix: " 的数据",
         cooldownPrefix: "暂时不可用，",
         cooldownSuffix: " 后重试",
-        refresh: "刷新",
+        refresh: "刷新用量",
         refreshing: "刷新中…",
       }
     : {
         weeklyTitle: "Weekly used",
-        weeklyKicker: "Official",
+        officialSourceAria: "Official account",
         remainingPrefix: "Remaining",
         remainingAvailable: "Remaining",
-        remainingSuffix: "available",
+        remainingSuffix: "",
         resetSuffix: "reset",
         resetAtPrefix: "Reset at",
         resetCountdownPrefix: "Until reset",
@@ -68,7 +68,7 @@
         staleSuffix: "",
         cooldownPrefix: "Unavailable; retry after ",
         cooldownSuffix: "",
-        refresh: "Refresh",
+        refresh: "Refresh usage",
         refreshing: "Refreshing…",
       };
 
@@ -92,22 +92,33 @@
         font-family: var(--cq-sans) !important;
       }
       .${compactClass} {
+        --cq-surface: #FAF7EF;
+        --cq-border: #E6E0D0;
+        --cq-track: #E9E3D5;
+        --cq-ink: #1C1917;
+        --cq-muted: #57534A;
+        --cq-soft: #8B8071;
+        --cq-faint: #9E998B;
+        --cq-accent: #8E4617;
         display: block !important;
-        width: 100% !important;
-        padding: 0 !important;
+        width: calc(100% - 16px) !important;
+        max-width: 248px;
+        margin: 0 8px 8px !important;
+        padding: 12px 14px 11px !important;
         overflow: hidden;
-        border: 0 !important;
-        border-radius: 0 !important;
+        border: 1px solid var(--cq-border) !important;
+        border-radius: 12px !important;
         outline: 0 !important;
-        background: transparent !important;
+        background: var(--cq-surface) !important;
         box-shadow: none !important;
       }
       #${officialHostId} {
         width: calc(100% - 16px) !important;
+        max-width: 248px;
         margin: 0 8px 8px !important;
-        padding: 9px 10px 8px !important;
+        padding: 12px 14px 11px !important;
         border: 1px solid var(--cq-border) !important;
-        border-radius: 10px !important;
+        border-radius: 12px !important;
         background: var(--cq-surface) !important;
       }
       .${apiCardClass} {
@@ -121,20 +132,24 @@
         box-shadow: var(--shadow-sm, none) !important;
       }
       .${compactContentClass} { display: grid; min-width: 0; }
-      .${compactContentClass} .cq-thread-main { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: start; column-gap: 12px; min-width: 0; }
-      .${compactContentClass} .cq-thread-primary { display: flex; flex-direction: column; gap: 7px; }
-      .${compactContentClass} .cq-thread-primary .cq-title { font-size: 11.5px; font-weight: 500; line-height: 14px; letter-spacing: .02em; }
-      .${compactContentClass} .cq-thread-primary .cq-number { display: flex; align-items: baseline; font-variant-numeric: tabular-nums; line-height: 1; }
-      .${compactContentClass} .cq-thread-primary .cq-number-value { font-size: 22px; font-weight: 600; letter-spacing: -.01em; }
-      .${compactContentClass} .cq-thread-primary .cq-number-unit { margin-left: 1px; color: var(--cq-muted); font-size: 11.5px; font-weight: 500; }
-      .${compactContentClass} .cq-thread-info { display: flex; min-width: 0; flex-direction: column; align-items: flex-end; gap: 2px; padding-top: 1px; color: var(--cq-faint); font-size: 10.5px; line-height: 14px; text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
-      .${compactContentClass} .cq-thread-actions { display: flex; align-items: baseline; gap: 8px; }
-      .${compactContentClass} .cq-thread-info .cq-kicker { color: var(--cq-faint); font-size: 10.5px; font-weight: 500; line-height: 14px; letter-spacing: 0; }
-      .${compactContentClass} .cq-thread-meta { color: var(--cq-muted); }
-      .${compactContentClass} .cq-thread-reset { color: var(--cq-faint); }
-      .${compactContentClass} .cq-thread-info b { color: var(--cq-ink); font-weight: 600; }
-      .${compactContentClass} .cq-thread-rule { position: relative; height: 1px; margin-top: 8px; background: var(--cq-track); }
-      .${compactContentClass} .cq-thread-rule::before { position: absolute; inset: 0 auto 0 0; width: var(--cq-used, 0%); background: var(--cq-accent); content: ""; transition: width .18s cubic-bezier(.16,1,.3,1); }
+      .${compactContentClass} .cq-thread-head { display: flex; align-items: center; justify-content: space-between; }
+      .${compactContentClass} .cq-thread-head .cq-title { color: var(--cq-muted); font-size: 11px; font-weight: 500; line-height: 16px; letter-spacing: .02em; }
+      .${compactContentClass} .cq-thread-head .cq-head-action { display: grid; width: 13px; height: 13px; place-items: center; }
+      .${compactContentClass} .cq-thread-main { display: flex; align-items: flex-end; min-width: 0; margin-top: 6px; }
+      .${compactContentClass} .cq-thread-main > .cq-number { display: flex; flex: none; align-items: baseline; font-variant-numeric: tabular-nums; line-height: 1; }
+      .${compactContentClass} .cq-thread-main > .cq-number .cq-number-value { font-size: 24px; font-weight: 600; letter-spacing: -.01em; }
+      .${compactContentClass} .cq-thread-main > .cq-number .cq-number-unit { margin-left: 1px; color: var(--cq-muted); font-size: 12px; font-weight: 500; }
+      .${compactContentClass} .cq-thread-meta { flex: none; padding-bottom: 1px; color: var(--cq-soft); font-size: 10px; line-height: normal; white-space: nowrap; font-variant-numeric: tabular-nums; }
+      .${compactContentClass} .cq-thread-meta b { color: var(--cq-ink); font-weight: 600; }
+      .${compactContentClass} .cq-thread-rule { position: relative; flex: 1; height: 2px; margin: 0 10px 2px; border-radius: 2px; background: var(--cq-track); }
+      .${compactContentClass} .cq-thread-rule::before { position: absolute; inset: 0 auto 0 0; width: var(--cq-used, 0%); border-radius: inherit; background: var(--cq-accent); content: ""; }
+      .${compactContentClass} .cq-thread-foot { display: flex; align-items: center; justify-content: space-between; margin-top: 8px; }
+      .${compactContentClass} .cq-thread-reset { display: flex; align-items: center; gap: 5px; color: var(--cq-soft); font-size: 9.5px; line-height: normal; white-space: nowrap; font-variant-numeric: tabular-nums; }
+      .${compactContentClass} .cq-thread-reset .cq-reset-prefix { display: none; }
+      .${compactContentClass} .cq-thread-reset b { color: var(--cq-muted); font-size: inherit; font-weight: 500; line-height: inherit; }
+      .${compactContentClass} .cq-clock { width: 11px; height: 11px; flex: none; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+      .${compactContentClass} .cq-reset-date { color: var(--cq-faint); font-size: 9.5px; line-height: normal; white-space: nowrap; font-variant-numeric: tabular-nums; }
+      .${compactContentClass} .cq-reset-date b { color: var(--cq-muted); font-weight: 500; }
       .${compactContentClass} .cq-folio-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
       .${compactContentClass} .cq-head-end { display: flex; align-items: baseline; gap: 8px; }
       .${compactContentClass} .cq-title { font-size: 12px; font-weight: 600; line-height: 16px; letter-spacing: 0; }
@@ -158,20 +173,21 @@
       .${compactContentClass} .cq-reset, .${compactContentClass} .cq-reset-value { color: var(--cq-muted); font-size: 10.5px; line-height: 16px; }
       .${compactContentClass} .cq-reset-value { text-align: right; overflow-wrap: anywhere; }
       .${compactContentClass} .cq-window > progress { grid-column: 1 / -1; height: 4px !important; margin: 0; }
-      .${compactContentClass} .cq-refresh { position: relative; margin: 0; padding: 0; border: 0; background: transparent; color: var(--cq-muted); cursor: pointer; font: inherit; font-size: 10.5px; line-height: 14px; transition: color .16s ease-out, opacity .16s ease-out; }
+      .${compactContentClass} .cq-refresh { position: relative; display: inline-grid; width: 13px; height: 13px; margin: 0; padding: 0; place-items: center; border: 0; background: transparent; color: var(--cq-faint); cursor: pointer; line-height: 0; }
+      .${compactContentClass} .cq-refresh-icon { display: block; width: 13px; height: 13px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
       .${compactContentClass} .cq-refresh::before { position: absolute; inset: -10px; content: ""; }
       .${compactContentClass} .cq-refresh:hover { color: var(--cq-ink); }
       .${compactContentClass} .cq-refresh:focus-visible { border-radius: 4px; outline: 2px solid var(--cq-accent); outline-offset: 1px; }
       .${compactContentClass} .cq-refresh:disabled { cursor: wait; opacity: .65; }
       @media (prefers-contrast: more) {
-        .${compactClass}, .${apiCardClass} { --cq-muted: var(--cq-ink); --cq-faint: var(--cq-ink); }
+        .${compactClass}, .${apiCardClass} { --cq-muted: var(--cq-ink); --cq-soft: var(--cq-ink); --cq-faint: var(--cq-ink); }
         #${officialHostId}, .${apiCardClass} { border-color: var(--cq-ink) !important; outline-color: var(--cq-ink); }
       }
       @media (forced-colors: active) {
-        .${compactClass}, .${apiCardClass} { --cq-surface: Canvas; --cq-border: CanvasText; --cq-track: GrayText; --cq-ink: CanvasText; --cq-muted: CanvasText; --cq-faint: CanvasText; --cq-accent: Highlight; forced-color-adjust: auto; }
+        .${compactClass}, .${apiCardClass} { --cq-surface: Canvas; --cq-border: CanvasText; --cq-track: GrayText; --cq-ink: CanvasText; --cq-muted: CanvasText; --cq-soft: CanvasText; --cq-faint: CanvasText; --cq-accent: Highlight; forced-color-adjust: auto; }
       }
       @media (prefers-reduced-motion: reduce) {
-        .${compactContentClass} .cq-thread-rule::before, .${compactContentClass} .cq-rule::before, .${compactContentClass} .cq-refresh { transition: none !important; }
+        .${compactContentClass} .cq-rule::before, .${compactContentClass} .cq-refresh { transition: none !important; }
       }
     `;
     if (style.textContent !== css) style.textContent = css;
@@ -264,6 +280,13 @@
     return {busy: false, text: null};
   };
 
+  const setRefreshButtonState = (button, busy) => {
+    const label = busy ? copy.refreshing : copy.refresh;
+    button.disabled = busy;
+    button.setAttribute("aria-label", label);
+    button.title = label;
+  };
+
   const createRefreshButton = (kind) => {
     const button = document.createElement("button");
     const busy = kind === "api"
@@ -271,8 +294,12 @@
       : globalThis.__codexQuotaOfficialNeedsData === true;
     button.type = "button";
     button.className = "cq-refresh";
-    button.disabled = busy;
-    button.textContent = busy ? copy.refreshing : copy.refresh;
+    button.innerHTML = `
+      <svg class="cq-refresh-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+        <path d="M20 12a8 8 0 1 1-2.34-5.66"></path>
+        <path d="M20 4v6h-6"></path>
+      </svg>`;
+    setRefreshButtonState(button, busy);
     button.addEventListener("click", () => kind === "api" ? requestApiData(true) : requestOfficialData(true));
     return button;
   };
@@ -312,36 +339,50 @@
     setCardAccessibility(card, false);
   };
 
-  const setThreadReset = (content, prefix, detail) => {
+  const setThreadReset = (content, prefix, detail, date) => {
+    const resetNode = content.querySelector(".cq-thread-reset");
     const prefixNode = content.querySelector(".cq-reset-prefix");
     const valueNode = content.querySelector(".cq-reset-value");
+    const dateNode = content.querySelector(".cq-reset-date");
+    const dateValueNode = content.querySelector(".cq-reset-date-value");
     if (prefixNode && prefixNode.textContent !== prefix) prefixNode.textContent = prefix;
     if (valueNode && valueNode.textContent !== detail) valueNode.textContent = detail;
+    if (dateValueNode && dateValueNode.textContent !== date) dateValueNode.textContent = date;
+    if (resetNode) resetNode.setAttribute("aria-label", `${prefix} ${detail}`.trim());
+    if (dateNode) dateNode.setAttribute("aria-label", `${date} ${copy.resetSuffix}`.trim());
   };
 
-  const createThreadContent = ({title, kicker, resetPrefix, resetDetail, action = null}) => {
+  const createThreadContent = ({title, resetPrefix, resetDetail, resetDate, action = null}) => {
     const content = document.createElement("div");
     content.className = compactContentClass;
     content.dataset.cqLayout = "thread-v2";
+    content.dataset.cqVariant = "a2-merge-v1";
     content.innerHTML = `
-      <div class="cq-thread-main">
-        <div class="cq-thread-primary">
-          <span class="cq-title"></span>
-          <div class="cq-number"><span class="cq-number-value">0</span><span class="cq-number-unit">%</span></div>
-        </div>
-        <div class="cq-thread-info">
-          <div class="cq-thread-actions"><span class="cq-kicker"></span><span class="cq-head-action"></span></div>
-          <div class="cq-thread-meta"><span class="cq-remaining-prefix"></span> <b class="cq-remaining-value">0%</b> <span class="cq-remaining-suffix"></span></div>
-          <div class="cq-thread-reset"><span class="cq-reset-prefix"></span> <b class="cq-reset-value"></b></div>
-        </div>
+      <div class="cq-thread-head">
+        <span class="cq-title"></span>
+        <span class="cq-head-action"></span>
       </div>
-      <div class="cq-thread-rule" role="progressbar" aria-valuemin="0" aria-valuemax="100"></div>`;
+      <div class="cq-thread-main">
+        <div class="cq-number"><span class="cq-number-value">0</span><span class="cq-number-unit">%</span></div>
+        <div class="cq-thread-rule" role="progressbar" aria-valuemin="0" aria-valuemax="100"></div>
+        <div class="cq-thread-meta"><span class="cq-remaining-prefix"></span> <b class="cq-remaining-value">0%</b> <span class="cq-remaining-suffix"></span></div>
+      </div>
+      <div class="cq-thread-foot">
+        <div class="cq-thread-reset">
+          <svg class="cq-clock" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <circle cx="12" cy="12" r="9"></circle>
+            <path d="M12 7v5l3 2"></path>
+          </svg>
+          <span class="cq-reset-prefix"></span><b class="cq-reset-value"></b>
+        </div>
+        <div class="cq-reset-date"><b class="cq-reset-date-value"></b> <span class="cq-reset-date-suffix"></span></div>
+      </div>`;
     content.querySelector(".cq-title").textContent = title;
-    content.querySelector(".cq-kicker").textContent = kicker;
     content.querySelector(".cq-remaining-prefix").textContent = copy.remainingPrefix;
     content.querySelector(".cq-remaining-suffix").textContent = copy.remainingSuffix;
+    content.querySelector(".cq-reset-date-suffix").textContent = copy.resetSuffix;
     if (action instanceof Node) content.querySelector(".cq-head-action").append(action);
-    setThreadReset(content, resetPrefix, resetDetail);
+    setThreadReset(content, resetPrefix, resetDetail, resetDate);
     return content;
   };
 
@@ -398,9 +439,9 @@
     const used = 100 - remaining;
     const content = createThreadContent({
       title: copy.weeklyTitle,
-      kicker: copy.weeklyKicker,
       resetPrefix: copy.resetAtPrefix,
       resetDetail: resetTime(reset),
+      resetDate: resetTime(reset),
       action: createRefreshButton("official"),
     });
     setThreadUsage(content, used);
@@ -414,7 +455,7 @@
     const state = quotaState("official", globalThis.__codexQuotaOfficialPayload || null);
     setContentStatus(content, state.text);
     setCardAccessibility(card, state.busy);
-    card.setAttribute("aria-label", `${copy.weeklyTitle}. ${copy.weeklyUsedAria} ${formatPercent(used)}%. ${copy.remainingPrefix} ${formatPercent(remaining)}% ${copy.remainingSuffix}. ${resetLabel(reset)}`);
+    card.setAttribute("aria-label", `${copy.officialSourceAria}. ${copy.weeklyTitle}. ${copy.weeklyUsedAria} ${formatPercent(used)}%. ${copy.remainingPrefix} ${formatPercent(remaining)}%. ${resetLabel(reset)}`);
     card.replaceChildren(content);
   };
 
@@ -436,7 +477,8 @@
     if (content.dataset.cqUsed !== formatPercent(used)) setThreadUsage(content, used);
     progress.setAttribute("aria-label", `${copy.weeklyUsedAria} ${formatPercent(used)}%`);
     const reset = resetTime((content.querySelector(".cq-reset-value")?.textContent || "").trim());
-    card.setAttribute("aria-label", `${copy.weeklyTitle}. ${copy.weeklyUsedAria} ${formatPercent(used)}%. ${copy.remainingPrefix} ${formatPercent(remaining)}% ${copy.remainingSuffix}. ${resetLabel(reset)}`);
+    const resetDate = (content.querySelector(".cq-reset-date-value")?.textContent || "").trim();
+    card.setAttribute("aria-label", `${copy.officialSourceAria}. ${copy.weeklyTitle}. ${copy.weeklyUsedAria} ${formatPercent(used)}%. ${copy.remainingPrefix} ${formatPercent(remaining)}%. ${copy.resetCountdownPrefix} ${reset}. ${resetDate} ${copy.resetSuffix}`);
   };
 
   const compactCard = (card) => {
@@ -445,8 +487,10 @@
       const progress = existing.querySelector("progress.cq-source-progress");
       const used = Number(progress?.value);
       const staleThread = !existing.querySelector(".cq-refresh") ||
-        existing.querySelector(".cq-title")?.textContent !== copy.weeklyTitle ||
-        existing.querySelector(".cq-kicker")?.textContent !== copy.weeklyKicker;
+        existing.dataset.cqVariant !== "a2-merge-v1" ||
+        !existing.querySelector(".cq-refresh-icon") ||
+        !existing.querySelector(".cq-clock") ||
+        existing.querySelector(".cq-title")?.textContent !== copy.weeklyTitle;
       if (progress && staleThread && Number.isFinite(used)) {
         const reset = (existing.querySelector(".cq-reset-value")?.textContent || "").trim() || "Unavailable";
         renderOfficialThread(card, progress, 100 - used, reset);
@@ -516,6 +560,7 @@
       source.dataset.codexApiSource = "true";
       source.hidden = true;
       host = source.cloneNode(false);
+      host.classList.remove(compactClass);
       host.classList.add(apiCardClass);
       host.removeAttribute("role");
       host.hidden = false;
@@ -564,6 +609,15 @@
     }).format(date);
   };
 
+  const formatResetDate = (value) => {
+    const date = new Date(Number(value) * 1000);
+    if (!Number.isFinite(date.getTime())) return copy.resetUnavailable;
+    return new Intl.DateTimeFormat(navigator.language, {
+      month: isChinese ? "long" : "short",
+      day: "numeric",
+    }).format(date);
+  };
+
   const formatResetCountdown = (value) => {
     const remainingMs = Math.max(0, Number(value) * 1000 - Date.now());
     if (!Number.isFinite(remainingMs)) return copy.resetUnavailable;
@@ -578,10 +632,11 @@
     const content = card?.querySelector(`.${compactContentClass}[data-cq-layout="thread-v2"]`);
     if (!weekly || !Number.isFinite(weekly.resetAt) || !content) return;
     const countdown = formatResetCountdown(weekly.resetAt);
-    setThreadReset(content, copy.resetCountdownPrefix, countdown);
+    const resetDate = formatResetDate(weekly.resetAt);
+    setThreadReset(content, copy.resetCountdownPrefix, countdown, resetDate);
     const used = Number(content.dataset.cqUsed);
     if (Number.isFinite(used)) {
-      card.setAttribute("aria-label", `${copy.weeklyTitle}. ${copy.weeklyUsedAria} ${formatPercent(used)}%. ${copy.remainingPrefix} ${formatPercent(100 - used)}% ${copy.remainingSuffix}. ${copy.resetCountdownPrefix} ${countdown}`);
+      card.setAttribute("aria-label", `${copy.officialSourceAria}. ${copy.weeklyTitle}. ${copy.weeklyUsedAria} ${formatPercent(used)}%. ${copy.remainingPrefix} ${formatPercent(100 - used)}%. ${copy.resetCountdownPrefix} ${countdown}. ${resetDate} ${copy.resetSuffix}`);
     }
   };
 
@@ -609,18 +664,19 @@
     const weekly = valid && windows.length === 1 && windows[0].label === "Weekly" ? windows[0] : null;
     if (weekly) {
       const countdown = formatResetCountdown(weekly.resetAt);
+      const resetDate = formatResetDate(weekly.resetAt);
       const content = createThreadContent({
         title: copy.weeklyTitle,
-        kicker: copy.weeklyKicker,
         resetPrefix: copy.resetCountdownPrefix,
         resetDetail: countdown,
+        resetDate,
         action: createRefreshButton("official"),
       });
       setThreadUsage(content, weekly.usedPercent);
       content.querySelector(".cq-thread-rule").setAttribute("aria-label", copy.weeklyUsedAria);
       setContentStatus(content, state.text);
       setCardAccessibility(card, state.busy);
-      card.setAttribute("aria-label", `${copy.weeklyTitle}. ${copy.weeklyUsedAria} ${formatPercent(weekly.usedPercent)}%. ${copy.remainingPrefix} ${formatPercent(100 - weekly.usedPercent)}% ${copy.remainingSuffix}. ${copy.resetCountdownPrefix} ${countdown}`);
+      card.setAttribute("aria-label", `${copy.officialSourceAria}. ${copy.weeklyTitle}. ${copy.weeklyUsedAria} ${formatPercent(weekly.usedPercent)}%. ${copy.remainingPrefix} ${formatPercent(100 - weekly.usedPercent)}%. ${copy.resetCountdownPrefix} ${countdown}. ${resetDate} ${copy.resetSuffix}`);
       card.replaceChildren(content);
       return;
     }
@@ -645,7 +701,7 @@
       if (state.text) addFallbackRow(content, copy.status, state.text, true);
     }
     setCardAccessibility(card, state.busy);
-    card.setAttribute("aria-label", copy.weeklyTitle);
+    card.setAttribute("aria-label", `${copy.officialSourceAria}. ${copy.weeklyTitle}`);
     card.replaceChildren(content);
   };
 
@@ -736,10 +792,7 @@
       if (content) setContentStatus(content, state.text);
       setCardAccessibility(nativeCard, state.busy);
       const refresh = content?.querySelector(".cq-refresh");
-      if (refresh) {
-        refresh.disabled = true;
-        refresh.textContent = copy.refreshing;
-      }
+      if (refresh) setRefreshButtonState(refresh, state.busy);
     } else {
       const card = document.getElementById(officialHostId);
       if (card) renderOfficial(card, globalThis.__codexQuotaOfficialPayload || null, quotaErrorCode("official"));
@@ -793,6 +846,8 @@
       const state = quotaState("official", globalThis.__codexQuotaOfficialPayload || null);
       if (content) setContentStatus(content, state.text);
       setCardAccessibility(nativeCard, state.busy);
+      const refresh = content?.querySelector(".cq-refresh");
+      if (refresh) setRefreshButtonState(refresh, state.busy);
     } else {
       const card = document.getElementById(officialHostId);
       if (!apiMode() && card) renderOfficial(
@@ -882,8 +937,10 @@
     const currentLayout = host.firstElementChild?.dataset.cqLayout;
     const staleThread = currentLayout === "thread-v2" &&
       (!host.querySelector(".cq-refresh") ||
-       host.querySelector(".cq-title")?.textContent !== copy.weeklyTitle ||
-       host.querySelector(".cq-kicker")?.textContent !== copy.weeklyKicker);
+       host.firstElementChild?.dataset.cqVariant !== "a2-merge-v1" ||
+       !host.querySelector(".cq-refresh-icon") ||
+       !host.querySelector(".cq-clock") ||
+       host.querySelector(".cq-title")?.textContent !== copy.weeklyTitle);
     const staleFallback = currentLayout === "thread-v2-fallback" &&
       (!host.querySelector(".cq-refresh") || host.getAttribute("role") !== "region");
     if ((currentLayout !== "thread-v2" && currentLayout !== "thread-v2-fallback") ||
