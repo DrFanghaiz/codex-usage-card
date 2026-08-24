@@ -100,6 +100,7 @@
         --cq-soft: #8B8071;
         --cq-faint: #9E998B;
         --cq-accent: #8E4617;
+        container-type: inline-size;
         display: block !important;
         width: calc(100% - 16px) !important;
         max-width: 248px;
@@ -182,6 +183,13 @@
       @media (prefers-contrast: more) {
         .${compactClass}, .${apiCardClass} { --cq-muted: var(--cq-ink); --cq-soft: var(--cq-ink); --cq-faint: var(--cq-ink); }
         #${officialHostId}, .${apiCardClass} { border-color: var(--cq-ink) !important; outline-color: var(--cq-ink); }
+      }
+      @container (max-width: 170px) {
+        .${compactContentClass} .cq-thread-rule { margin-inline: 6px; }
+      }
+      @container (max-width: 147px) {
+        .${compactContentClass} .cq-thread-foot { align-items: stretch; flex-direction: column; gap: 4px; }
+        .${compactContentClass} .cq-reset-date { text-align: right; }
       }
       @media (forced-colors: active) {
         .${compactClass}, .${apiCardClass} { --cq-surface: Canvas; --cq-border: CanvasText; --cq-track: GrayText; --cq-ink: CanvasText; --cq-muted: CanvasText; --cq-soft: CanvasText; --cq-faint: CanvasText; --cq-accent: Highlight; forced-color-adjust: auto; }
