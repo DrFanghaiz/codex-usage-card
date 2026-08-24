@@ -96,10 +96,10 @@ class NativeHelperTests(unittest.TestCase):
                 "Unregister-ScheduledTask -TaskPath '\\' -TaskName $legacyTaskName"
             ),
         )
-        self.assertIn("$releaseTag = 'v1.5.0'", ROOT_INSTALL_SCRIPT)
+        self.assertIn("$releaseTag = 'v1.6.0'", ROOT_INSTALL_SCRIPT)
         self.assertIn("$archiveName = 'codex-usage-card.skill.zip'", ROOT_INSTALL_SCRIPT)
         self.assertIn("'scripts\\doctor.ps1'", ROOT_INSTALL_SCRIPT)
-        self.assertIn("C78AF141567BA7D9A049E6330C9DA0E3FF86DD7494C42DC3F497FDA4E0ACC490", ROOT_INSTALL_SCRIPT)
+        self.assertIn("E94C8F5ECE7869E3AC0EA9BB0431688254C7CCCD239B8DD3C25E92487CCC552D", ROOT_INSTALL_SCRIPT)
 
 
 if __name__ == "__main__":
