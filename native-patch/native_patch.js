@@ -11,6 +11,7 @@
   const copy = isChinese
     ? {
         weeklyTitle: "本周已用",
+        fiveHourTitle: "5小时已用",
         officialSourceAria: "官方账户",
         remainingPrefix: "剩余",
         remainingAvailable: "剩余可用",
@@ -19,7 +20,10 @@
         resetAtPrefix: "重置时间",
         resetCountdownPrefix: "距离自然重置",
         used: "已用",
+        summaryUsed: "已用",
+        weeklySummaryTitle: "本周",
         weeklyUsedAria: "每周已用",
+        fiveHourUsedAria: "5小时已用",
         resetUnavailable: "重置时间不可用",
         officialUnavailable: "周用量不可用",
         apiTitle: "API 剩余",
@@ -42,6 +46,7 @@
       }
     : {
         weeklyTitle: "Weekly used",
+        fiveHourTitle: "5h used",
         officialSourceAria: "Official account",
         remainingPrefix: "Remaining",
         remainingAvailable: "Remaining",
@@ -50,7 +55,10 @@
         resetAtPrefix: "Reset at",
         resetCountdownPrefix: "Until reset",
         used: "Used",
+        summaryUsed: "used",
+        weeklySummaryTitle: "Weekly",
         weeklyUsedAria: "Weekly used",
+        fiveHourUsedAria: "5-hour used",
         resetUnavailable: "Reset unavailable",
         officialUnavailable: "Weekly usage unavailable",
         apiTitle: "API remaining",
@@ -73,6 +81,39 @@
       };
 
   const apiMode = () => globalThis.__codexQuotaMode === "api";
+
+  const adaptiveRefreshDelayMs = (now = Date.now()) => {
+    const sinceInteraction = now - Number(globalThis.__codexQuotaLastInteractionAt || 0);
+    if (sinceInteraction <= staleAfterMs) return 2 * 60 * 1000;
+    if (sinceInteraction <= 60 * 60 * 1000) return staleAfterMs;
+    const sinceUsageActivity = now - Number(globalThis.__codexQuotaLastUsageActivityAt || 0);
+    if (sinceUsageActivity <= staleAfterMs) return staleAfterMs;
+    if (sinceInteraction <= 4 * 60 * 60 * 1000) return 15 * 60 * 1000;
+    return 30 * 60 * 1000;
+  };
+
+  const quotaUsageFingerprint = (data) => Array.isArray(data?.windows)
+    ? JSON.stringify(data.windows.map((window) => [window.label, window.usedPercent]).sort(([a], [b]) => a.localeCompare(b)))
+    : JSON.stringify([data?.used, data?.remaining, data?.total]);
+
+  const officialPresentation = (data) => {
+    const planName = typeof data?.planName === "string" ? data.planName.trim().toLowerCase() : "";
+    const windows = Array.isArray(data?.windows) ? data.windows : [];
+    const valid = planName && windows.length > 0 && windows.every((window) =>
+      typeof window?.label === "string" &&
+      Number.isFinite(window?.usedPercent) && window.usedPercent >= 0 && window.usedPercent <= 100 &&
+      Number.isFinite(window?.resetAt) && window.resetAt >= 0);
+    if (!valid) return null;
+    const fiveHour = windows.find((window) => window.label === "5h");
+    const weekly = windows.find((window) => window.label === "Weekly");
+    if (planName === "plus" && windows.length === 2 && fiveHour && weekly) {
+      return {kind: "plus-b", planName, windows, fiveHour, weekly};
+    }
+    if (windows.length === 1 && weekly) {
+      return {kind: "weekly", planName, planLabel: planName === "pro" ? "Pro" : "", windows, weekly};
+    }
+    return {kind: "fallback", planName, windows};
+  };
 
   const ensureStyle = () => {
     const style = document.getElementById(styleId) || document.createElement("style");
@@ -100,6 +141,7 @@
         --cq-soft: #8B8071;
         --cq-faint: #9E998B;
         --cq-accent: #8E4617;
+        container-type: inline-size;
         display: block !important;
         width: calc(100% - 16px) !important;
         max-width: 248px;
@@ -133,7 +175,10 @@
       }
       .${compactContentClass} { display: grid; min-width: 0; }
       .${compactContentClass} .cq-thread-head { display: flex; align-items: center; justify-content: space-between; }
+      .${compactContentClass} .cq-title-wrap { display: flex; min-width: 0; align-items: center; }
       .${compactContentClass} .cq-thread-head .cq-title { color: var(--cq-muted); font-size: 11px; font-weight: 500; line-height: 16px; letter-spacing: .02em; }
+      .${compactContentClass} .cq-plan { margin-left: 7px; padding: 1px 7px; border: 1px solid rgba(142, 70, 23, .28); border-radius: 999px; background: rgba(142, 70, 23, .08); color: var(--cq-accent); font-size: 9px; font-weight: 600; line-height: 1.5; letter-spacing: .04em; }
+      .${compactContentClass} .cq-plan:empty { display: none; }
       .${compactContentClass} .cq-thread-head .cq-head-action { display: grid; width: 13px; height: 13px; place-items: center; }
       .${compactContentClass} .cq-thread-main { display: flex; align-items: flex-end; min-width: 0; margin-top: 6px; }
       .${compactContentClass} .cq-thread-main > .cq-number { display: flex; flex: none; align-items: baseline; font-variant-numeric: tabular-nums; line-height: 1; }
@@ -150,6 +195,10 @@
       .${compactContentClass} .cq-clock { width: 11px; height: 11px; flex: none; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
       .${compactContentClass} .cq-reset-date { color: var(--cq-faint); font-size: 9.5px; line-height: normal; white-space: nowrap; font-variant-numeric: tabular-nums; }
       .${compactContentClass} .cq-reset-date b { color: var(--cq-muted); font-weight: 500; }
+      .${compactContentClass} .cq-week-divider { height: 1px; margin: 9px 0 7px; background: var(--cq-track); }
+      .${compactContentClass} .cq-week-summary { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; color: var(--cq-faint); font-size: 9.5px; line-height: normal; font-variant-numeric: tabular-nums; }
+      .${compactContentClass} .cq-week-summary > span { white-space: nowrap; }
+      .${compactContentClass} .cq-week-summary b { color: var(--cq-muted); font-weight: 500; }
       .${compactContentClass} .cq-folio-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
       .${compactContentClass} .cq-head-end { display: flex; align-items: baseline; gap: 8px; }
       .${compactContentClass} .cq-title { font-size: 12px; font-weight: 600; line-height: 16px; letter-spacing: 0; }
@@ -182,6 +231,15 @@
       @media (prefers-contrast: more) {
         .${compactClass}, .${apiCardClass} { --cq-muted: var(--cq-ink); --cq-soft: var(--cq-ink); --cq-faint: var(--cq-ink); }
         #${officialHostId}, .${apiCardClass} { border-color: var(--cq-ink) !important; outline-color: var(--cq-ink); }
+      }
+      @container (max-width: 170px) {
+        .${compactContentClass} .cq-thread-rule { margin-inline: 6px; }
+      }
+      @container (max-width: 147px) {
+        .${compactContentClass} .cq-thread-foot { align-items: stretch; flex-direction: column; gap: 4px; }
+        .${compactContentClass} .cq-reset-date { text-align: right; }
+        .${compactContentClass} .cq-week-summary { align-items: stretch; flex-direction: column; gap: 4px; }
+        .${compactContentClass} .cq-week-summary > :last-child { text-align: right; }
       }
       @media (forced-colors: active) {
         .${compactClass}, .${apiCardClass} { --cq-surface: Canvas; --cq-border: CanvasText; --cq-track: GrayText; --cq-ink: CanvasText; --cq-muted: CanvasText; --cq-soft: CanvasText; --cq-faint: CanvasText; --cq-accent: Highlight; forced-color-adjust: auto; }
@@ -229,14 +287,32 @@
     return text.replace(/^resets?(?:\s+at)?\s*/i, "").replace(/\s+resets?$/i, "");
   };
 
-  const resetLabel = (value) => {
-    const time = resetTime(value);
-    return time === copy.resetUnavailable ? time : `${time} ${copy.resetSuffix}`;
-  };
-
   const quotaErrorCode = (kind) => kind === "api"
     ? globalThis.__codexQuotaApiErrorCode || (globalThis.__codexQuotaApiError ? "UNAVAILABLE" : null)
     : globalThis.__codexQuotaOfficialErrorCode || (globalThis.__codexQuotaOfficialError ? "UNAVAILABLE" : null);
+
+  const quotaTiming = (isApi = apiMode()) => ({
+    lastSuccessAt: Number(isApi
+      ? globalThis.__codexQuotaApiLastSuccessAt || 0
+      : globalThis.__codexQuotaOfficialLastSuccessAt || 0),
+    nextAttemptAt: Number(isApi
+      ? globalThis.__codexQuotaApiNextAutoAttemptAt || 0
+      : globalThis.__codexQuotaOfficialNextAutoAttemptAt || 0),
+    cooldownUntil: Number(isApi
+      ? globalThis.__codexQuotaApiCooldownUntil || 0
+      : globalThis.__codexQuotaOfficialCooldownUntil || 0),
+  });
+
+  const recordQuotaInteraction = (kind) => {
+    const now = Date.now();
+    globalThis.__codexQuotaLastInteractionAt = now;
+    const isApi = kind === "api";
+    const {lastSuccessAt} = quotaTiming(isApi);
+    if (!lastSuccessAt || quotaErrorCode(kind)) return;
+    const nextAt = lastSuccessAt + adaptiveRefreshDelayMs(now);
+    if (isApi) globalThis.__codexQuotaApiNextAutoAttemptAt = nextAt;
+    else globalThis.__codexQuotaOfficialNextAutoAttemptAt = nextAt;
+  };
 
   const formatStatusTime = (value) => {
     const date = new Date(Number(value));
@@ -256,12 +332,7 @@
     const loaded = isApi
       ? globalThis.__codexQuotaApiLoaded === true
       : globalThis.__codexQuotaOfficialLoaded === true;
-    const lastSuccessAt = Number(isApi
-      ? globalThis.__codexQuotaApiLastSuccessAt || 0
-      : globalThis.__codexQuotaOfficialLastSuccessAt || 0);
-    const cooldownUntil = Number(isApi
-      ? globalThis.__codexQuotaApiCooldownUntil || 0
-      : globalThis.__codexQuotaOfficialCooldownUntil || 0);
+    const {lastSuccessAt, cooldownUntil} = quotaTiming(isApi);
     if (needsData) return {busy: true, text: data ? null : copy.loading};
     if (errorCode && data) {
       const time = formatStatusTime(lastSuccessAt);
@@ -300,7 +371,11 @@
         <path d="M20 4v6h-6"></path>
       </svg>`;
     setRefreshButtonState(button, busy);
-    button.addEventListener("click", () => kind === "api" ? requestApiData(true) : requestOfficialData(true));
+    button.addEventListener("click", () => {
+      recordQuotaInteraction(kind);
+      if (kind === "api") requestApiData(true);
+      else requestOfficialData(true);
+    });
     return button;
   };
 
@@ -348,18 +423,37 @@
     if (prefixNode && prefixNode.textContent !== prefix) prefixNode.textContent = prefix;
     if (valueNode && valueNode.textContent !== detail) valueNode.textContent = detail;
     if (dateValueNode && dateValueNode.textContent !== date) dateValueNode.textContent = date;
+    content.dataset.cqResetPrefix = prefix;
     if (resetNode) resetNode.setAttribute("aria-label", `${prefix} ${detail}`.trim());
     if (dateNode) dateNode.setAttribute("aria-label", `${date} ${copy.resetSuffix}`.trim());
   };
 
-  const createThreadContent = ({title, resetPrefix, resetDetail, resetDate, action = null}) => {
+  const setWeeklySummary = (content, used, resetDate) => {
+    const usedText = formatPercent(used);
+    content.dataset.cqWeeklyUsed = usedText;
+    const usedNode = content.querySelector(".cq-week-used");
+    const dateNode = content.querySelector(".cq-week-reset-date");
+    if (usedNode && usedNode.textContent !== `${usedText}%`) usedNode.textContent = `${usedText}%`;
+    if (dateNode && dateNode.textContent !== resetDate) dateNode.textContent = resetDate;
+  };
+
+  const createThreadContent = ({
+    title,
+    resetPrefix,
+    resetDetail,
+    resetDate,
+    action = null,
+    planLabel = "",
+    variant = "a2-merge-v1",
+    weeklySummary = null,
+  }) => {
     const content = document.createElement("div");
     content.className = compactContentClass;
     content.dataset.cqLayout = "thread-v2";
-    content.dataset.cqVariant = "a2-merge-v1";
+    content.dataset.cqVariant = variant;
     content.innerHTML = `
       <div class="cq-thread-head">
-        <span class="cq-title"></span>
+        <span class="cq-title-wrap"><span class="cq-title"></span><span class="cq-plan"></span></span>
         <span class="cq-head-action"></span>
       </div>
       <div class="cq-thread-main">
@@ -378,26 +472,65 @@
         <div class="cq-reset-date"><b class="cq-reset-date-value"></b> <span class="cq-reset-date-suffix"></span></div>
       </div>`;
     content.querySelector(".cq-title").textContent = title;
+    content.querySelector(".cq-plan").textContent = planLabel;
     content.querySelector(".cq-remaining-prefix").textContent = copy.remainingPrefix;
     content.querySelector(".cq-remaining-suffix").textContent = copy.remainingSuffix;
     content.querySelector(".cq-reset-date-suffix").textContent = copy.resetSuffix;
     if (action instanceof Node) content.querySelector(".cq-head-action").append(action);
     setThreadReset(content, resetPrefix, resetDetail, resetDate);
+    if (weeklySummary) {
+      const divider = document.createElement("div");
+      divider.className = "cq-week-divider";
+      divider.setAttribute("aria-hidden", "true");
+      const summary = document.createElement("div");
+      summary.className = "cq-week-summary";
+      summary.innerHTML = `
+        <span><span class="cq-week-title"></span> <b class="cq-week-used"></b> <span class="cq-week-used-suffix"></span></span>
+        <span><b class="cq-week-reset-date"></b> <span class="cq-week-reset-suffix"></span></span>`;
+      summary.querySelector(".cq-week-title").textContent = copy.weeklySummaryTitle;
+      summary.querySelector(".cq-week-used-suffix").textContent = copy.summaryUsed;
+      summary.querySelector(".cq-week-reset-suffix").textContent = copy.resetSuffix;
+      content.append(divider, summary);
+      setWeeklySummary(content, weeklySummary.used, weeklySummary.resetDate);
+    }
     return content;
   };
 
-  const setThreadUsage = (content, value) => {
+  const setThreadUsage = (content, value, usageAria = copy.weeklyUsedAria) => {
     const used = Math.max(0, Math.min(100, Number(value)));
     if (!Number.isFinite(used)) return;
     const usedText = formatPercent(used);
     const remainingText = formatPercent(100 - used);
     content.dataset.cqUsed = usedText;
+    content.dataset.cqUsageAria = usageAria;
     content.querySelector(".cq-number-value").textContent = usedText;
     content.querySelector(".cq-remaining-value").textContent = `${remainingText}%`;
     content.style.setProperty("--cq-used", `${used}%`);
     const progress = content.querySelector(".cq-thread-rule");
     progress.setAttribute("aria-valuenow", usedText);
-    progress.setAttribute("aria-valuetext", `${copy.weeklyUsedAria} ${usedText}%`);
+    progress.setAttribute("aria-label", usageAria);
+    progress.setAttribute("aria-valuetext", `${usageAria} ${usedText}%`);
+  };
+
+  const setOfficialCardAria = (card, content) => {
+    const used = content.dataset.cqUsed;
+    if (used === undefined) return;
+    const remaining = formatPercent(100 - Number(used));
+    const title = content.querySelector(".cq-title")?.textContent || copy.weeklyTitle;
+    const planLabel = content.querySelector(".cq-plan")?.textContent || "";
+    const usageAria = content.dataset.cqUsageAria || copy.weeklyUsedAria;
+    const resetPrefix = content.dataset.cqResetPrefix || copy.resetCountdownPrefix;
+    const resetDetail = content.querySelector(".cq-reset-value")?.textContent || copy.resetUnavailable;
+    const resetDate = content.querySelector(".cq-reset-date-value")?.textContent || copy.resetUnavailable;
+    const parts = [copy.officialSourceAria];
+    if (planLabel) parts.push(`${copy.plan} ${planLabel}`);
+    parts.push(title, `${usageAria} ${used}%`, `${copy.remainingPrefix} ${remaining}%`, `${resetPrefix} ${resetDetail}`, `${resetDate} ${copy.resetSuffix}`);
+    if (content.dataset.cqVariant === "a2-plus-b-v1") {
+      const weeklyUsed = content.dataset.cqWeeklyUsed;
+      const weeklyDate = content.querySelector(".cq-week-reset-date")?.textContent || copy.resetUnavailable;
+      parts.push(`${copy.weeklySummaryTitle} ${weeklyUsed}% ${copy.summaryUsed}`, `${weeklyDate} ${copy.resetSuffix}`);
+    }
+    card.setAttribute("aria-label", parts.join(". "));
   };
 
   const createFolioContent = ({title, kicker, note, detail, action = null}) => {
@@ -435,7 +568,7 @@
     progress.setAttribute("aria-valuetext", `${copy.apiRemainingAria} ${text}%`);
   };
 
-  const renderOfficialThread = (card, progress, remaining, reset) => {
+  const renderOfficialThread = (card, progress, remaining, reset, planLabel = "") => {
     const used = 100 - remaining;
     const content = createThreadContent({
       title: copy.weeklyTitle,
@@ -443,10 +576,11 @@
       resetDetail: resetTime(reset),
       resetDate: resetTime(reset),
       action: createRefreshButton("official"),
+      planLabel,
     });
     setThreadUsage(content, used);
-    content.querySelector(".cq-thread-rule").setAttribute("aria-label", copy.weeklyUsedAria);
     progress.value = 100 - remaining;
+    progress.dataset.cqWindowLabel = "Weekly";
     progress.classList.add("cq-source-progress");
     progress.hidden = true;
     progress.setAttribute("aria-label", `${copy.weeklyUsedAria} ${formatPercent(used)}%`);
@@ -455,8 +589,58 @@
     const state = quotaState("official", globalThis.__codexQuotaOfficialPayload || null);
     setContentStatus(content, state.text);
     setCardAccessibility(card, state.busy);
-    card.setAttribute("aria-label", `${copy.officialSourceAria}. ${copy.weeklyTitle}. ${copy.weeklyUsedAria} ${formatPercent(used)}%. ${copy.remainingPrefix} ${formatPercent(remaining)}%. ${resetLabel(reset)}`);
+    setOfficialCardAria(card, content);
     card.replaceChildren(content);
+  };
+
+  const renderOfficialPlus = (card, presentation, sourceProgresses = [], state = null) => {
+    const {fiveHour, weekly, windows} = presentation;
+    const content = createThreadContent({
+      title: copy.fiveHourTitle,
+      resetPrefix: copy.resetCountdownPrefix,
+      resetDetail: formatResetCountdown(fiveHour.resetAt, true),
+      resetDate: formatOfficialReset(fiveHour.resetAt),
+      action: createRefreshButton("official"),
+      variant: "a2-plus-b-v1",
+      weeklySummary: {used: weekly.usedPercent, resetDate: formatResetDate(weekly.resetAt)},
+    });
+    setThreadUsage(content, fiveHour.usedPercent, copy.fiveHourUsedAria);
+    sourceProgresses.forEach((progress, index) => {
+      const window = windows[index];
+      progress.value = window.usedPercent;
+      progress.dataset.cqWindowLabel = window.label;
+      progress.classList.add("cq-source-progress");
+      progress.hidden = true;
+      progress.setAttribute("aria-label", `${window.label} ${copy.used} ${formatPercent(window.usedPercent)}%`);
+      content.append(progress);
+    });
+    card.classList.add(compactClass);
+    const currentState = state || quotaState("official", globalThis.__codexQuotaOfficialPayload || null);
+    setContentStatus(content, currentState.text);
+    setCardAccessibility(card, currentState.busy);
+    setOfficialCardAria(card, content);
+    card.replaceChildren(content);
+  };
+
+  const applyOfficialSourceValues = (card, data) => {
+    const presentation = officialPresentation(data);
+    const content = card?.querySelector(`.${compactContentClass}[data-cq-layout="thread-v2"]`);
+    if (!presentation || !content) return;
+    if (presentation.kind === "plus-b" && content.dataset.cqVariant === "a2-plus-b-v1") {
+      for (const window of [presentation.fiveHour, presentation.weekly]) {
+        const progress = content.querySelector(`progress[data-cq-window-label="${window.label}"]`);
+        if (progress && Number(progress.value) !== window.usedPercent) progress.value = window.usedPercent;
+      }
+      return;
+    }
+    if (presentation.kind === "weekly") {
+      const progresses = [...content.querySelectorAll("progress.cq-source-progress")];
+      const progress = content.querySelector("progress[data-cq-window-label='Weekly']") ||
+        (progresses.length === 1 ? progresses[0] : null);
+      if (progress && Number(progress.value) !== presentation.weekly.usedPercent) {
+        progress.value = presentation.weekly.usedPercent;
+      }
+    }
   };
 
   const syncCompactProgress = (card) => {
@@ -469,31 +653,90 @@
       }
     }
     const content = card.querySelector(`.${compactContentClass}[data-cq-layout="thread-v2"]`);
+    if (content?.dataset.cqVariant === "a2-plus-b-v1") {
+      const fiveHourProgress = content.querySelector("progress[data-cq-window-label='5h']");
+      const weeklyProgress = content.querySelector("progress[data-cq-window-label='Weekly']");
+      const fiveHourUsed = Number(fiveHourProgress?.value);
+      const weeklyUsed = Number(weeklyProgress?.value);
+      if (Number.isFinite(fiveHourUsed) && content.dataset.cqUsed !== formatPercent(fiveHourUsed)) {
+        setThreadUsage(content, fiveHourUsed, copy.fiveHourUsedAria);
+      }
+      if (Number.isFinite(weeklyUsed) && content.dataset.cqWeeklyUsed !== formatPercent(weeklyUsed)) {
+        const weeklyDate = content.querySelector(".cq-week-reset-date")?.textContent || copy.resetUnavailable;
+        setWeeklySummary(content, weeklyUsed, weeklyDate);
+      }
+      setOfficialCardAria(card, content);
+      return;
+    }
     const progress = content?.querySelector("progress.cq-source-progress");
     if (!progress) return;
     const used = Number(progress.value);
     if (!Number.isFinite(used) || used < 0 || used > 100) return;
-    const remaining = 100 - used;
     if (content.dataset.cqUsed !== formatPercent(used)) setThreadUsage(content, used);
     progress.setAttribute("aria-label", `${copy.weeklyUsedAria} ${formatPercent(used)}%`);
-    const reset = resetTime((content.querySelector(".cq-reset-value")?.textContent || "").trim());
-    const resetDate = (content.querySelector(".cq-reset-date-value")?.textContent || "").trim();
-    card.setAttribute("aria-label", `${copy.officialSourceAria}. ${copy.weeklyTitle}. ${copy.weeklyUsedAria} ${formatPercent(used)}%. ${copy.remainingPrefix} ${formatPercent(remaining)}%. ${copy.resetCountdownPrefix} ${reset}. ${resetDate} ${copy.resetSuffix}`);
+    setOfficialCardAria(card, content);
   };
 
   const compactCard = (card) => {
     const existing = card.querySelector(`.${compactContentClass}`);
+    const presentation = officialPresentation(globalThis.__codexQuotaOfficialPayload || null);
+    const planLabel = presentation?.kind === "weekly" ? presentation.planLabel : "";
+    if (presentation?.kind === "plus-b") {
+      if (existing?.dataset.cqVariant === "a2-plus-b-v1") {
+        syncCompactProgress(card);
+        return;
+      }
+      let progresses = [...card.querySelectorAll("progress[max='100']")];
+      if (existing) {
+        progresses = presentation.windows.map((window) => {
+          let progress = existing.querySelector(`progress[data-cq-window-label="${window.label}"]`);
+          if (!progress && window.label === "Weekly" && existing.dataset.cqVariant === "a2-merge-v1") {
+            progress = existing.querySelector("progress.cq-source-progress");
+          }
+          if (!progress) {
+            progress = document.createElement("progress");
+            progress.max = 100;
+            progress.value = window.usedPercent;
+          }
+          return progress;
+        });
+      } else if (progresses.length !== 2) {
+        return;
+      }
+      renderOfficialPlus(card, presentation, progresses);
+      return;
+    }
+    if (existing?.dataset.cqLayout === "thread-v2-fallback") {
+      if (presentation?.kind === "weekly") {
+        const progress = document.createElement("progress");
+        progress.max = 100;
+        progress.value = presentation.weekly.usedPercent;
+        renderOfficialThread(
+          card,
+          progress,
+          100 - presentation.weekly.usedPercent,
+          formatOfficialReset(presentation.weekly.resetAt),
+          presentation.planLabel
+        );
+      }
+      return;
+    }
     if (existing?.dataset.cqLayout === "thread-v2") {
-      const progress = existing.querySelector("progress.cq-source-progress");
+      const sourceProgresses = [...existing.querySelectorAll("progress.cq-source-progress")];
+      const progress = presentation?.kind === "weekly"
+        ? existing.querySelector("progress[data-cq-window-label='Weekly']") ||
+          (sourceProgresses.length === 1 ? sourceProgresses[0] : null)
+        : sourceProgresses.length === 1 ? sourceProgresses[0] : null;
       const used = Number(progress?.value);
       const staleThread = !existing.querySelector(".cq-refresh") ||
         existing.dataset.cqVariant !== "a2-merge-v1" ||
         !existing.querySelector(".cq-refresh-icon") ||
         !existing.querySelector(".cq-clock") ||
-        existing.querySelector(".cq-title")?.textContent !== copy.weeklyTitle;
+        existing.querySelector(".cq-title")?.textContent !== copy.weeklyTitle ||
+        (existing.querySelector(".cq-plan")?.textContent || "") !== planLabel;
       if (progress && staleThread && Number.isFinite(used)) {
         const reset = (existing.querySelector(".cq-reset-value")?.textContent || "").trim() || "Unavailable";
-        renderOfficialThread(card, progress, 100 - used, reset);
+        renderOfficialThread(card, progress, 100 - used, reset, planLabel);
         return;
       }
       syncCompactProgress(card);
@@ -510,12 +753,12 @@
         existing.querySelector(".cq-folio-note b")?.textContent ||
         ""
       ).trim() || "Unavailable";
-      renderOfficialThread(card, legacyProgress, 100 - used, reset);
+      renderOfficialThread(card, legacyProgress, 100 - used, reset, planLabel);
       return;
     }
     const progresses = [...card.querySelectorAll("progress[max='100']")];
-    // One native window is the current Weekly-only contract. If the official
-    // component restores more windows, preserve its complete native UI.
+    // Compact one real Weekly window, or the exact real Plus 5h + Weekly pair above.
+    // Preserve every other multi-window shape without inventing a limit.
     if (progresses.length !== 1 || !resetElement(card)) return;
     const progress = progresses[0];
     const remainingElement = [...card.querySelectorAll("span")].find((element) =>
@@ -525,7 +768,7 @@
     const remaining = Number(remainingMatch[1]);
     if (!Number.isFinite(remaining) || remaining < 0 || remaining > 100) return;
     const reset = resetValue(card);
-    renderOfficialThread(card, progress, remaining, reset);
+    renderOfficialThread(card, progress, remaining, reset, planLabel);
   };
 
   const accountBar = () => {
@@ -618,25 +861,48 @@
     }).format(date);
   };
 
-  const formatResetCountdown = (value) => {
+  const formatResetCountdown = (value, includeMinutes = false) => {
     const remainingMs = Math.max(0, Number(value) * 1000 - Date.now());
     if (!Number.isFinite(remainingMs)) return copy.resetUnavailable;
+    if (includeMinutes) {
+      const totalMinutes = Math.floor(remainingMs / 60000);
+      const hours = Math.floor(totalMinutes / 60);
+      const minutes = totalMinutes % 60;
+      return isChinese ? `${hours}小时 ${minutes}分` : `${hours} h ${minutes} min`;
+    }
     const days = Math.floor(remainingMs / 86400000);
     const hours = Math.floor((remainingMs % 86400000) / 3600000);
     return isChinese ? `${days}天 ${hours}小时` : `${days} d ${hours} h`;
   };
 
   const applyOfficialCountdown = (card, data) => {
-    const windows = Array.isArray(data?.windows) ? data.windows : [];
-    const weekly = windows.length === 1 && windows[0]?.label === "Weekly" ? windows[0] : null;
+    const presentation = officialPresentation(data);
     const content = card?.querySelector(`.${compactContentClass}[data-cq-layout="thread-v2"]`);
-    if (!weekly || !Number.isFinite(weekly.resetAt) || !content) return;
-    const countdown = formatResetCountdown(weekly.resetAt);
-    const resetDate = formatResetDate(weekly.resetAt);
-    setThreadReset(content, copy.resetCountdownPrefix, countdown, resetDate);
-    const used = Number(content.dataset.cqUsed);
-    if (Number.isFinite(used)) {
-      card.setAttribute("aria-label", `${copy.officialSourceAria}. ${copy.weeklyTitle}. ${copy.weeklyUsedAria} ${formatPercent(used)}%. ${copy.remainingPrefix} ${formatPercent(100 - used)}%. ${copy.resetCountdownPrefix} ${countdown}. ${resetDate} ${copy.resetSuffix}`);
+    if (!presentation || !content) return;
+    if (presentation.kind === "plus-b" && content.dataset.cqVariant === "a2-plus-b-v1") {
+      setThreadReset(
+        content,
+        copy.resetCountdownPrefix,
+        formatResetCountdown(presentation.fiveHour.resetAt, true),
+        formatOfficialReset(presentation.fiveHour.resetAt)
+      );
+      const weeklyUsed = Number(content.dataset.cqWeeklyUsed);
+      setWeeklySummary(
+        content,
+        Number.isFinite(weeklyUsed) ? weeklyUsed : presentation.weekly.usedPercent,
+        formatResetDate(presentation.weekly.resetAt)
+      );
+      setOfficialCardAria(card, content);
+      return;
+    }
+    if (presentation.kind === "weekly") {
+      setThreadReset(
+        content,
+        copy.resetCountdownPrefix,
+        formatResetCountdown(presentation.weekly.resetAt),
+        formatResetDate(presentation.weekly.resetAt)
+      );
+      setOfficialCardAria(card, content);
     }
   };
 
@@ -656,13 +922,14 @@
 
   const renderOfficial = (card, data, errorCode = null) => {
     const state = quotaState("official", data, errorCode);
-    const windows = Array.isArray(data?.windows) ? data.windows : [];
-    const valid = typeof data?.planName === "string" && data.planName && windows.length > 0 &&
-      windows.every((window) => typeof window?.label === "string" &&
-        Number.isFinite(window?.usedPercent) && window.usedPercent >= 0 && window.usedPercent <= 100 &&
-        Number.isFinite(window?.resetAt) && window.resetAt >= 0);
-    const weekly = valid && windows.length === 1 && windows[0].label === "Weekly" ? windows[0] : null;
-    if (weekly) {
+    const presentation = officialPresentation(data);
+    const windows = presentation?.windows || [];
+    if (presentation?.kind === "plus-b") {
+      renderOfficialPlus(card, presentation, [], state);
+      return;
+    }
+    if (presentation?.kind === "weekly") {
+      const {weekly, planLabel} = presentation;
       const countdown = formatResetCountdown(weekly.resetAt);
       const resetDate = formatResetDate(weekly.resetAt);
       const content = createThreadContent({
@@ -671,12 +938,12 @@
         resetDetail: countdown,
         resetDate,
         action: createRefreshButton("official"),
+        planLabel,
       });
       setThreadUsage(content, weekly.usedPercent);
-      content.querySelector(".cq-thread-rule").setAttribute("aria-label", copy.weeklyUsedAria);
       setContentStatus(content, state.text);
       setCardAccessibility(card, state.busy);
-      card.setAttribute("aria-label", `${copy.officialSourceAria}. ${copy.weeklyTitle}. ${copy.weeklyUsedAria} ${formatPercent(weekly.usedPercent)}%. ${copy.remainingPrefix} ${formatPercent(100 - weekly.usedPercent)}%. ${copy.resetCountdownPrefix} ${countdown}. ${resetDate} ${copy.resetSuffix}`);
+      setOfficialCardAria(card, content);
       card.replaceChildren(content);
       return;
     }
@@ -685,7 +952,7 @@
     content.className = `${compactContentClass} cq-compact-fallback`;
     content.dataset.cqLayout = "thread-v2-fallback";
     addHeading(content, copy.weeklyTitle, createRefreshButton("official"));
-    if (!valid) {
+    if (!presentation) {
       addFallbackRow(content, copy.status, data ? copy.officialUnavailable : state.text, true);
     } else {
       for (const window of windows) {
@@ -768,12 +1035,6 @@
     console.info("__codexQuotaApiRequest__");
   };
 
-  const refreshStaleApiData = () => {
-    if (!apiMode()) return;
-    const lastSuccessAt = Number(globalThis.__codexQuotaApiLastSuccessAt || 0);
-    if (Date.now() - lastSuccessAt >= staleAfterMs) requestApiData(false);
-  };
-
   const requestOfficialData = (manual = false) => {
     if (globalThis.__codexQuotaOfficialNeedsData === true) return;
     const now = Date.now();
@@ -787,7 +1048,7 @@
     const nativeCard = nativeQuotaCard();
     if (nativeCard) {
       compactCard(nativeCard);
-      const content = nativeCard.querySelector(`.${compactContentClass}[data-cq-layout="thread-v2"]`);
+      const content = nativeCard.querySelector(`.${compactContentClass}`);
       const state = quotaState("official", globalThis.__codexQuotaOfficialPayload || null);
       if (content) setContentStatus(content, state.text);
       setCardAccessibility(nativeCard, state.busy);
@@ -800,10 +1061,58 @@
     console.info("__codexQuotaOfficialRequest__");
   };
 
-  const refreshStaleOfficialData = () => {
-    if (apiMode()) return;
-    const lastSuccessAt = Number(globalThis.__codexQuotaOfficialLastSuccessAt || 0);
-    if (Date.now() - lastSuccessAt >= staleAfterMs) requestOfficialData();
+  const refreshStaleData = () => {
+    const isApi = apiMode();
+    const {nextAttemptAt, cooldownUntil} = quotaTiming(isApi);
+    const nextAt = Math.max(nextAttemptAt, cooldownUntil);
+    if (nextAt > 0 && Date.now() >= nextAt) {
+      if (isApi) requestApiData(false);
+      else requestOfficialData();
+      return;
+    }
+    scheduleAutoRefresh();
+  };
+
+  const scheduleAutoRefresh = () => {
+    clearTimeout(globalThis.__codexQuotaAutoRefreshTimer);
+    globalThis.__codexQuotaAutoRefreshTimer = null;
+    if (document.visibilityState !== "visible") return;
+    const isApi = apiMode();
+    const loaded = isApi
+      ? globalThis.__codexQuotaApiLoaded === true
+      : globalThis.__codexQuotaOfficialLoaded === true;
+    if (!loaded) return;
+    const {lastSuccessAt, nextAttemptAt, cooldownUntil} = quotaTiming(isApi);
+    const fallbackNextAt = lastSuccessAt ? lastSuccessAt + adaptiveRefreshDelayMs() : 0;
+    const nextAt = Math.max(nextAttemptAt || fallbackNextAt, cooldownUntil);
+    if (!Number.isFinite(nextAt) || nextAt <= 0) return;
+    globalThis.__codexQuotaAutoRefreshTimer = setTimeout(() => {
+      globalThis.__codexQuotaAutoRefreshTimer = null;
+      if (document.visibilityState !== "visible") return;
+      refreshStaleData();
+    }, Math.max(1000, nextAt - Date.now()));
+  };
+
+  const installAutoRefresh = () => {
+    const previous = globalThis.__codexQuotaAutoRefreshHandler;
+    if (typeof previous === "function") {
+      window.removeEventListener("focus", previous);
+      document.removeEventListener("visibilitychange", previous);
+    }
+    const handler = () => {
+      if (document.visibilityState !== "visible") {
+        clearTimeout(globalThis.__codexQuotaAutoRefreshTimer);
+        globalThis.__codexQuotaAutoRefreshTimer = null;
+        return;
+      }
+      recordQuotaInteraction(apiMode() ? "api" : "official");
+      refreshStaleData();
+    };
+    globalThis.__codexQuotaAutoRefreshHandler = handler;
+    window.addEventListener("focus", handler);
+    document.addEventListener("visibilitychange", handler);
+    if (document.visibilityState === "visible") recordQuotaInteraction(apiMode() ? "api" : "official");
+    scheduleAutoRefresh();
   };
 
   const nativeQuotaCard = () => {
@@ -820,11 +1129,17 @@
     globalThis.__codexQuotaOfficialLoaded = true;
     const now = Date.now();
     if (data && !data.errorCode && !data.error && Array.isArray(data.windows)) {
+      const fingerprint = quotaUsageFingerprint(data);
+      const previousFingerprint = globalThis.__codexQuotaOfficialUsageFingerprint;
+      if (previousFingerprint && previousFingerprint !== fingerprint) {
+        globalThis.__codexQuotaLastUsageActivityAt = now;
+      }
+      globalThis.__codexQuotaOfficialUsageFingerprint = fingerprint;
       globalThis.__codexQuotaOfficialPayload = data;
       globalThis.__codexQuotaOfficialErrorCode = null;
       globalThis.__codexQuotaOfficialError = null;
       globalThis.__codexQuotaOfficialLastSuccessAt = now;
-      globalThis.__codexQuotaOfficialNextAutoAttemptAt = now + staleAfterMs;
+      globalThis.__codexQuotaOfficialNextAutoAttemptAt = now + adaptiveRefreshDelayMs(now);
       globalThis.__codexQuotaOfficialCooldownUntil = 0;
     } else {
       globalThis.__codexQuotaOfficialErrorCode = data?.errorCode || "UNAVAILABLE";
@@ -840,9 +1155,15 @@
     }
     const nativeCard = nativeQuotaCard();
     if (!apiMode() && nativeCard) {
-      compactCard(nativeCard);
-      applyOfficialCountdown(nativeCard, globalThis.__codexQuotaOfficialPayload || null);
-      const content = nativeCard.querySelector(`.${compactContentClass}[data-cq-layout="thread-v2"]`);
+      const presentation = officialPresentation(data);
+      if (presentation?.kind === "fallback") {
+        renderOfficial(nativeCard, data, quotaErrorCode("official"));
+      } else {
+        applyOfficialSourceValues(nativeCard, data);
+        compactCard(nativeCard);
+        applyOfficialCountdown(nativeCard, globalThis.__codexQuotaOfficialPayload || null);
+      }
+      const content = nativeCard.querySelector(`.${compactContentClass}`);
       const state = quotaState("official", globalThis.__codexQuotaOfficialPayload || null);
       if (content) setContentStatus(content, state.text);
       setCardAccessibility(nativeCard, state.busy);
@@ -856,6 +1177,7 @@
         quotaErrorCode("official")
       );
     }
+    if (!apiMode()) scheduleAutoRefresh();
   };
 
   globalThis.__codexQuotaUpdateApi = (data) => {
@@ -863,11 +1185,17 @@
     globalThis.__codexQuotaApiLoaded = true;
     const now = Date.now();
     if (data && !data.errorCode && !data.error) {
+      const fingerprint = quotaUsageFingerprint(data);
+      const previousFingerprint = globalThis.__codexQuotaApiUsageFingerprint;
+      if (previousFingerprint && previousFingerprint !== fingerprint) {
+        globalThis.__codexQuotaLastUsageActivityAt = now;
+      }
+      globalThis.__codexQuotaApiUsageFingerprint = fingerprint;
       globalThis.__codexQuotaApiPayload = data;
       globalThis.__codexQuotaApiErrorCode = null;
       globalThis.__codexQuotaApiError = null;
       globalThis.__codexQuotaApiLastSuccessAt = now;
-      globalThis.__codexQuotaApiNextAutoAttemptAt = now + staleAfterMs;
+      globalThis.__codexQuotaApiNextAutoAttemptAt = now + adaptiveRefreshDelayMs(now);
       globalThis.__codexQuotaApiCooldownUntil = 0;
     } else {
       globalThis.__codexQuotaApiErrorCode = data?.errorCode || "UNAVAILABLE";
@@ -886,6 +1214,7 @@
       globalThis.__codexQuotaApiPayload || null,
       quotaErrorCode("api")
     );
+    if (apiMode()) scheduleAutoRefresh();
   };
 
   const installLayout = () => {
@@ -906,10 +1235,6 @@
         quotaErrorCode("api")
       );
       if (!globalThis.__codexQuotaApiLoaded) requestApiData();
-      if (!globalThis.__codexQuotaFocusRefreshInstalled) {
-        window.addEventListener("focus", refreshStaleApiData);
-        globalThis.__codexQuotaFocusRefreshInstalled = true;
-      }
       return;
     }
     removeApiCard();
@@ -921,10 +1246,6 @@
         applyOfficialCountdown(card, globalThis.__codexQuotaOfficialPayload || null);
       }
       if (!globalThis.__codexQuotaOfficialLoaded) requestOfficialData();
-      if (!globalThis.__codexQuotaOfficialFocusRefreshInstalled) {
-        window.addEventListener("focus", refreshStaleOfficialData);
-        globalThis.__codexQuotaOfficialFocusRefreshInstalled = true;
-      }
       return;
     }
     if (!bar) {
@@ -935,12 +1256,17 @@
     const host = officialCard();
     host.hidden = false;
     const currentLayout = host.firstElementChild?.dataset.cqLayout;
+    const presentation = officialPresentation(globalThis.__codexQuotaOfficialPayload || null);
+    const expectedVariant = presentation?.kind === "plus-b" ? "a2-plus-b-v1" : "a2-merge-v1";
+    const expectedTitle = presentation?.kind === "plus-b" ? copy.fiveHourTitle : copy.weeklyTitle;
+    const expectedPlan = presentation?.kind === "weekly" ? presentation.planLabel : "";
     const staleThread = currentLayout === "thread-v2" &&
       (!host.querySelector(".cq-refresh") ||
-       host.firstElementChild?.dataset.cqVariant !== "a2-merge-v1" ||
+       host.firstElementChild?.dataset.cqVariant !== expectedVariant ||
        !host.querySelector(".cq-refresh-icon") ||
        !host.querySelector(".cq-clock") ||
-       host.querySelector(".cq-title")?.textContent !== copy.weeklyTitle);
+       host.querySelector(".cq-title")?.textContent !== expectedTitle ||
+       (host.querySelector(".cq-plan")?.textContent || "") !== expectedPlan);
     const staleFallback = currentLayout === "thread-v2-fallback" &&
       (!host.querySelector(".cq-refresh") || host.getAttribute("role") !== "region");
     if ((currentLayout !== "thread-v2" && currentLayout !== "thread-v2-fallback") ||
@@ -954,10 +1280,6 @@
       applyOfficialCountdown(host, globalThis.__codexQuotaOfficialPayload || null);
     }
     if (!globalThis.__codexQuotaOfficialLoaded) requestOfficialData();
-    if (!globalThis.__codexQuotaOfficialFocusRefreshInstalled) {
-      window.addEventListener("focus", refreshStaleOfficialData);
-      globalThis.__codexQuotaOfficialFocusRefreshInstalled = true;
-    }
   };
 
   const observeOfficialCards = () => {
@@ -984,6 +1306,7 @@
         globalThis.__codexQuotaOfficialCardObserver?.disconnect();
         globalThis.__codexQuotaOfficialCardObserver = null;
         installLayout();
+        installAutoRefresh();
         return true;
       }
       const client = globalThis.__STATSIG__?.instance?.();
@@ -1004,6 +1327,7 @@
       }
       observeOfficialCards();
       installLayout();
+      installAutoRefresh();
       return true;
     } catch (_) { return false; }
   };
