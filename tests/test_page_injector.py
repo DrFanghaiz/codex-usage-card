@@ -1,4 +1,5 @@
 import unittest
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from codex_quota.page_injector import (
@@ -8,6 +9,16 @@ from codex_quota.page_injector import (
     card_present,
     resolve_port,
 )
+
+
+ASSET_NATIVE_QUOTA_SCRIPT = (
+    Path(__file__).resolve().parents[1]
+    / "skills"
+    / "codex-usage-card"
+    / "assets"
+    / "native-patch"
+    / "native_patch.js"
+).read_text(encoding="utf-8")
 
 
 class PageInjectorTests(unittest.TestCase):
@@ -117,12 +128,17 @@ class PageInjectorTests(unittest.TestCase):
         self.assertNotIn("backdrop-filter", NATIVE_QUOTA_SCRIPT)
         self.assertIn("--cq-accent: #8E4617", NATIVE_QUOTA_SCRIPT)
 
-    def test_official_five_hour_window_is_never_fabricated(self):
+    def test_official_windows_are_never_fabricated(self):
         self.assertIn("const progresses = [...card.querySelectorAll", NATIVE_QUOTA_SCRIPT)
-        self.assertIn("preserve its complete native UI", NATIVE_QUOTA_SCRIPT)
+        self.assertIn('const fiveHour = windows.find((window) => window.label === "5h")', NATIVE_QUOTA_SCRIPT)
+        self.assertIn('const weekly = windows.find((window) => window.label === "Weekly")', NATIVE_QUOTA_SCRIPT)
+        self.assertIn('planName === "plus" && windows.length === 2 && fiveHour && weekly', NATIVE_QUOTA_SCRIPT)
+        self.assertIn("else if (progresses.length !== 2)", NATIVE_QUOTA_SCRIPT)
+        self.assertIn("Preserve every other multi-window shape", NATIVE_QUOTA_SCRIPT)
         self.assertIn('label === "5h"', NATIVE_QUOTA_SCRIPT)
         self.assertIn('reset === "Unavailable"', NATIVE_QUOTA_SCRIPT)
         self.assertIn('card.setAttribute("aria-label", `${copy.officialSourceAria}', NATIVE_QUOTA_SCRIPT)
+        self.assertNotIn('addWindow("5h"', NATIVE_QUOTA_SCRIPT)
 
     def test_reinstall_replaces_the_previous_page_observer(self):
         self.assertGreaterEqual(
@@ -147,10 +163,46 @@ class PageInjectorTests(unittest.TestCase):
         self.assertIn("__codexQuotaOfficialRequest__", NATIVE_QUOTA_SCRIPT)
         self.assertIn("requestOfficialData", NATIVE_QUOTA_SCRIPT)
         self.assertIn("renderOfficial", NATIVE_QUOTA_SCRIPT)
-        self.assertIn('windows.length === 1 && windows[0].label === "Weekly"', NATIVE_QUOTA_SCRIPT)
+        self.assertIn("officialPresentation(data)", NATIVE_QUOTA_SCRIPT)
+        self.assertIn('presentation?.kind === "plus-b"', NATIVE_QUOTA_SCRIPT)
+        self.assertIn('presentation?.kind === "weekly"', NATIVE_QUOTA_SCRIPT)
+        self.assertIn('presentation?.kind === "fallback"', NATIVE_QUOTA_SCRIPT)
+        self.assertIn("renderOfficialPlus(card", NATIVE_QUOTA_SCRIPT)
+        self.assertIn("renderOfficial(nativeCard, data", NATIVE_QUOTA_SCRIPT)
+        self.assertIn('existing?.dataset.cqLayout === "thread-v2-fallback"', NATIVE_QUOTA_SCRIPT)
+        self.assertGreaterEqual(
+            NATIVE_QUOTA_SCRIPT.count('nativeCard.querySelector(`.${compactContentClass}`)'),
+            2,
+        )
         self.assertIn("removeOfficialCard()", NATIVE_QUOTA_SCRIPT)
         self.assertNotIn("access_token", NATIVE_QUOTA_SCRIPT)
         self.assertNotIn("account_id", NATIVE_QUOTA_SCRIPT)
+
+    def test_plus_b_and_pro_variants_follow_the_selected_spec(self):
+        self.assertIn('fiveHourTitle: "5小时已用"', NATIVE_QUOTA_SCRIPT)
+        self.assertIn('fiveHourTitle: "5h used"', NATIVE_QUOTA_SCRIPT)
+        self.assertIn('fiveHourUsedAria: "5小时已用"', NATIVE_QUOTA_SCRIPT)
+        self.assertIn('planLabel: planName === "pro" ? "Pro" : ""', NATIVE_QUOTA_SCRIPT)
+        self.assertIn('variant: "a2-plus-b-v1"', NATIVE_QUOTA_SCRIPT)
+        self.assertIn('className = "cq-week-divider"', NATIVE_QUOTA_SCRIPT)
+        self.assertIn('className = "cq-week-summary"', NATIVE_QUOTA_SCRIPT)
+        self.assertIn("height: 1px; margin: 9px 0 7px", NATIVE_QUOTA_SCRIPT)
+        self.assertIn("font-size: 9.5px", NATIVE_QUOTA_SCRIPT)
+        self.assertIn("formatResetCountdown(fiveHour.resetAt, true)", NATIVE_QUOTA_SCRIPT)
+        self.assertIn('`${hours}小时 ${minutes}分`', NATIVE_QUOTA_SCRIPT)
+        self.assertIn('content.dataset.cqVariant === "a2-plus-b-v1"', NATIVE_QUOTA_SCRIPT)
+        self.assertIn("content.dataset.cqWeeklyUsed", NATIVE_QUOTA_SCRIPT)
+        self.assertIn("content.dataset.cqWeeklyUsed !== formatPercent(weeklyUsed)", NATIVE_QUOTA_SCRIPT)
+        self.assertIn("dateNode.textContent !== resetDate", NATIVE_QUOTA_SCRIPT)
+        self.assertIn("applyOfficialSourceValues(nativeCard, data)", NATIVE_QUOTA_SCRIPT)
+        self.assertIn('progress[data-cq-window-label="${window.label}"]', NATIVE_QUOTA_SCRIPT)
+        self.assertIn('progress.dataset.cqWindowLabel = "Weekly"', NATIVE_QUOTA_SCRIPT)
+        self.assertIn('window.label === "Weekly" && existing.dataset.cqVariant === "a2-merge-v1"', NATIVE_QUOTA_SCRIPT)
+        self.assertIn('progress = document.createElement("progress")', NATIVE_QUOTA_SCRIPT)
+        self.assertIn("setOfficialCardAria(card, content)", NATIVE_QUOTA_SCRIPT)
+
+    def test_release_asset_matches_the_reviewed_page_script(self):
+        self.assertEqual(NATIVE_QUOTA_SCRIPT, ASSET_NATIVE_QUOTA_SCRIPT)
 
     def test_api_card_emphasizes_daily_remaining_amount(self):
         self.assertIn("(data.used / data.total) * 100", NATIVE_QUOTA_SCRIPT)
@@ -160,9 +212,28 @@ class PageInjectorTests(unittest.TestCase):
         self.assertIn('apiRemainingAria: "API daily remaining"', NATIVE_QUOTA_SCRIPT)
         self.assertIn("copy.remainingAvailable", NATIVE_QUOTA_SCRIPT)
 
-    def test_api_refresh_is_focus_driven_and_rate_limited(self):
+    def test_auto_refresh_is_visibility_aware_and_rate_limited(self):
         self.assertIn("const staleAfterMs = 5 * 60 * 1000", NATIVE_QUOTA_SCRIPT)
-        self.assertIn('window.addEventListener("focus", refreshStaleApiData)', NATIVE_QUOTA_SCRIPT)
+        self.assertIn("const adaptiveRefreshDelayMs = (now = Date.now()) =>", NATIVE_QUOTA_SCRIPT)
+        self.assertIn("return 2 * 60 * 1000", NATIVE_QUOTA_SCRIPT)
+        self.assertIn("return 15 * 60 * 1000", NATIVE_QUOTA_SCRIPT)
+        self.assertIn("return 30 * 60 * 1000", NATIVE_QUOTA_SCRIPT)
+        self.assertIn("__codexQuotaLastInteractionAt", NATIVE_QUOTA_SCRIPT)
+        self.assertIn("__codexQuotaLastUsageActivityAt", NATIVE_QUOTA_SCRIPT)
+        self.assertIn("quotaUsageFingerprint(data)", NATIVE_QUOTA_SCRIPT)
+        self.assertIn("recordQuotaInteraction(kind)", NATIVE_QUOTA_SCRIPT)
+        self.assertIn("const scheduleAutoRefresh = () =>", NATIVE_QUOTA_SCRIPT)
+        self.assertIn("__codexQuotaAutoRefreshTimer", NATIVE_QUOTA_SCRIPT)
+        self.assertIn('document.visibilityState !== "visible"', NATIVE_QUOTA_SCRIPT)
+        self.assertIn('window.addEventListener("focus", handler)', NATIVE_QUOTA_SCRIPT)
+        self.assertIn('document.addEventListener("visibilitychange", handler)', NATIVE_QUOTA_SCRIPT)
+        self.assertIn("Math.max(1000, nextAt - Date.now())", NATIVE_QUOTA_SCRIPT)
+        self.assertIn("clearTimeout(globalThis.__codexQuotaAutoRefreshTimer)", NATIVE_QUOTA_SCRIPT)
+        self.assertEqual(NATIVE_QUOTA_SCRIPT.count("setInterval("), 1)
+        self.assertNotIn("__codexQuotaFocusRefreshInstalled", NATIVE_QUOTA_SCRIPT)
+        self.assertNotIn("__codexQuotaOfficialFocusRefreshInstalled", NATIVE_QUOTA_SCRIPT)
+        self.assertNotIn('addEventListener("keydown"', NATIVE_QUOTA_SCRIPT)
+        self.assertNotIn('addEventListener("pointerdown"', NATIVE_QUOTA_SCRIPT)
         self.assertIn("__codexQuotaApiLastSuccessAt", NATIVE_QUOTA_SCRIPT)
         self.assertIn("__codexQuotaApiNextAutoAttemptAt", NATIVE_QUOTA_SCRIPT)
         self.assertIn("__codexQuotaApiCooldownUntil", NATIVE_QUOTA_SCRIPT)
@@ -202,7 +273,8 @@ class PageInjectorTests(unittest.TestCase):
         self.assertIn('progress.setAttribute("aria-valuetext"', NATIVE_QUOTA_SCRIPT)
         self.assertIn('class="cq-refresh-icon"', NATIVE_QUOTA_SCRIPT)
         self.assertIn('class="cq-clock"', NATIVE_QUOTA_SCRIPT)
-        self.assertIn('content.dataset.cqVariant = "a2-merge-v1"', NATIVE_QUOTA_SCRIPT)
+        self.assertIn('variant = "a2-merge-v1"', NATIVE_QUOTA_SCRIPT)
+        self.assertIn('variant: "a2-plus-b-v1"', NATIVE_QUOTA_SCRIPT)
         self.assertIn('<div class="cq-thread-rule" role="progressbar"', NATIVE_QUOTA_SCRIPT)
         self.assertIn('class="cq-reset-date"', NATIVE_QUOTA_SCRIPT)
         self.assertIn("formatResetDate", NATIVE_QUOTA_SCRIPT)
