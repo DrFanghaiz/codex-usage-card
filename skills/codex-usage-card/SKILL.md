@@ -24,6 +24,7 @@ Run `scripts/doctor.ps1` to inspect the exact task action, exact helper process,
 - Work on the native helper and page script, not the Codex WindowsApps installation directory.
 - Keep official-account and API login detection automatic. Do not add an Account/API switch.
 - Keep the helper windowless: compile the C# target as `winexe`, and do not reintroduce `python.exe`, `pythonw.exe`, `wscript.exe`, or a console launcher into the scheduled task.
+- Keep direct-start recovery scoped to a newly observed `OpenAI.Codex` root process without a remote-debugging port. Seed existing root process IDs when the helper starts, pass through already-debuggable launches, reject renderer and other ChatGPT packages, verify the executable path again before terminating the new process, and relaunch it with a dynamic loopback port under the current-session Explorer parent.
 
 ## Project files
 
@@ -45,7 +46,7 @@ The implementation must continue to use the task name `Codex Usage Card` and the
 2. Never modify, replace, or inspect files inside the Codex WindowsApps install directory.
 3. Never change Codex theme settings, global fonts, or fixed colors. Page styles must inherit the active theme.
 4. Never stop an unrelated process. During deployment, stop the scheduled task first, then stop only a process whose executable path exactly equals the project `.next.exe` path.
-5. Do not close or restart the Codex client.
+5. Do not close or restart an existing Codex client during maintenance. The only permitted client restart is the direct-start recovery above, limited to a newly observed unpatched root process before the helper attaches.
 6. Use `apply_patch` for source and documentation edits. Do not hide errors with fallback behavior, guessed API fields, or high-frequency polling.
 7. Do not commit `auth.json`, `config.toml`, `api-proxy.dat`, API responses, screenshots containing secrets, or generated executables unless the user explicitly requests a release artifact.
 
@@ -65,14 +66,21 @@ Check `WaitForLoginConfigurationChangeAsync()` and its callers:
 - Release every `FileSystemWatcher` with deterministic disposal. Surface watcher errors to the reconnect path; do not turn them into an endless loop.
 - A temporary incomplete login file must wait for the next file event. A real access or transport error must remain visible to the outer reconnect path.
 
+Check direct-start recovery before changing it:
+
+- Existing Codex roots are captured by PID plus WMI creation time before the reconnect loop and are never removed on a transient omission, so installing, upgrading, or restarting the helper cannot terminate an active session while still distinguishing future PID reuse.
+- Only the version-independent `OpenAI.Codex_*\app\ChatGPT.exe` root command line is eligible. `--type=` children, ChatGPT Classic, and roots already carrying `--remote-debugging-port` are not restarted.
+- Resolve an unused loopback port, revalidate the exact process path immediately before termination, and use `PROC_THREAD_ATTRIBUTE_PARENT_PROCESS` with the same-session Explorer so the replacement does not inherit the scheduled task lifecycle.
+- Win32 launch failures must surface to the reconnect path. Do not silently fall back to an ordinary child process.
+
 Review the page script for these invariants:
 
 - Official mode prefers the native quota component. When Codex does not render it, the helper fetches the validated official usage window and sends only the sanitized quota payload to a language-independent fallback card; credentials never enter the page.
-- Official usage follows the A2 merged-row layout: a 248px maximum warm-paper card adapted to the available sidebar width, 12/14/11 padding, a label/refresh header, a merged used/2px-progress/remaining row after 6px, and a footer after 8px that pairs the `reset_at` countdown with its localized absolute reset date. Exact `pro` + single `Weekly` data adds only the `Pro` pill. Exact `plus` + real `5h` and `Weekly` data uses Plus B: 5h remains the complete main view, followed by a 1px divider and one compact Weekly used/reset summary. Native container queries reduce the track gaps below about 200px and stack the footer and Weekly summary at about 176px or narrower without shrinking text or hiding information. It uses the fixed A2 tokens, no gradient or animation, and complete official-source, plan, window, percentage, and reset accessible names.
-- Never fabricate a 5h row. Match plan names case-insensitively but exactly, identify windows by their validated labels rather than array position, and render Plus B only when both real target windows exist. Preserve every unknown multi-window shape in the complete fallback layout. When a native card exists, keep one hidden source progress per displayed real window; helper refreshes and native progress changes must update the matching labeled source without creating observer loops.
+- Official usage follows the A2 merged-row layout: a 248px maximum warm-paper card adapted to the available sidebar width, 12/14/11 padding, a label/refresh header, a merged used/2px-progress/remaining row after 6px, and a footer after 8px. Exact `pro` + single `Weekly` data adds the `Pro` pill and keeps the Weekly countdown/date footer. Exact `plus` + real `5h` and `Weekly` data uses Plus X: add the `Plus` pill, keep 5h as the sole main percentage/track, show only the 5h countdown at footer left, and put the compact Weekly used/reset-date summary in the footer right. Plus X has no 5h absolute time, Weekly track, divider, or fourth row, and matches Pro height at normal sidebar width. Native container queries reduce track gaps and stack the footer at narrow widths without shrinking text or hiding information.
+- Never fabricate a 5h row. Match plan names case-insensitively but exactly, identify windows by their validated labels rather than array position, and render Plus X only when both real target windows exist. Preserve every unknown multi-window shape in the complete fallback layout. When a native card exists, keep one hidden source progress per displayed real window; helper refreshes and native progress changes must update the matching labeled source without creating observer loops.
 - Hide the quota card when the sidebar account row is absent; restore it when the row returns. Do not hide unrelated status notifications.
 - API mode creates one card above the account row, never the official card. Its Folio number and compact line show `100 - used / total`; the remaining amount is displayed separately.
-- Official and API refresh use one visibility-aware adaptive one-shot timer. Recent focus/manual interaction uses 2 minutes for 5 minutes, warm interaction uses 5 minutes through 1 hour, 1–4 hours idle uses 15 minutes, and longer idle uses 30 minutes; a changed usage fingerprint keeps the 5-minute activity tier. Clear the timer while hidden, bring stale data forward on focus/visibility restoration, replace the previous handler on reinjection, and keep failure retries behind the existing 60-second minimum and server-directed cooldown. Do not scan processes, session files, keyboard input, or add a continuously polling interval.
+- Official and API refresh use one visibility-aware adaptive one-shot timer. Recent focus/manual interaction uses 2 minutes for 5 minutes, warm interaction uses 5 minutes through 1 hour, 1–4 hours idle uses 15 minutes, and longer idle uses 30 minutes; a changed usage fingerprint keeps the 5-minute activity tier. For visible Plus X, the same timer wakes at the earlier of the next network refresh or minute boundary and recomputes the countdown locally without another request. Clear the timer while hidden, bring stale data forward on focus/visibility restoration, replace the previous handler on reinjection, and keep failure retries behind the existing 60-second minimum and server-directed cooldown. Do not scan processes, session files, keyboard input, or add a continuously polling interval.
 - `card_present()` checks a visible real card, not merely an internal patch marker.
 - The script does not touch model pickers, model labels, menus, or option lists.
 
@@ -113,7 +121,7 @@ If any identity check fails, stop before changing state.
 
 Use the active Codex debugging target only when it is available. Without a running client or debugging port, report that the page cannot be verified; never fabricate a result.
 
-For official mode, verify Pro single-Weekly and Plus B dual-window rendering, each used/remaining complement, plan/window switching, account-row placement, absence of the API card, unchanged theme, and `card_present() == True`.
+For official mode, verify Pro single-Weekly and Plus X three-line rendering, equal normal-width height, each used/remaining complement, both reset semantics, plan/window switching, account-row placement, absence of the API card, unchanged theme, and `card_present() == True`.
 
 For API mode, verify the visible API card, absence of the official card, language-independent account-row lookup, Daily remaining progress semantics, refresh state, and that no key enters the page. Do not switch the user's real login configuration merely to create a screenshot.
 

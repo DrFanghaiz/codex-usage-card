@@ -21,7 +21,7 @@
         resetCountdownPrefix: "距离自然重置",
         used: "已用",
         summaryUsed: "已用",
-        weeklySummaryTitle: "本周",
+        weeklySummaryTitle: "周",
         weeklyUsedAria: "每周已用",
         fiveHourUsedAria: "5小时已用",
         resetUnavailable: "重置时间不可用",
@@ -56,7 +56,7 @@
         resetCountdownPrefix: "Until reset",
         used: "Used",
         summaryUsed: "used",
-        weeklySummaryTitle: "Weekly",
+        weeklySummaryTitle: "Week",
         weeklyUsedAria: "Weekly used",
         fiveHourUsedAria: "5-hour used",
         resetUnavailable: "Reset unavailable",
@@ -107,7 +107,7 @@
     const fiveHour = windows.find((window) => window.label === "5h");
     const weekly = windows.find((window) => window.label === "Weekly");
     if (planName === "plus" && windows.length === 2 && fiveHour && weekly) {
-      return {kind: "plus-b", planName, windows, fiveHour, weekly};
+      return {kind: "plus-x", planName, planLabel: "Plus", windows, fiveHour, weekly};
     }
     if (windows.length === 1 && weekly) {
       return {kind: "weekly", planName, planLabel: planName === "pro" ? "Pro" : "", windows, weekly};
@@ -195,9 +195,7 @@
       .${compactContentClass} .cq-clock { width: 11px; height: 11px; flex: none; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
       .${compactContentClass} .cq-reset-date { color: var(--cq-faint); font-size: 9.5px; line-height: normal; white-space: nowrap; font-variant-numeric: tabular-nums; }
       .${compactContentClass} .cq-reset-date b { color: var(--cq-muted); font-weight: 500; }
-      .${compactContentClass} .cq-week-divider { height: 1px; margin: 9px 0 7px; background: var(--cq-track); }
-      .${compactContentClass} .cq-week-summary { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; color: var(--cq-faint); font-size: 9.5px; line-height: normal; font-variant-numeric: tabular-nums; }
-      .${compactContentClass} .cq-week-summary > span { white-space: nowrap; }
+      .${compactContentClass} .cq-week-summary { display: inline-flex; align-items: baseline; gap: 3px; color: var(--cq-faint); font-size: 9px; line-height: normal; white-space: nowrap; font-variant-numeric: tabular-nums; }
       .${compactContentClass} .cq-week-summary b { color: var(--cq-muted); font-weight: 500; }
       .${compactContentClass} .cq-folio-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
       .${compactContentClass} .cq-head-end { display: flex; align-items: baseline; gap: 8px; }
@@ -238,8 +236,7 @@
       @container (max-width: 147px) {
         .${compactContentClass} .cq-thread-foot { align-items: stretch; flex-direction: column; gap: 4px; }
         .${compactContentClass} .cq-reset-date { text-align: right; }
-        .${compactContentClass} .cq-week-summary { align-items: stretch; flex-direction: column; gap: 4px; }
-        .${compactContentClass} .cq-week-summary > :last-child { text-align: right; }
+        .${compactContentClass} .cq-week-summary { align-self: flex-end; }
       }
       @media (forced-colors: active) {
         .${compactClass}, .${apiCardClass} { --cq-surface: Canvas; --cq-border: CanvasText; --cq-track: GrayText; --cq-ink: CanvasText; --cq-muted: CanvasText; --cq-soft: CanvasText; --cq-faint: CanvasText; --cq-accent: Highlight; forced-color-adjust: auto; }
@@ -435,6 +432,10 @@
     const dateNode = content.querySelector(".cq-week-reset-date");
     if (usedNode && usedNode.textContent !== `${usedText}%`) usedNode.textContent = `${usedText}%`;
     if (dateNode && dateNode.textContent !== resetDate) dateNode.textContent = resetDate;
+    content.querySelector(".cq-week-summary")?.setAttribute(
+      "aria-label",
+      `${copy.weeklySummaryTitle} ${usedText}% ${copy.summaryUsed}. ${resetDate} ${copy.resetSuffix}`
+    );
   };
 
   const createThreadContent = ({
@@ -479,18 +480,16 @@
     if (action instanceof Node) content.querySelector(".cq-head-action").append(action);
     setThreadReset(content, resetPrefix, resetDetail, resetDate);
     if (weeklySummary) {
-      const divider = document.createElement("div");
-      divider.className = "cq-week-divider";
-      divider.setAttribute("aria-hidden", "true");
-      const summary = document.createElement("div");
-      summary.className = "cq-week-summary";
+      const summary = content.querySelector(".cq-reset-date");
+      summary.classList.add("cq-week-summary");
       summary.innerHTML = `
-        <span><span class="cq-week-title"></span> <b class="cq-week-used"></b> <span class="cq-week-used-suffix"></span></span>
-        <span><b class="cq-week-reset-date"></b> <span class="cq-week-reset-suffix"></span></span>`;
+        <span class="cq-week-title"></span>
+        <b class="cq-week-used"></b>
+        <span aria-hidden="true">·</span>
+        <b class="cq-week-reset-date"></b>
+        <span class="cq-week-reset-suffix"></span>`;
       summary.querySelector(".cq-week-title").textContent = copy.weeklySummaryTitle;
-      summary.querySelector(".cq-week-used-suffix").textContent = copy.summaryUsed;
       summary.querySelector(".cq-week-reset-suffix").textContent = copy.resetSuffix;
-      content.append(divider, summary);
       setWeeklySummary(content, weeklySummary.used, weeklySummary.resetDate);
     }
     return content;
@@ -521,14 +520,16 @@
     const usageAria = content.dataset.cqUsageAria || copy.weeklyUsedAria;
     const resetPrefix = content.dataset.cqResetPrefix || copy.resetCountdownPrefix;
     const resetDetail = content.querySelector(".cq-reset-value")?.textContent || copy.resetUnavailable;
-    const resetDate = content.querySelector(".cq-reset-date-value")?.textContent || copy.resetUnavailable;
     const parts = [copy.officialSourceAria];
     if (planLabel) parts.push(`${copy.plan} ${planLabel}`);
-    parts.push(title, `${usageAria} ${used}%`, `${copy.remainingPrefix} ${remaining}%`, `${resetPrefix} ${resetDetail}`, `${resetDate} ${copy.resetSuffix}`);
-    if (content.dataset.cqVariant === "a2-plus-b-v1") {
+    parts.push(title, `${usageAria} ${used}%`, `${copy.remainingPrefix} ${remaining}%`, `${resetPrefix} ${resetDetail}`);
+    if (content.dataset.cqVariant === "a2-plus-x-v1") {
       const weeklyUsed = content.dataset.cqWeeklyUsed;
       const weeklyDate = content.querySelector(".cq-week-reset-date")?.textContent || copy.resetUnavailable;
       parts.push(`${copy.weeklySummaryTitle} ${weeklyUsed}% ${copy.summaryUsed}`, `${weeklyDate} ${copy.resetSuffix}`);
+    } else {
+      const resetDate = content.querySelector(".cq-reset-date-value")?.textContent || copy.resetUnavailable;
+      parts.push(`${resetDate} ${copy.resetSuffix}`);
     }
     card.setAttribute("aria-label", parts.join(". "));
   };
@@ -599,9 +600,10 @@
       title: copy.fiveHourTitle,
       resetPrefix: copy.resetCountdownPrefix,
       resetDetail: formatResetCountdown(fiveHour.resetAt, true),
-      resetDate: formatOfficialReset(fiveHour.resetAt),
+      resetDate: "",
       action: createRefreshButton("official"),
-      variant: "a2-plus-b-v1",
+      planLabel: presentation.planLabel,
+      variant: "a2-plus-x-v1",
       weeklySummary: {used: weekly.usedPercent, resetDate: formatResetDate(weekly.resetAt)},
     });
     setThreadUsage(content, fiveHour.usedPercent, copy.fiveHourUsedAria);
@@ -626,7 +628,7 @@
     const presentation = officialPresentation(data);
     const content = card?.querySelector(`.${compactContentClass}[data-cq-layout="thread-v2"]`);
     if (!presentation || !content) return;
-    if (presentation.kind === "plus-b" && content.dataset.cqVariant === "a2-plus-b-v1") {
+    if (presentation.kind === "plus-x" && content.dataset.cqVariant === "a2-plus-x-v1") {
       for (const window of [presentation.fiveHour, presentation.weekly]) {
         const progress = content.querySelector(`progress[data-cq-window-label="${window.label}"]`);
         if (progress && Number(progress.value) !== window.usedPercent) progress.value = window.usedPercent;
@@ -653,7 +655,7 @@
       }
     }
     const content = card.querySelector(`.${compactContentClass}[data-cq-layout="thread-v2"]`);
-    if (content?.dataset.cqVariant === "a2-plus-b-v1") {
+    if (content?.dataset.cqVariant === "a2-plus-x-v1") {
       const fiveHourProgress = content.querySelector("progress[data-cq-window-label='5h']");
       const weeklyProgress = content.querySelector("progress[data-cq-window-label='Weekly']");
       const fiveHourUsed = Number(fiveHourProgress?.value);
@@ -680,9 +682,9 @@
   const compactCard = (card) => {
     const existing = card.querySelector(`.${compactContentClass}`);
     const presentation = officialPresentation(globalThis.__codexQuotaOfficialPayload || null);
-    const planLabel = presentation?.kind === "weekly" ? presentation.planLabel : "";
-    if (presentation?.kind === "plus-b") {
-      if (existing?.dataset.cqVariant === "a2-plus-b-v1") {
+    const planLabel = presentation?.planLabel || "";
+    if (presentation?.kind === "plus-x") {
+      if (existing?.dataset.cqVariant === "a2-plus-x-v1") {
         syncCompactProgress(card);
         return;
       }
@@ -879,12 +881,12 @@
     const presentation = officialPresentation(data);
     const content = card?.querySelector(`.${compactContentClass}[data-cq-layout="thread-v2"]`);
     if (!presentation || !content) return;
-    if (presentation.kind === "plus-b" && content.dataset.cqVariant === "a2-plus-b-v1") {
+    if (presentation.kind === "plus-x" && content.dataset.cqVariant === "a2-plus-x-v1") {
       setThreadReset(
         content,
         copy.resetCountdownPrefix,
         formatResetCountdown(presentation.fiveHour.resetAt, true),
-        formatOfficialReset(presentation.fiveHour.resetAt)
+        ""
       );
       const weeklyUsed = Number(content.dataset.cqWeeklyUsed);
       setWeeklySummary(
@@ -924,7 +926,7 @@
     const state = quotaState("official", data, errorCode);
     const presentation = officialPresentation(data);
     const windows = presentation?.windows || [];
-    if (presentation?.kind === "plus-b") {
+    if (presentation?.kind === "plus-x") {
       renderOfficialPlus(card, presentation, [], state);
       return;
     }
@@ -1084,11 +1086,21 @@
     if (!loaded) return;
     const {lastSuccessAt, nextAttemptAt, cooldownUntil} = quotaTiming(isApi);
     const fallbackNextAt = lastSuccessAt ? lastSuccessAt + adaptiveRefreshDelayMs() : 0;
-    const nextAt = Math.max(nextAttemptAt || fallbackNextAt, cooldownUntil);
-    if (!Number.isFinite(nextAt) || nextAt <= 0) return;
+    const networkNextAt = Math.max(nextAttemptAt || fallbackNextAt, cooldownUntil);
+    const now = Date.now();
+    const plusX = !isApi
+      ? document.querySelector(`.${compactContentClass}[data-cq-variant="a2-plus-x-v1"]`)
+      : null;
+    const countdownNextAt = plusX ? now + (60000 - (now % 60000)) : Infinity;
+    const nextAt = Math.min(networkNextAt || Infinity, countdownNextAt);
+    if (!Number.isFinite(nextAt)) return;
     globalThis.__codexQuotaAutoRefreshTimer = setTimeout(() => {
       globalThis.__codexQuotaAutoRefreshTimer = null;
       if (document.visibilityState !== "visible") return;
+      if (!apiMode()) {
+        const card = nativeQuotaCard() || document.getElementById(officialHostId);
+        if (card) applyOfficialCountdown(card, globalThis.__codexQuotaOfficialPayload || null);
+      }
       refreshStaleData();
     }, Math.max(1000, nextAt - Date.now()));
   };
@@ -1257,9 +1269,9 @@
     host.hidden = false;
     const currentLayout = host.firstElementChild?.dataset.cqLayout;
     const presentation = officialPresentation(globalThis.__codexQuotaOfficialPayload || null);
-    const expectedVariant = presentation?.kind === "plus-b" ? "a2-plus-b-v1" : "a2-merge-v1";
-    const expectedTitle = presentation?.kind === "plus-b" ? copy.fiveHourTitle : copy.weeklyTitle;
-    const expectedPlan = presentation?.kind === "weekly" ? presentation.planLabel : "";
+    const expectedVariant = presentation?.kind === "plus-x" ? "a2-plus-x-v1" : "a2-merge-v1";
+    const expectedTitle = presentation?.kind === "plus-x" ? copy.fiveHourTitle : copy.weeklyTitle;
+    const expectedPlan = presentation?.planLabel || "";
     const staleThread = currentLayout === "thread-v2" &&
       (!host.querySelector(".cq-refresh") ||
        host.firstElementChild?.dataset.cqVariant !== expectedVariant ||

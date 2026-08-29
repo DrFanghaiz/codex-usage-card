@@ -9,7 +9,7 @@ Codex Usage Card 在 Codex 桌面端侧栏账号行上方显示用量与剩余�
 在 PowerShell 7 中运行：
 
 ```powershell
-$installer = Join-Path $env:TEMP 'install-codex-usage-card.ps1'; Invoke-WebRequest 'https://raw.githubusercontent.com/DrFanghaiz/codex-usage-card/v1.7.0/install.ps1' -OutFile $installer; Unblock-File -LiteralPath $installer; & $installer
+$installer = Join-Path $env:TEMP 'install-codex-usage-card.ps1'; Invoke-WebRequest 'https://raw.githubusercontent.com/DrFanghaiz/codex-usage-card/v1.8.0/install.ps1' -OutFile $installer; Unblock-File -LiteralPath $installer; & $installer
 ```
 
 安装器会校验发布包的 SHA-256，把 Skill 安装到 `$CODEX_HOME\skills`（未设置时为 `$env:USERPROFILE\.codex\skills`），把无窗口修复器部署到 `$env:LOCALAPPDATA\CodexUsageCard`，并注册当前用户的计划任务 `Codex Usage Card`。从旧版升级时，只迁移路径与动作完全匹配的旧任务。安装完成后会输出 `ActivationState`、`StageCodes` 和 `CardVisible` 等只读验收结果；Codex 未运行时显示等待状态，不把已完成安装误报为失败。
@@ -24,15 +24,17 @@ python "$env:USERPROFILE\.codex\skills\.system\skill-installer\scripts\install-s
 
 ## 工作方式
 
-- 官方账户模式优先复用 Codex 原生额度组件；原生卡缺失时由无窗口修复器获取经过校验的真实官方额度窗口。Pro 单周窗口沿用 A2 三行结构，并在标题旁显示 `Pro`；Plus 仅在官方同时返回真实 `5h` 与 `Weekly` 时使用 B 双窗：5 小时窗口占主体，发丝线下保留一行每周用量与重置日期摘要。两种路径共用真实数据、刷新状态和完整无障碍名称。
-- 卡片把已用百分比、弹性 2px 进度轨道与剩余比例连成一条阅读动线，并显示倒计时和本地化绝对重置时间。低于约 200px 时压缩轨道间距，约 176px 及以下重排页脚与周摘要，不缩小字体或丢失信息。官方没有返回 5h 时绝不补造；非 Pro/Plus 或未知多窗口形状继续完整呈现真实窗口。控件使用固定暖纸令牌，不修改 Codex 全局主题，无阴影、渐变或动效。
+- 官方账户模式优先复用 Codex 原生额度组件；原生卡缺失时由无窗口修复器获取经过校验的真实官方额度窗口。Pro 单周窗口沿用 A2 三行结构，并在标题旁显示 `Pro`；Plus 仅在官方同时返回真实 `5h` 与 `Weekly` 时使用 X 三行结构：标题显示 `Plus`，5 小时窗口占主行，页脚左侧显示 5h 倒计时，右侧显示周百分比与周重置日。两种账号在正常侧栏宽度下同高。
+- 卡片把已用百分比、弹性 2px 进度轨道与剩余比例连成一条阅读动线。Plus X 不显示重复的 5h 绝对时刻、周进度轨、分隔线或第四行；窄侧栏只重排页脚，不缩小字体或丢失信息。官方没有返回 5h 时绝不补造；非 Pro/Plus 或未知多窗口形状继续完整呈现真实窗口。控件使用固定暖纸令牌，不修改 Codex 全局主题，无阴影、渐变或动效。
 - API 模式显示一张“API 剩余”自定义卡，主数字和细线表示每日剩余额度，并支持手动刷新、陈旧数据时间和服务端冷却反馈。
 - 页面可见时使用唯一的自适应单次计时器：最近聚焦 5 分钟内每 2 分钟、聚焦后 5 分钟至 1 小时每 5 分钟、闲置 1–4 小时每 15 分钟、超过 4 小时每 30 分钟；若额度值刚发生变化则维持 5 分钟档。页面隐藏时立即停表，恢复可见或重新聚焦时按新鲜度补刷新。失败重试继续服从至少 60 秒及服务端 `Retry-After` 冷却，不监听键盘、不扫描进程或会话文件。
+- Plus X 的分钟级倒计时复用同一个单次计时器在本地按分钟边界重算，不额外请求网络；因此网络刷新仍按自适应档位运行。
 - 登录配置短暂不完整时通过文件系统事件等待恢复，不做每秒轮询，也不会永久退出。
+- 直接从官方 ChatGPT 入口启动时，后台修复器会识别本次新出现且未开放调试端口的 `OpenAI.Codex` 主进程，快速重启一次并附加动态 loopback 调试端口；Codex++ 等已带端口的启动保持不变。
 - Codex 更新、重启、调试端口变化或页面重载后，后台修复器会重新发现页面并注入控件。
 - 侧栏收起、账号行不存在时自动隐藏卡片，重新展开后恢复。
 
-Codex 必须暴露本机调试端口，修复器才能向页面注入控件。若官方彻底删除调试入口或改变内部额度组件契约，修复器会明确失效，不会用猜测规则伪装成功。
+Codex 必须暴露本机调试端口，修复器才能向页面注入控件。安装或升级 Helper 前已经存在的无调试会话不会被强制关闭，需要关闭后重新从官方入口启动一次。若官方彻底删除调试入口、阻止启动参数或改变内部额度组件契约，修复器会明确失效，不会用猜测规则伪装成功。
 
 ## 只读自检
 
