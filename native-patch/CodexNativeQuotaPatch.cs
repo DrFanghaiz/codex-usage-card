@@ -1,10 +1,12 @@
 using System;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
 using System.Management;
 using System.Net;
 using System.Net.Sockets;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -14,6 +16,9 @@ using System.Web.Script.Serialization;
 
 internal static class CodexNativeQuotaPatch
 {
+    private const uint ExtendedStartupInfoPresent = 0x00080000;
+    private const uint ProcessCreateProcess = 0x0080;
+    private static readonly IntPtr ProcThreadAttributeParentProcess = new IntPtr(0x00020000);
     private static readonly JavaScriptSerializer Json = new JavaScriptSerializer();
     private static string NativeScript;
     private static int NextCommandId;
@@ -37,10 +42,16 @@ internal static class CodexNativeQuotaPatch
 
     private static async Task MainAsync()
     {
+        var observedCodexProcesses = new HashSet<string>();
+        foreach (var process in FindCodexRootProcesses())
+            observedCodexProcesses.Add(process.Identity);
+
         while (true)
         {
             try
             {
+                if (RelaunchNewDirectCodexProcess(observedCodexProcesses))
+                    continue;
                 if (!IsCodexRunning())
                 {
                     await WaitForCodexStartAsync();
@@ -474,6 +485,169 @@ internal static class CodexNativeQuotaPatch
         return true;
     }
 
+    private static bool RelaunchNewDirectCodexProcess(HashSet<string> observedProcesses)
+    {
+        var processes = FindCodexRootProcesses();
+        foreach (var process in processes)
+        {
+            if (!observedProcesses.Add(process.Identity) || HasRemoteDebuggingPort(process.CommandLine))
+                continue;
+            RelaunchWithRemoteDebugging(process);
+            return true;
+        }
+        return false;
+    }
+
+    private static List<CodexProcessInfo> FindCodexRootProcesses()
+    {
+        var processes = new List<CodexProcessInfo>();
+        using (var searcher = new ManagementObjectSearcher(
+            "SELECT ProcessId, CreationDate, ExecutablePath, CommandLine FROM Win32_Process WHERE Name='ChatGPT.exe'"))
+        using (var matches = searcher.Get())
+        {
+            foreach (ManagementObject match in matches)
+            {
+                var executablePath = Convert.ToString(match["ExecutablePath"]);
+                var commandLine = Convert.ToString(match["CommandLine"]);
+                var creationDate = Convert.ToString(match["CreationDate"]);
+                if (match["ProcessId"] == null || String.IsNullOrWhiteSpace(creationDate) ||
+                    !IsCodexRootProcess(executablePath, commandLine)) continue;
+                var processId = Convert.ToInt32(match["ProcessId"]);
+                processes.Add(new CodexProcessInfo
+                {
+                    ProcessId = processId,
+                    Identity = processId + "|" + creationDate,
+                    ExecutablePath = executablePath,
+                    CommandLine = commandLine
+                });
+            }
+        }
+        return processes;
+    }
+
+    private static bool IsCodexRootProcess(string executablePath, string commandLine)
+    {
+        if (String.IsNullOrWhiteSpace(executablePath) || String.IsNullOrWhiteSpace(commandLine) ||
+            !String.Equals(Path.GetFileName(executablePath), "ChatGPT.exe", StringComparison.OrdinalIgnoreCase) ||
+            Regex.IsMatch(commandLine, "(?:^|\\s)--type=", RegexOptions.IgnoreCase)) return false;
+        var appDirectory = Path.GetDirectoryName(executablePath);
+        var packageDirectory = Path.GetDirectoryName(appDirectory);
+        if (String.IsNullOrWhiteSpace(appDirectory) || String.IsNullOrWhiteSpace(packageDirectory)) return false;
+        return String.Equals(Path.GetFileName(appDirectory), "app", StringComparison.OrdinalIgnoreCase) &&
+            Path.GetFileName(packageDirectory).StartsWith("OpenAI.Codex_", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool HasRemoteDebuggingPort(string commandLine)
+    {
+        return Regex.IsMatch(commandLine ?? "", "(?:^|\\s)--remote-debugging-port(?:=|\\s)", RegexOptions.IgnoreCase);
+    }
+
+    private static void RelaunchWithRemoteDebugging(CodexProcessInfo processInfo)
+    {
+        var port = FindAvailableLoopbackPort();
+        using (var process = Process.GetProcessById(processInfo.ProcessId))
+        {
+            var actualPath = Path.GetFullPath(process.MainModule.FileName);
+            var expectedPath = Path.GetFullPath(processInfo.ExecutablePath);
+            if (!String.Equals(actualPath, expectedPath, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("Codex process identity changed before relaunch");
+            process.Kill();
+            if (!process.WaitForExit(5000))
+                throw new InvalidOperationException("Codex did not exit before debug relaunch");
+        }
+
+        var portText = port.ToString();
+        LaunchWithShellParent(
+            processInfo.ExecutablePath,
+            "--remote-debugging-address=127.0.0.1 --remote-debugging-port=" + portText +
+                " --remote-allow-origins=http://127.0.0.1:" + portText);
+    }
+
+    private static void LaunchWithShellParent(string executablePath, string arguments)
+    {
+        using (var shell = FindShellProcess())
+        {
+            var shellHandle = OpenProcess(ProcessCreateProcess, false, shell.Id);
+            if (shellHandle == IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error());
+
+            var attributeList = IntPtr.Zero;
+            var attributeListInitialized = false;
+            var parentValue = IntPtr.Zero;
+            var processInformation = new ProcessInformation();
+            try
+            {
+                var attributeListSize = IntPtr.Zero;
+                InitializeProcThreadAttributeList(IntPtr.Zero, 1, 0, ref attributeListSize);
+                if (attributeListSize == IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error());
+                attributeList = Marshal.AllocHGlobal(attributeListSize);
+                if (!InitializeProcThreadAttributeList(attributeList, 1, 0, ref attributeListSize))
+                    throw new Win32Exception(Marshal.GetLastWin32Error());
+                attributeListInitialized = true;
+
+                parentValue = Marshal.AllocHGlobal(IntPtr.Size);
+                Marshal.WriteIntPtr(parentValue, shellHandle);
+                if (!UpdateProcThreadAttribute(
+                    attributeList,
+                    0,
+                    ProcThreadAttributeParentProcess,
+                    parentValue,
+                    new IntPtr(IntPtr.Size),
+                    IntPtr.Zero,
+                    IntPtr.Zero)) throw new Win32Exception(Marshal.GetLastWin32Error());
+
+                var startupInfo = new StartupInfoEx();
+                startupInfo.StartupInfo.Size = Marshal.SizeOf(typeof(StartupInfoEx));
+                startupInfo.AttributeList = attributeList;
+                var commandLine = new StringBuilder("\"" + executablePath + "\" " + arguments);
+                if (!CreateProcess(
+                    executablePath,
+                    commandLine,
+                    IntPtr.Zero,
+                    IntPtr.Zero,
+                    false,
+                    ExtendedStartupInfoPresent,
+                    IntPtr.Zero,
+                    Path.GetDirectoryName(executablePath),
+                    ref startupInfo,
+                    out processInformation)) throw new Win32Exception(Marshal.GetLastWin32Error());
+            }
+            finally
+            {
+                if (processInformation.Process != IntPtr.Zero) CloseHandle(processInformation.Process);
+                if (processInformation.Thread != IntPtr.Zero) CloseHandle(processInformation.Thread);
+                if (attributeListInitialized) DeleteProcThreadAttributeList(attributeList);
+                if (attributeList != IntPtr.Zero) Marshal.FreeHGlobal(attributeList);
+                if (parentValue != IntPtr.Zero) Marshal.FreeHGlobal(parentValue);
+                CloseHandle(shellHandle);
+            }
+        }
+    }
+
+    private static Process FindShellProcess()
+    {
+        var sessionId = Process.GetCurrentProcess().SessionId;
+        foreach (var shell in Process.GetProcessesByName("explorer"))
+        {
+            if (shell.SessionId == sessionId) return shell;
+            shell.Dispose();
+        }
+        throw new InvalidOperationException("Explorer is not running in the current session");
+    }
+
+    private static int FindAvailableLoopbackPort()
+    {
+        var listener = new TcpListener(IPAddress.Loopback, 0);
+        try
+        {
+            listener.Start();
+            return ((IPEndPoint)listener.LocalEndpoint).Port;
+        }
+        finally
+        {
+            listener.Stop();
+        }
+    }
+
     private static bool IsCodexRunning()
     {
         var processes = Process.GetProcessesByName("ChatGPT");
@@ -656,12 +830,102 @@ internal static class CodexNativeQuotaPatch
         public string ApiKey;
     }
 
+    private sealed class CodexProcessInfo
+    {
+        public int ProcessId;
+        public string Identity;
+        public string ExecutablePath;
+        public string CommandLine;
+    }
+
     private sealed class OfficialConfiguration
     {
         public string Url;
         public string AccessToken;
         public string AccountId;
     }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ProcessInformation
+    {
+        public IntPtr Process;
+        public IntPtr Thread;
+        public int ProcessId;
+        public int ThreadId;
+    }
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct StartupInfo
+    {
+        public int Size;
+        public string Reserved;
+        public string Desktop;
+        public string Title;
+        public int X;
+        public int Y;
+        public int XSize;
+        public int YSize;
+        public int XCountChars;
+        public int YCountChars;
+        public int FillAttribute;
+        public int Flags;
+        public short ShowWindow;
+        public short ReservedSize;
+        public IntPtr ReservedPointer;
+        public IntPtr StandardInput;
+        public IntPtr StandardOutput;
+        public IntPtr StandardError;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct StartupInfoEx
+    {
+        public StartupInfo StartupInfo;
+        public IntPtr AttributeList;
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr OpenProcess(uint desiredAccess, bool inheritHandle, int processId);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool InitializeProcThreadAttributeList(
+        IntPtr attributeList,
+        int attributeCount,
+        int flags,
+        ref IntPtr size);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool UpdateProcThreadAttribute(
+        IntPtr attributeList,
+        uint flags,
+        IntPtr attribute,
+        IntPtr value,
+        IntPtr size,
+        IntPtr previousValue,
+        IntPtr returnSize);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool CreateProcess(
+        string applicationName,
+        StringBuilder commandLine,
+        IntPtr processAttributes,
+        IntPtr threadAttributes,
+        bool inheritHandles,
+        uint creationFlags,
+        IntPtr environment,
+        string currentDirectory,
+        ref StartupInfoEx startupInfo,
+        out ProcessInformation processInformation);
+
+    [DllImport("kernel32.dll")]
+    private static extern void DeleteProcThreadAttributeList(IntPtr attributeList);
+
+    [DllImport("kernel32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool CloseHandle(IntPtr handle);
 
     // A small CDP WebSocket client avoids the .NET Framework ClientWebSocket
     // crash that occurs when Electron reloads its renderer.

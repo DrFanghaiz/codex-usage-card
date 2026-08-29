@@ -26,6 +26,26 @@ class NativeHelperTests(unittest.TestCase):
         self.assertIn("Win32_ProcessStartTrace", NATIVE_SOURCE)
         self.assertIn("if (IsCodexRunning()) return", NATIVE_SOURCE)
 
+    def test_direct_codex_start_is_relaunched_once_with_loopback_cdp(self):
+        self.assertIn("var observedCodexProcesses = new HashSet<string>();", NATIVE_SOURCE)
+        self.assertIn("ProcessId, CreationDate, ExecutablePath, CommandLine", NATIVE_SOURCE)
+        self.assertNotIn("observedProcessIds.RemoveWhere", NATIVE_SOURCE)
+        self.assertIn('StartsWith("OpenAI.Codex_", StringComparison.OrdinalIgnoreCase)', NATIVE_SOURCE)
+        self.assertIn('Regex.IsMatch(commandLine, "(?:^|\\\\s)--type="', NATIVE_SOURCE)
+        self.assertIn("!observedProcesses.Add(process.Identity)", NATIVE_SOURCE)
+        self.assertIn("HasRemoteDebuggingPort(process.CommandLine)", NATIVE_SOURCE)
+        self.assertIn("--remote-debugging-address=127.0.0.1", NATIVE_SOURCE)
+        self.assertIn("--remote-debugging-port=", NATIVE_SOURCE)
+        self.assertIn("--remote-allow-origins=http://127.0.0.1:", NATIVE_SOURCE)
+        self.assertIn("ProcThreadAttributeParentProcess", NATIVE_SOURCE)
+        self.assertIn("ExtendedStartupInfoPresent", NATIVE_SOURCE)
+        self.assertIn('Process.GetProcessesByName("explorer")', NATIVE_SOURCE)
+        self.assertNotIn("using (var replacement = Process.Start(startInfo))", NATIVE_SOURCE)
+        self.assertLess(
+            NATIVE_SOURCE.index("Codex process identity changed before relaunch"),
+            NATIVE_SOURCE.index("process.Kill()"),
+        )
+
     def test_official_usage_is_fetched_by_the_helper_and_only_payload_enters_the_page(self):
         self.assertIn("https://chatgpt.com/backend-api/wham/usage", NATIVE_SOURCE)
         self.assertIn('request.Headers["ChatGPT-Account-ID"]', NATIVE_SOURCE)
@@ -96,10 +116,10 @@ class NativeHelperTests(unittest.TestCase):
                 "Unregister-ScheduledTask -TaskPath '\\' -TaskName $legacyTaskName"
             ),
         )
-        self.assertIn("$releaseTag = 'v1.7.0'", ROOT_INSTALL_SCRIPT)
+        self.assertIn("$releaseTag = 'v1.8.0'", ROOT_INSTALL_SCRIPT)
         self.assertIn("$archiveName = 'codex-usage-card.skill.zip'", ROOT_INSTALL_SCRIPT)
         self.assertIn("'scripts\\doctor.ps1'", ROOT_INSTALL_SCRIPT)
-        self.assertIn("1BF77A73C0E89986F80560890707DD9471ACEFCB6A35D1458CDDA1E79234AC3C", ROOT_INSTALL_SCRIPT)
+        self.assertIn("0456B3569971EB26F017AA3DFE9D3841929881948FE6A7512189F8AAC747A0A5", ROOT_INSTALL_SCRIPT)
 
 
 if __name__ == "__main__":
