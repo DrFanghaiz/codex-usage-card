@@ -61,7 +61,7 @@ class PageInjectorTests(unittest.TestCase):
         self.assertIn("weeklyUsedAria", NATIVE_QUOTA_SCRIPT)
         self.assertIn("syncCompactProgress(card)", NATIVE_QUOTA_SCRIPT)
         self.assertIn("const used = Number(progress.value)", NATIVE_QUOTA_SCRIPT)
-        self.assertIn('attributeFilter: ["value"]', NATIVE_QUOTA_SCRIPT)
+        self.assertIn('attributeFilter: ["value", "class", "style", "hidden", "data-theme", "data-color-theme"]', NATIVE_QUOTA_SCRIPT)
         self.assertNotIn("client._setStatus", NATIVE_QUOTA_SCRIPT)
         self.assertIn("--cq-sans: var(--default-font-family", NATIVE_QUOTA_SCRIPT)
         self.assertIn("new MutationObserver", NATIVE_QUOTA_SCRIPT)
@@ -71,9 +71,9 @@ class PageInjectorTests(unittest.TestCase):
         self.assertNotIn("5h unavailable", NATIVE_QUOTA_SCRIPT)
 
     def test_thread_layout_uses_one_percentage_source_and_theme_safe_tokens(self):
-        self.assertIn("--cq-surface: var(--color-background-elevated-secondary", NATIVE_QUOTA_SCRIPT)
-        self.assertIn("--cq-border: var(--color-token-border-default", NATIVE_QUOTA_SCRIPT)
-        self.assertIn("--cq-accent: var(--codex-base-accent", NATIVE_QUOTA_SCRIPT)
+        self.assertIn("--cq-sidebar: var(--color-token-side-bar-background", NATIVE_QUOTA_SCRIPT)
+        self.assertIn("--cq-border: color-mix(in srgb, var(--cq-ink) 9%", NATIVE_QUOTA_SCRIPT)
+        self.assertIn("--cq-theme-accent: var(--codex-base-accent", NATIVE_QUOTA_SCRIPT)
         self.assertNotIn("#FCFAF4", NATIVE_QUOTA_SCRIPT)
         self.assertNotIn("#B4552D", NATIVE_QUOTA_SCRIPT)
         self.assertNotIn("html.electron-dark", NATIVE_QUOTA_SCRIPT)
@@ -110,23 +110,22 @@ class PageInjectorTests(unittest.TestCase):
         self.assertIn('currentLayout !== "thread-v2-fallback"', NATIVE_QUOTA_SCRIPT)
         self.assertIn("font-size: 24px; font-weight: 600", NATIVE_QUOTA_SCRIPT)
         self.assertNotIn("height: 2px; margin-top: 9px", NATIVE_QUOTA_SCRIPT)
-        self.assertIn("--cq-surface: #FAF7EF", NATIVE_QUOTA_SCRIPT)
+        self.assertNotIn("#FAF7EF", NATIVE_QUOTA_SCRIPT)
         self.assertIn("box-shadow: none !important", NATIVE_QUOTA_SCRIPT)
         self.assertIn("width: calc(100% - 16px) !important", NATIVE_QUOTA_SCRIPT)
         self.assertIn("margin: 0 8px 8px !important", NATIVE_QUOTA_SCRIPT)
         self.assertIn("padding: 12px 14px 11px !important", NATIVE_QUOTA_SCRIPT)
         self.assertIn("border: 1px solid var(--cq-border) !important", NATIVE_QUOTA_SCRIPT)
         self.assertIn("border-radius: 12px !important", NATIVE_QUOTA_SCRIPT)
-        self.assertIn("background: var(--cq-surface) !important", NATIVE_QUOTA_SCRIPT)
+        self.assertIn("background: var(--cq-solid) !important", NATIVE_QUOTA_SCRIPT)
         self.assertNotIn("cq-rule-marker", NATIVE_QUOTA_SCRIPT)
         self.assertIn('@media (prefers-reduced-motion: reduce)', NATIVE_QUOTA_SCRIPT)
         self.assertIn("style.textContent !== css", NATIVE_QUOTA_SCRIPT)
         self.assertIn("legacyProgresses", NATIVE_QUOTA_SCRIPT)
         self.assertIn('existing.querySelector(".cq-folio-note b")', NATIVE_QUOTA_SCRIPT)
         self.assertNotIn("cq-scale", NATIVE_QUOTA_SCRIPT)
-        self.assertNotIn("linear-gradient", NATIVE_QUOTA_SCRIPT)
-        self.assertNotIn("backdrop-filter", NATIVE_QUOTA_SCRIPT)
-        self.assertIn("--cq-accent: #8E4617", NATIVE_QUOTA_SCRIPT)
+        self.assertIn("backdrop-filter: blur(18px)", NATIVE_QUOTA_SCRIPT)
+        self.assertNotIn("#8E4617", NATIVE_QUOTA_SCRIPT)
 
     def test_official_windows_are_never_fabricated(self):
         self.assertIn("const progresses = [...card.querySelectorAll", NATIVE_QUOTA_SCRIPT)
@@ -141,10 +140,8 @@ class PageInjectorTests(unittest.TestCase):
         self.assertNotIn('addWindow("5h"', NATIVE_QUOTA_SCRIPT)
 
     def test_reinstall_replaces_the_previous_page_observer(self):
-        self.assertGreaterEqual(
-            NATIVE_QUOTA_SCRIPT.count("__codexQuotaOfficialCardObserver?.disconnect()"),
-            2,
-        )
+        self.assertIn("__codexQuotaOfficialCardObserver?.disconnect()", NATIVE_QUOTA_SCRIPT)
+        self.assertIn("globalThis.__codexQuotaOfficialCardObserver !== observer", NATIVE_QUOTA_SCRIPT)
 
     def test_native_patch_uses_injected_login_mode_and_keeps_secrets_out_of_the_page(self):
         self.assertIn("__codexQuotaMode", NATIVE_QUOTA_SCRIPT)
@@ -294,7 +291,7 @@ class PageInjectorTests(unittest.TestCase):
         self.assertNotIn('refresh.textContent = copy.refreshing', NATIVE_QUOTA_SCRIPT)
 
         self.assertIn("font-size: 10.5px", NATIVE_QUOTA_SCRIPT)
-        self.assertIn("var(--cq-ink) 78%", NATIVE_QUOTA_SCRIPT)
+        self.assertIn("var(--cq-theme-ink) 78%", NATIVE_QUOTA_SCRIPT)
         self.assertIn("@media (prefers-contrast: more)", NATIVE_QUOTA_SCRIPT)
         self.assertIn("@media (forced-colors: active)", NATIVE_QUOTA_SCRIPT)
         self.assertIn("transition: width .18s", NATIVE_QUOTA_SCRIPT)
