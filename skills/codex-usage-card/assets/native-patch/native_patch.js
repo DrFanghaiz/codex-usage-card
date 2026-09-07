@@ -115,17 +115,140 @@
     return {kind: "fallback", planName, windows};
   };
 
+  const updatePalette = (() => {
+    const canvas = document.createElement("canvas");
+    canvas.width = canvas.height = 1;
+    const context = canvas.getContext("2d", {willReadFrequently: true});
+    const probeId = "codex-quota-color-probe";
+    const probe = document.getElementById(probeId) || document.createElement("span");
+    probe.id = probeId;
+    probe.hidden = true;
+    if (!probe.isConnected) document.head.append(probe);
+    const cache = new WeakMap();
+    const darkMode = matchMedia("(prefers-color-scheme: dark)");
+    const mix = (front, back, alpha) => front.map((v, i) => v * alpha + back[i] * (1 - alpha));
+    const clamp = (v) => Math.min(1, Math.max(0, v));
+    const linear = (v) => v <= .04045 ? v / 12.92 : ((v + .055) / 1.055) ** 2.4;
+    const gamma = (v) => v <= .0031308 ? 12.92 * v : 1.055 * v ** (1 / 2.4) - .055;
+    const luminance = (rgb) => rgb.map(linear).reduce((sum, v, i) => sum + v * [.2126, .7152, .0722][i], 0);
+    const contrast = (rgb, backgrounds) => Math.min(...backgrounds.map((background) => {
+      const a = luminance(rgb), b = luminance(background);
+      return (Math.max(a, b) + .05) / (Math.min(a, b) + .05);
+    }));
+    const readColor = (value) => {
+      if (!CSS.supports("color", value)) throw new Error("Invalid quota theme color");
+      context.clearRect(0, 0, 1, 1);
+      // Resolve system colors and light-dark() in the card's color scheme first.
+      probe.style.color = value;
+      context.fillStyle = getComputedStyle(probe).color;
+      context.fillRect(0, 0, 1, 1);
+      return [...context.getImageData(0, 0, 1, 1).data].map((v) => v / 255);
+    };
+    const opaque = (rgba, background) => mix(rgba.slice(0, 3), background, rgba[3]);
+    // Oklab matrices: https://bottosson.github.io/posts/oklab/ (public domain).
+    const toLab = (rgb) => {
+      const [r, g, b] = rgb.map(linear);
+      const l = Math.cbrt(.4122214708 * r + .5363325363 * g + .0514459929 * b);
+      const m = Math.cbrt(.2119034982 * r + .6806995451 * g + .1073969566 * b);
+      const s = Math.cbrt(.0883024619 * r + .2817188376 * g + .6299787005 * b);
+      return [.2104542553 * l + .793617785 * m - .0040720468 * s,
+        1.9779984951 * l - 2.428592205 * m + .4505937099 * s,
+        .0259040371 * l + .7827717662 * m - .808675766 * s];
+    };
+    const fromLab = ([L, a, b]) => {
+      const l = (L + .3963377774 * a + .2158037573 * b) ** 3;
+      const m = (L - .1055613458 * a - .0638541728 * b) ** 3;
+      const s = (L - .0894841775 * a - 1.291485548 * b) ** 3;
+      return [4.0767416621 * l - 3.3077115913 * m + .2309699292 * s,
+        -1.2684380046 * l + 2.6097574011 * m - .3413193965 * s,
+        -.0041960863 * l - .7034186147 * m + 1.707614701 * s].map(gamma);
+    };
+    const inGamut = (rgb) => rgb.every((v) => v >= -1e-6 && v <= 1.000001);
+    const gamut = (lab) => {
+      const rgb = fromLab(lab);
+      if (inGamut(rgb)) return rgb.map(clamp);
+      let low = 0, high = 1;
+      for (let i = 0; i < 22; i++) {
+        const k = (low + high) / 2;
+        if (inGamut(fromLab([lab[0], lab[1] * k, lab[2] * k]))) low = k;
+        else high = k;
+      }
+      return fromLab([lab[0], lab[1] * low, lab[2] * low]).map(clamp);
+    };
+    const readable = (start, ink, backgrounds, minimum) => {
+      for (let i = 0; i <= 100; i++) {
+        const rgb = mix(ink, start, i / 100);
+        if (contrast(rgb, backgrounds) >= minimum) return rgb;
+      }
+      return ink;
+    };
+    return (card) => {
+      const style = getComputedStyle(card);
+      const inputs = ["--cq-sidebar", "--cq-theme-ink", "--cq-theme-muted", "--cq-theme-accent"]
+        .map((name) => style.getPropertyValue(name).trim());
+      probe.style.colorScheme = style.colorScheme;
+      let background = readColor(inputs[0]);
+      if (background[3] < 1) {
+        // Transparent sidebar tokens need the actual ancestor composition.
+        const ancestors = [];
+        for (let node = card.parentElement; node; node = node.parentElement) ancestors.push(node);
+        background = ancestors.reverse().reduce((under, node) =>
+          opaque(readColor(getComputedStyle(node).backgroundColor), under), readColor("Canvas").slice(0, 3));
+      } else background = background.slice(0, 3);
+      const key = JSON.stringify([inputs, background, style.colorScheme, darkMode.matches]);
+      if (cache.get(card) === key && card.style.getPropertyValue("--cq-palette-solid")) return;
+      const [L, a, b] = toLab(background), chroma = Math.hypot(a, b);
+      const cap = chroma > .08 ? .08 : chroma > .025 ? .04 : L >= .65 ? .016 : .020;
+      const nextChroma = chroma < .006 ? 0 : Math.min(chroma * (chroma > .08 ? .5 : .65), cap);
+      const scale = chroma > 0 ? nextChroma / chroma : 0;
+      let lightness = L + (L >= .65 ? .03 : .05);
+      if (lightness > .98) lightness = L - .03;
+      let surface, backgrounds, ink, opacity = .9, glow = .025;
+      // Check nearby lightness candidates when a midtone leaves too little text contrast.
+      for (const shift of [0, .02, -.02]) {
+        surface = gamut([clamp(lightness + shift), a * scale, b * scale]);
+        const composite = mix(surface, background, opacity);
+        backgrounds = [surface, composite, mix([1, 1, 1], composite, glow)];
+        const requested = opaque(readColor(inputs[1]), composite);
+        const candidates = [requested, [0, 0, 0], [1, 1, 1]];
+        ink = candidates.find((rgb) => contrast(rgb, backgrounds) >= 4.7);
+        if (ink) break;
+      }
+      if (!ink) {
+        // A solid surface always permits an accessible black/white pair.
+        opacity = 1; glow = 0; backgrounds = [surface];
+        ink = contrast([0, 0, 0], backgrounds) >= 4.5 ? [0, 0, 0] : [1, 1, 1];
+      }
+      const composite = mix(surface, background, opacity);
+      const muted = readable(opaque(readColor(inputs[2]), composite), ink, backgrounds, 4.65);
+      const accent = readable(opaque(readColor(inputs[3]), composite), ink, backgrounds, 3.1);
+      const colors = {solid: surface, ink, muted, accent};
+      for (const [name, rgb] of Object.entries(colors)) {
+        card.style.setProperty(`--cq-palette-${name}`, `rgb(${rgb.map((v) => (v * 255).toFixed(3)).join(" ")})`);
+      }
+      card.style.setProperty("--cq-palette-opacity", String(opacity));
+      card.style.setProperty("--cq-palette-glow", String(glow));
+      cache.set(card, key);
+    };
+  })();
+
   const ensureStyle = () => {
     const style = document.getElementById(styleId) || document.createElement("style");
     const css = `
       .${compactClass}, .${apiCardClass} {
-        --cq-surface: var(--color-background-elevated-secondary, var(--color-token-main-surface-primary));
-        --cq-border: var(--color-token-border-default, currentColor);
-        --cq-track: var(--color-background-primary-soft-active, var(--color-background-primary-soft-alpha));
-        --cq-ink: var(--vscode-foreground, currentColor);
-        --cq-muted: var(--color-text-secondary-solid, color-mix(in srgb, var(--cq-ink) 78%, transparent));
+        --cq-sidebar: var(--color-token-side-bar-background, var(--vscode-sideBar-background, var(--color-background-surface-under, Canvas)));
+        --cq-solid: var(--cq-palette-solid, var(--cq-sidebar));
+        --cq-surface: color-mix(in srgb, var(--cq-solid) calc(var(--cq-palette-opacity, .9) * 100%), transparent);
+        --cq-border: color-mix(in srgb, var(--cq-ink) 9%, transparent);
+        --cq-track: color-mix(in srgb, var(--cq-ink) 12%, transparent);
+        --cq-theme-ink: var(--color-token-text-primary, var(--vscode-foreground, CanvasText));
+        --cq-theme-muted: var(--color-text-secondary-solid, color-mix(in srgb, var(--cq-theme-ink) 78%, transparent));
+        --cq-theme-accent: var(--codex-base-accent, var(--color-text-accent, var(--cq-theme-ink)));
+        --cq-ink: var(--cq-palette-ink, var(--cq-theme-ink));
+        --cq-muted: var(--cq-palette-muted, var(--cq-theme-muted));
+        --cq-soft: var(--cq-muted);
         --cq-faint: var(--cq-muted);
-        --cq-accent: var(--codex-base-accent, var(--cq-ink));
+        --cq-accent: var(--cq-palette-accent, var(--cq-theme-accent));
         --cq-sans: var(--default-font-family, inherit);
         box-sizing: border-box !important;
         min-height: 0 !important;
@@ -133,14 +256,6 @@
         font-family: var(--cq-sans) !important;
       }
       .${compactClass} {
-        --cq-surface: #FAF7EF;
-        --cq-border: #E6E0D0;
-        --cq-track: #E9E3D5;
-        --cq-ink: #1C1917;
-        --cq-muted: #57534A;
-        --cq-soft: #8B8071;
-        --cq-faint: #9E998B;
-        --cq-accent: #8E4617;
         container-type: inline-size;
         display: block !important;
         width: calc(100% - 16px) !important;
@@ -151,8 +266,6 @@
         border: 1px solid var(--cq-border) !important;
         border-radius: 12px !important;
         outline: 0 !important;
-        background: var(--cq-surface) !important;
-        box-shadow: none !important;
       }
       #${officialHostId} {
         width: calc(100% - 16px) !important;
@@ -161,7 +274,6 @@
         padding: 12px 14px 11px !important;
         border: 1px solid var(--cq-border) !important;
         border-radius: 12px !important;
-        background: var(--cq-surface) !important;
       }
       .${apiCardClass} {
         padding: 8px 12px !important;
@@ -170,14 +282,18 @@
         border-radius: 12px !important;
         outline: .5px solid var(--cq-border);
         outline-offset: -.5px;
-        background: var(--cq-surface) !important;
-        box-shadow: var(--shadow-sm, none) !important;
+      }
+      .${compactClass}, .${apiCardClass} {
+        background: linear-gradient(135deg, rgb(255 255 255 / var(--cq-palette-glow, .025)), transparent 60%), var(--cq-surface) !important;
+        -webkit-backdrop-filter: blur(18px);
+        backdrop-filter: blur(18px);
+        box-shadow: 0 1px 3px rgba(0, 0, 0, .025) !important;
       }
       .${compactContentClass} { display: grid; min-width: 0; }
       .${compactContentClass} .cq-thread-head { display: flex; align-items: center; justify-content: space-between; }
       .${compactContentClass} .cq-title-wrap { display: flex; min-width: 0; align-items: center; }
       .${compactContentClass} .cq-thread-head .cq-title { color: var(--cq-muted); font-size: 11px; font-weight: 500; line-height: 16px; letter-spacing: .02em; }
-      .${compactContentClass} .cq-plan { margin-left: 7px; padding: 1px 7px; border: 1px solid rgba(142, 70, 23, .28); border-radius: 999px; background: rgba(142, 70, 23, .08); color: var(--cq-accent); font-size: 9px; font-weight: 600; line-height: 1.5; letter-spacing: .04em; }
+      .${compactContentClass} .cq-plan { margin-left: 7px; padding: 1px 7px; border: 1px solid var(--cq-border); border-radius: 999px; background: transparent; color: var(--cq-ink); font-size: 9px; font-weight: 600; line-height: 1.5; letter-spacing: .04em; }
       .${compactContentClass} .cq-plan:empty { display: none; }
       .${compactContentClass} .cq-thread-head .cq-head-action { display: grid; width: 13px; height: 13px; place-items: center; }
       .${compactContentClass} .cq-thread-main { display: flex; align-items: flex-end; min-width: 0; margin-top: 6px; }
@@ -204,7 +320,7 @@
       .${compactContentClass} .cq-folio-main { display: flex; align-items: stretch; justify-content: flex-start; gap: 10px; min-width: 0; margin: 3px 0 4px; }
       .${compactContentClass} .cq-number { display: flex; flex: none; align-self: center; align-items: baseline; font-variant-numeric: tabular-nums; line-height: 1; }
       .${compactContentClass} .cq-number-value { font-size: 30px; font-weight: 500; letter-spacing: -.02em; }
-      .${compactContentClass} .cq-number-unit { margin-left: 2px; color: var(--cq-accent); font-size: 12px; font-weight: 500; }
+      .${compactContentClass} .cq-number-unit { margin-left: 2px; color: var(--cq-ink); font-size: 12px; font-weight: 500; }
       .${compactContentClass} .cq-divider { flex: none; width: 1px; margin: 2px 0; background: var(--cq-border); }
       .${compactContentClass} .cq-folio-note { min-width: 0; align-self: center; color: var(--cq-muted); font-size: 11px; line-height: 14px; text-align: left; text-wrap: pretty; }
       .${compactContentClass} .cq-folio-note b { display: block; overflow-wrap: anywhere; color: var(--cq-ink); font-weight: 500; }
@@ -212,6 +328,10 @@
       .${compactContentClass} .cq-rule::before { position: absolute; inset: 0 auto 0 0; width: var(--cq-remaining, 0%); border-radius: inherit; background: var(--cq-accent); content: ""; transition: width .18s cubic-bezier(.16,1,.3,1); }
       .${compactContentClass} .cq-status { margin-top: 8px; color: var(--cq-muted); font-size: 10.5px; line-height: 16px; }
       .${compactContentClass} .cq-source-progress { display: none !important; }
+      .${compactClass}[hidden], .${apiCardClass}[hidden],
+      [data-codex-quota-sidebar-hidden="true"], [data-codex-api-source="true"] {
+        display: none !important;
+      }
       .${compactContentClass}.cq-compact-fallback { gap: 8px; }
       .${compactContentClass} .cq-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
       .${compactContentClass} .cq-window { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 8px; min-width: 0; }
@@ -227,8 +347,19 @@
       .${compactContentClass} .cq-refresh:focus-visible { border-radius: 4px; outline: 2px solid var(--cq-accent); outline-offset: 1px; }
       .${compactContentClass} .cq-refresh:disabled { cursor: wait; opacity: .65; }
       @media (prefers-contrast: more) {
-        .${compactClass}, .${apiCardClass} { --cq-muted: var(--cq-ink); --cq-soft: var(--cq-ink); --cq-faint: var(--cq-ink); }
+        .${compactClass}, .${apiCardClass} { --cq-border: var(--cq-ink); --cq-muted: var(--cq-ink); --cq-soft: var(--cq-ink); --cq-faint: var(--cq-ink); }
         #${officialHostId}, .${apiCardClass} { border-color: var(--cq-ink) !important; outline-color: var(--cq-ink); }
+      }
+      @supports not (backdrop-filter: blur(1px)) {
+        .${compactClass}, .${apiCardClass} { background: var(--cq-solid) !important; }
+      }
+      @media (prefers-contrast: more), (forced-colors: active) {
+        .${compactClass}, .${apiCardClass} {
+          background: var(--cq-solid) !important;
+          -webkit-backdrop-filter: none;
+          backdrop-filter: none;
+          box-shadow: none !important;
+        }
       }
       @container (max-width: 170px) {
         .${compactContentClass} .cq-thread-rule { margin-inline: 6px; }
@@ -239,7 +370,7 @@
         .${compactContentClass} .cq-week-summary { align-self: flex-end; }
       }
       @media (forced-colors: active) {
-        .${compactClass}, .${apiCardClass} { --cq-surface: Canvas; --cq-border: CanvasText; --cq-track: GrayText; --cq-ink: CanvasText; --cq-muted: CanvasText; --cq-soft: CanvasText; --cq-faint: CanvasText; --cq-accent: Highlight; forced-color-adjust: auto; }
+        .${compactClass}, .${apiCardClass} { --cq-solid: Canvas; --cq-surface: Canvas; --cq-border: CanvasText; --cq-track: GrayText; --cq-ink: CanvasText; --cq-muted: CanvasText; --cq-soft: CanvasText; --cq-faint: CanvasText; --cq-accent: Highlight; forced-color-adjust: auto; }
       }
       @media (prefers-reduced-motion: reduce) {
         .${compactContentClass} .cq-rule::before, .${compactContentClass} .cq-refresh { transition: none !important; }
@@ -799,12 +930,16 @@
   const removeOfficialCard = () => document.getElementById(officialHostId)?.remove();
 
   const apiCard = (source) => {
-    let host = document.getElementById(apiHostId);
-    if (host) return host;
     if (source) {
       source.dataset.codexApiSource = "true";
       source.hidden = true;
+    }
+    let host = document.getElementById(apiHostId);
+    if (host) return host;
+    if (source) {
       host = source.cloneNode(false);
+      delete host.dataset.codexApiSource;
+      delete host.dataset.codexQuotaSidebarHidden;
       host.classList.remove(compactClass);
       host.classList.add(apiCardClass);
       host.removeAttribute("role");
@@ -1221,15 +1356,14 @@
         globalThis.__codexQuotaApiCooldownUntil = now + retryMs;
       }
     }
-    if (apiMode()) renderApi(
-      apiCard(nativeQuotaCard()),
-      globalThis.__codexQuotaApiPayload || null,
-      quotaErrorCode("api")
-    );
+    if (apiMode()) {
+      const card = document.getElementById(apiHostId) || (accountBar() ? apiCard(nativeQuotaCard()) : null);
+      if (card) renderApi(card, globalThis.__codexQuotaApiPayload || null, quotaErrorCode("api"));
+    }
     if (apiMode()) scheduleAutoRefresh();
   };
 
-  const installLayout = () => {
+  const renderLayout = () => {
     ensureStyle();
     const bar = accountBar();
     if (apiMode()) {
@@ -1240,9 +1374,11 @@
         if (host) host.hidden = true;
         return;
       }
-      removeApiCard();
+      const host = apiCard(nativeQuotaCard());
+      host.hidden = false;
+      if (host.nextElementSibling !== bar) bar.parentElement.insertBefore(host, bar);
       renderApi(
-        apiCard(nativeQuotaCard()),
+        host,
         globalThis.__codexQuotaApiPayload || null,
         quotaErrorCode("api")
       );
@@ -1294,29 +1430,75 @@
     if (!globalThis.__codexQuotaOfficialLoaded) requestOfficialData();
   };
 
+  const installLayout = () => {
+    renderLayout();
+    document.querySelectorAll(`.${compactClass}, .${apiCardClass}`).forEach(updatePalette);
+  };
+
   const observeOfficialCards = () => {
     globalThis.__codexQuotaOfficialCardObserver?.disconnect();
     globalThis.__codexQuotaOfficialCardObserver = null;
     const root = document.documentElement;
     if (!root) return;
+    const footerSelector = "div.absolute.inset-x-0.bottom-0.z-20";
+    const cardSelector = `[role='status'].rounded-2xl, .${compactClass}[role='region']`;
+    const contentSelector = `#${apiHostId}, #${officialHostId}, .${compactContentClass}`;
+    let footer = document.querySelector(footerSelector);
     let scheduled = false;
-    const observer = new MutationObserver(() => {
-      if (apiMode() || scheduled) return;
+    const observer = new MutationObserver((records) => {
+      if (scheduled || !records.some((record) => {
+        const target = record.target instanceof Element ? record.target : record.target.parentElement;
+        if (!(target instanceof Element)) return false;
+        if (target.id === styleId) return false;
+        if (target.closest("head") && (target.matches("style, link") ||
+            [...record.addedNodes, ...record.removedNodes].some((node) =>
+              node instanceof Element && node.matches("style, link")))) return true;
+        if (record.type === "attributes") {
+          if (record.attributeName === "value") {
+            return target.matches("progress[max='100']") && Boolean(target.closest(cardSelector));
+          }
+          return target.matches(footerSelector) || Boolean(footer && target.contains(footer));
+        }
+        // Ignore our own rendering and unrelated conversation updates.
+        if (target.closest(contentSelector)) return false;
+        if (target.closest(footerSelector) || target.closest(cardSelector)) return true;
+        return [...record.addedNodes, ...record.removedNodes].some((node) =>
+          node instanceof Element && (node.matches(`${footerSelector}, ${cardSelector}`) ||
+            node.querySelector(`${footerSelector}, ${cardSelector}`)));
+      })) return;
       scheduled = true;
-      queueMicrotask(() => {
+      requestAnimationFrame(() => {
         scheduled = false;
-        if (!apiMode()) installLayout();
+        if (globalThis.__codexQuotaOfficialCardObserver !== observer) return;
+        footer = document.querySelector(footerSelector);
+        installLayout();
       });
     });
-    observer.observe(root, {childList: true, subtree: true, attributes: true, attributeFilter: ["value"]});
+    observer.observe(root, {
+      childList: true, subtree: true, attributes: true,
+      attributeFilter: ["value", "class", "style", "hidden", "data-theme", "data-color-theme"],
+    });
+    observer.observe(document.head, {childList: true, subtree: true, characterData: true,
+      attributes: true, attributeFilter: ["href", "media", "rel", "disabled"]});
+    globalThis.__codexQuotaThemeCleanup?.();
+    const media = matchMedia("(prefers-color-scheme: dark)");
+    const onThemeChange = () => installLayout();
+    const onStylesheetLoad = (event) => {
+      if (event.target instanceof HTMLLinkElement && event.target.relList.contains("stylesheet")) installLayout();
+    };
+    media.addEventListener("change", onThemeChange);
+    document.addEventListener("load", onStylesheetLoad, true);
+    globalThis.__codexQuotaThemeCleanup = () => {
+      media.removeEventListener("change", onThemeChange);
+      document.removeEventListener("load", onStylesheetLoad, true);
+    };
     globalThis.__codexQuotaOfficialCardObserver = observer;
   };
 
   const install = () => {
     try {
       if (apiMode()) {
-        globalThis.__codexQuotaOfficialCardObserver?.disconnect();
-        globalThis.__codexQuotaOfficialCardObserver = null;
+        observeOfficialCards();
         installLayout();
         installAutoRefresh();
         return true;

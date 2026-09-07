@@ -46,6 +46,7 @@ internal static class CodexNativeQuotaPatch
         foreach (var process in FindCodexRootProcesses())
             observedCodexProcesses.Add(process.Identity);
 
+        var retrySeconds = 1;
         while (true)
         {
             try
@@ -68,6 +69,7 @@ internal static class CodexNativeQuotaPatch
                 using (var socket = new CdpSocket(target.WebSocketDebuggerUrl))
                 {
                     socket.Connect();
+                    retrySeconds = 1;
                     using (var loginWatcher = WatchLoginConfiguration(socket, api, official))
                     {
                         InstallForCurrentAndFuturePages(socket, official ? "account" : "api");
@@ -82,7 +84,8 @@ internal static class CodexNativeQuotaPatch
             catch
             {
                 // Retry only after an exceptional failure; normal idle states use event watchers.
-                await Task.Delay(TimeSpan.FromSeconds(1));
+                await Task.Delay(TimeSpan.FromSeconds(retrySeconds));
+                retrySeconds = Math.Min(retrySeconds * 2, 15);
             }
         }
     }
@@ -196,15 +199,23 @@ internal static class CodexNativeQuotaPatch
         watcher.Deleted += changed;
         watcher.Renamed += renamed;
         watcher.Error += (sender, error) => socket.Close();
-        watcher.EnableRaisingEvents = true;
+        try
+        {
+            watcher.EnableRaisingEvents = true;
 
-        // Recheck after the watcher starts so a config write cannot fall into the setup gap.
-        ApiConfiguration currentApi;
-        bool currentOfficial;
-        if (!TryLoadLoginConfiguration(out currentApi, out currentOfficial) ||
-            currentOfficial != activeOfficial ||
-            !SameApiConfiguration(currentApi, activeApi)) socket.Close();
-        return watcher;
+            // Recheck after the watcher starts so a config write cannot fall into the setup gap.
+            ApiConfiguration currentApi;
+            bool currentOfficial;
+            if (!TryLoadLoginConfiguration(out currentApi, out currentOfficial) ||
+                currentOfficial != activeOfficial ||
+                !SameApiConfiguration(currentApi, activeApi)) socket.Close();
+            return watcher;
+        }
+        catch
+        {
+            watcher.Dispose();
+            throw;
+        }
     }
 
     private static bool SameApiConfiguration(ApiConfiguration left, ApiConfiguration right)
@@ -707,10 +718,11 @@ internal static class CodexNativeQuotaPatch
                     "http://127.0.0.1:" + port + "/json/list");
                 request.Proxy = null;
                 request.Timeout = 3000;
-                using (var response = (HttpWebResponse)await request.GetResponseAsync())
+                request.ReadWriteTimeout = 3000;
+                using (var response = (HttpWebResponse)request.GetResponse())
                 using (var reader = new StreamReader(response.GetResponseStream()))
                 {
-                    var values = Json.DeserializeObject(await reader.ReadToEndAsync()) as object[];
+                    var values = Json.DeserializeObject(reader.ReadToEnd()) as object[];
                     if (values == null) continue;
                     var pages = new List<CdpTarget>();
                     foreach (var value in values)

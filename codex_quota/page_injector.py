@@ -281,32 +281,30 @@ def _send_command(
     params: dict[str, Any] | None,
     command_id: int,
 ) -> Any:
-    connection.send(json.dumps({"id": command_id, "method": method, "params": params or {}}))
-    while True:
-        message = json.loads(connection.recv())
-        if message.get("id") != command_id:
-            continue
-        if "error" in message:
-            raise PageInjectionError(f"CDP command failed: {method}")
-        return message.get("result")
+    try:
+        connection.send(json.dumps({"id": command_id, "method": method, "params": params or {}}))
+        while True:
+            message = json.loads(connection.recv())
+            if message.get("id") != command_id:
+                continue
+            if "error" in message:
+                raise PageInjectionError(f"CDP command failed: {method}")
+            return message.get("result")
+    except (websocket.WebSocketException, OSError, json.JSONDecodeError) as exc:
+        raise PageInjectionError(f"CDP communication failed: {method}") from exc
 
 
 def _evaluate(connection: websocket.WebSocket, expression: str, command_id: int) -> Any:
-    connection.send(json.dumps({
-        "id": command_id,
-        "method": "Runtime.evaluate",
-        "params": {"expression": expression, "returnByValue": True},
-    }))
-    while True:
-        message = json.loads(connection.recv())
-        if message.get("id") != command_id:
-            continue
-        if "error" in message:
-            raise PageInjectionError("CDP evaluation failed")
-        result = message.get("result", {}).get("result", {})
-        if result.get("subtype") == "error":
-            raise PageInjectionError("page injection script failed")
-        return result.get("value")
+    response = _send_command(
+        connection,
+        "Runtime.evaluate",
+        {"expression": expression, "returnByValue": True},
+        command_id,
+    )
+    result = response.get("result", {})
+    if response.get("exceptionDetails") or result.get("subtype") == "error":
+        raise PageInjectionError("page injection script failed")
+    return result.get("value")
 
 
 def native_patch_present(port: int, target: dict[str, Any] | None = None) -> bool:
@@ -368,22 +366,26 @@ def card_present(port: int, target: dict[str, Any] | None = None) -> bool:
     try:
         value = _evaluate(
             connection,
-            """Boolean(
-              document.getElementById('codex-api-usage-host') ||
-              (document.getElementById('codex-official-usage-host')?.offsetParent !== null &&
-                document.getElementById('codex-official-usage-host')?.querySelector(
-                  '[data-cq-layout="thread-v2"], .cq-compact-fallback'
-                )) ||
-              [...document.querySelectorAll("[role='status']")].filter((card) =>
-                card instanceof HTMLElement &&
-                card.offsetParent !== null &&
+            """(() => {
+              const visible = (element) => element instanceof HTMLElement && !element.hidden && element.offsetParent !== null;
+              const api = document.getElementById('codex-api-usage-host');
+              if (visible(api) && api.querySelector('.codex-native-compact-usage-content')) return true;
+              const fallback = document.getElementById('codex-official-usage-host');
+              if (visible(fallback) && fallback.querySelector(
+                '[data-cq-layout="thread-v2"], [data-cq-layout="thread-v2-fallback"], .cq-compact-fallback'
+              )) return true;
+              const compact = [...document.querySelectorAll('.codex-native-compact-usage')].find((card) =>
+                visible(card) && card.querySelector('[data-cq-layout="thread-v2"]'));
+              if (compact) return true;
+              return [...document.querySelectorAll("[role='status']")].filter((card) =>
+                visible(card) &&
                 card.classList.contains("rounded-2xl") &&
                 Boolean(card.querySelector("progress[max='100']")) &&
                 ((card.classList.contains("border") &&
                   card.classList.contains("bg-token-main-surface-primary")) ||
                  (card.classList.contains("ring-border") &&
-                  card.classList.contains("bg-surface/80")))).length === 1
-            )""",
+                  card.classList.contains("bg-surface/80")))).length === 1;
+            })()""",
             1,
         )
         return value is True

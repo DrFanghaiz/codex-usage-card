@@ -3,11 +3,15 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import websocket
+
+from codex_quota.page_injector import _evaluate
 from codex_quota.repair import (
     RepairMatchError,
     discover_latest_package,
     inspect_package,
     repair_once,
+    wait_for_repair,
     watch,
 )
 
@@ -80,3 +84,34 @@ class RepairTests(unittest.TestCase):
             watch(port=9222, interval=1, refresh_interval=60, max_cycles=2, sleep=lambda _: None, write=messages.append)
         patch_connection.assert_called_once()
         self.assertIn('"reason": "restore"', messages[0])
+
+    def test_wait_retries_a_disconnected_renderer(self):
+        package = inspect_package(self._package())
+        disconnected = MagicMock()
+        disconnected.recv.side_effect = websocket.WebSocketConnectionClosedException("closed")
+        attempts = iter([disconnected, None])
+
+        def repair(**_):
+            connection = next(attempts)
+            if connection is not None:
+                _evaluate(connection, "true", 1)
+            return package
+
+        with patch("codex_quota.repair.repair_once", side_effect=repair) as repair_once_mock, \
+             patch("codex_quota.repair.time.sleep"):
+            self.assertEqual(wait_for_repair(timeout=1), package)
+        self.assertEqual(repair_once_mock.call_count, 2)
+
+    def test_watch_closes_and_reconnects_after_transport_failure(self):
+        package = inspect_package(self._package())
+        disconnected, replacement = MagicMock(), MagicMock()
+        disconnected.recv.side_effect = websocket.WebSocketConnectionClosedException("closed")
+        replacement.recv.return_value = '{"id": 1, "result": {"result": {"value": true}}}'
+        with patch("codex_quota.repair.discover_latest_package", return_value=package), \
+             patch("codex_quota.repair.target_info", return_value={"id": "1"}), \
+             patch("codex_quota.repair._connect", side_effect=[disconnected, replacement]) as connect, \
+             patch("codex_quota.repair._patch_connection", side_effect=lambda connection, **_: _evaluate(connection, "true", 1)):
+            watch(port=9222, max_cycles=2, sleep=lambda _: None, write=lambda _: None)
+        self.assertEqual(connect.call_count, 2)
+        disconnected.close.assert_called_once_with()
+        replacement.close.assert_called_once_with()
