@@ -10,6 +10,8 @@ if ($env:OS -ne 'Windows_NT') {
   throw 'Codex Usage Card supports Windows only.'
 }
 
+Add-Type -AssemblyName System.Net.Http
+
 $InstallRoot = [IO.Path]::GetFullPath($InstallRoot)
 $installDirectory = Join-Path $InstallRoot 'native-patch'
 $executable = Join-Path $installDirectory 'CodexNativeQuotaPatch.next.exe'
@@ -25,6 +27,11 @@ $cdpEndpointFound = $false
 $mainPageFound = $false
 $cardVisible = $null
 $cardKind = $null
+$windowCount = 0
+$visibleCardCount = 0
+$uninspectedWindowCount = 0
+$inspectedWindowCount = 0
+$cardKinds = @()
 $inspectionFailed = $false
 $taskInspectionFailed = $false
 $codexInspectionFailed = $false
@@ -164,10 +171,10 @@ if (-not $codexInspectionFailed -and -not $codexRunning) {
         $stageCodes += 'CDP_ENDPOINT_UNAVAILABLE'
       } elseif ($targets.Count -eq 0) {
         $stageCodes += 'CDP_MAIN_PAGE_UNAVAILABLE'
-      } elseif ($targets.Count -gt 1) {
-        $stageCodes += 'CDP_MAIN_PAGE_AMBIGUOUS'
       } else {
         $mainPageFound = $true
+        $targets = @($targets | Sort-Object WebSocketDebuggerUrl -Unique)
+        $windowCount = $targets.Count
         $expression = @'
 (() => {
   const visible = (element) => element instanceof HTMLElement && !element.hidden && element.offsetParent !== null;
@@ -195,79 +202,96 @@ if (-not $codexInspectionFailed -and -not $codexRunning) {
     : {visible: false, kind: null};
 })()
 '@
-        $socket = [System.Net.WebSockets.ClientWebSocket]::new()
-        $socket.Options.Proxy = $null
-        $cancellation = [Threading.CancellationTokenSource]::new()
-        $cancellation.CancelAfter(3000)
-        try {
-          [void]$socket.ConnectAsync(
-            [Uri]$targets[0].WebSocketDebuggerUrl,
-            $cancellation.Token).GetAwaiter().GetResult()
-          $requestId = 1
-          $request = @{
-            id = $requestId
-            method = 'Runtime.evaluate'
-            params = @{
-              expression = $expression
-              returnByValue = $true
-            }
-          } | ConvertTo-Json -Compress -Depth 4
-          $requestBytes = [Text.Encoding]::UTF8.GetBytes($request)
-          [void]$socket.SendAsync(
-            [ArraySegment[byte]]::new($requestBytes),
-            [System.Net.WebSockets.WebSocketMessageType]::Text,
-            $true,
-            $cancellation.Token).GetAwaiter().GetResult()
-
-          $message = $null
-          while ($null -eq $message) {
-            $stream = [IO.MemoryStream]::new()
-            try {
-              do {
-                $buffer = [byte[]]::new(16384)
-                $result = $socket.ReceiveAsync(
-                  [ArraySegment[byte]]::new($buffer),
-                  $cancellation.Token).GetAwaiter().GetResult()
-                if ($result.MessageType -eq [System.Net.WebSockets.WebSocketMessageType]::Close) {
-                  throw 'CDP WebSocket closed before the diagnostic response.'
-                }
-                $stream.Write($buffer, 0, $result.Count)
-              } while (-not $result.EndOfMessage)
-              $candidate = ConvertFrom-Json -InputObject ([Text.Encoding]::UTF8.GetString($stream.ToArray()))
-              if ($candidate.id -eq $requestId) {
-                $message = $candidate
+        foreach ($target in $targets) {
+          $socket = [System.Net.WebSockets.ClientWebSocket]::new()
+          $socket.Options.Proxy = $null
+          $cancellation = [Threading.CancellationTokenSource]::new()
+          $cancellation.CancelAfter(3000)
+          try {
+            [void]$socket.ConnectAsync(
+              [Uri]$target.WebSocketDebuggerUrl,
+              $cancellation.Token).GetAwaiter().GetResult()
+            $requestId = 1
+            $request = @{
+              id = $requestId
+              method = 'Runtime.evaluate'
+              params = @{
+                expression = $expression
+                returnByValue = $true
               }
-            } finally {
-              $stream.Dispose()
-            }
-          }
+            } | ConvertTo-Json -Compress -Depth 4
+            $requestBytes = [Text.Encoding]::UTF8.GetBytes($request)
+            [void]$socket.SendAsync(
+              [ArraySegment[byte]]::new($requestBytes),
+              [System.Net.WebSockets.WebSocketMessageType]::Text,
+              $true,
+              $cancellation.Token).GetAwaiter().GetResult()
 
-          if ($message.error -or $message.result.exceptionDetails) {
-            throw 'CDP Runtime.evaluate failed.'
+            $message = $null
+            while ($null -eq $message) {
+              $stream = [IO.MemoryStream]::new()
+              try {
+                do {
+                  $buffer = [byte[]]::new(16384)
+                  $result = $socket.ReceiveAsync(
+                    [ArraySegment[byte]]::new($buffer),
+                    $cancellation.Token).GetAwaiter().GetResult()
+                  if ($result.MessageType -eq [System.Net.WebSockets.WebSocketMessageType]::Close) {
+                    throw 'CDP WebSocket closed before the diagnostic response.'
+                  }
+                  $stream.Write($buffer, 0, $result.Count)
+                } while (-not $result.EndOfMessage)
+                $candidate = ConvertFrom-Json -InputObject ([Text.Encoding]::UTF8.GetString($stream.ToArray()))
+                if ($candidate.id -eq $requestId) {
+                  $message = $candidate
+                }
+              } finally {
+                $stream.Dispose()
+              }
+            }
+
+            if ($message.error -or $message.result.exceptionDetails) {
+              throw 'CDP Runtime.evaluate failed.'
+            }
+            $value = $message.result.result.value
+            if ($value.visible -isnot [bool]) {
+              throw 'CDP diagnostic response is invalid.'
+            }
+            $inspectedWindowCount++
+            if ($value.visible) {
+              $visibleCardCount++
+              $cardKinds += [string]$value.kind
+            } else {
+              $stageCodes += 'CARD_NOT_VISIBLE'
+            }
+          } catch {
+            $uninspectedWindowCount++
+            $inspectionFailed = $true
+            $stageCodes += 'CARD_INSPECTION_FAILED'
+          } finally {
+            $socket.Dispose()
+            $cancellation.Dispose()
           }
-          $value = $message.result.result.value
-          if ($value.visible -isnot [bool]) {
-            throw 'CDP diagnostic response is invalid.'
-          }
-          $cardVisible = [bool]$value.visible
-          if ($cardVisible) {
-            $cardKind = [string]$value.kind
-          } else {
-            $stageCodes += 'CARD_NOT_VISIBLE'
-          }
-        } catch {
-          $inspectionFailed = $true
-          $stageCodes += 'CARD_INSPECTION_FAILED'
-        } finally {
-          $socket.Dispose()
-          $cancellation.Dispose()
         }
       }
     }
   } catch {
     $inspectionFailed = $true
+    $uninspectedWindowCount = $windowCount - $inspectedWindowCount
     $stageCodes += 'CDP_INSPECTION_FAILED'
   }
+}
+
+if ($windowCount -gt 0) {
+  $cardVisible = if ($visibleCardCount + $uninspectedWindowCount -lt $windowCount) {
+    $false
+  } elseif ($uninspectedWindowCount -gt 0) {
+    $null
+  } else {
+    $true
+  }
+  $kinds = @($cardKinds | Select-Object -Unique)
+  $cardKind = if ($kinds.Count -eq 1) { $kinds[0] } elseif ($kinds.Count -gt 1) { 'Mixed' } else { $null }
 }
 
 $installed = $helperFilePresent -and $taskFound -and $taskActionMatches -eq $true
@@ -302,7 +326,7 @@ $activationState = if ($inspectionFailed) {
 [pscustomobject]@{
   Installed = $installed
   ActivationState = $activationState
-  StageCodes = [string[]]$stageCodes
+  StageCodes = [string[]]@($stageCodes | Select-Object -Unique)
   TaskFound = $taskFound
   TaskActionMatches = $taskActionMatches
   TaskState = $taskState
@@ -314,4 +338,7 @@ $activationState = if ($inspectionFailed) {
   MainPageFound = $mainPageFound
   CardVisible = $cardVisible
   CardKind = $cardKind
+  WindowCount = $windowCount
+  VisibleCardCount = $visibleCardCount
+  UninspectedWindowCount = $uninspectedWindowCount
 }

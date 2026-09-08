@@ -12,6 +12,149 @@ let browser;
 before(async () => { browser = await chromium.launch({headless: true, channel: 'msedge'}); });
 after(async () => { await browser?.close(); });
 
+async function sharedPages(count = 1) {
+  const context = await browser.newContext();
+  await context.route('https://quota.test/**', route => route.fulfill({contentType: 'text/html', body: footer}));
+  const pages = [];
+  for (let index = 0; index < count; index++) {
+    const page = await context.newPage();
+    await page.goto('https://quota.test/');
+    await page.evaluate(() => { globalThis.__codexQuotaMode = 'account'; globalThis.__codexQuotaSessionScope = 'synthetic-session'; });
+    await page.evaluate(source);
+    pages.push(page);
+  }
+  return {context, pages};
+}
+
+test('settings persist, return keyboard focus and render diagnostics safely', async () => {
+  const {context, pages: [page]} = await sharedPages();
+  try {
+    await page.evaluate(() => __codexQuotaUpdateOfficial({planName: 'pro', windows: [{label: 'Weekly', usedPercent: 23, resetAt: 1900000000}]}));
+    await page.locator('.cq-settings-button').click();
+    await page.locator('input[name=remaining]').check();
+    await page.locator('select[name=transparency]').selectOption('solid');
+    await page.locator('.cq-doctor').click();
+    await page.evaluate(() => __codexQuotaUpdateDiagnosis({TaskActionMatches: true, HelperWindowless: true, CdpEndpointFound: true, MainPageFound: true, CardVisible: false, StageCodes: ['CARD_NOT_VISIBLE']}));
+    assert.match(await page.locator('#cq-diagnosis').innerText(), /CARD_NOT_VISIBLE/);
+    await page.keyboard.press('Escape');
+    await page.waitForTimeout(50);
+    assert.equal(await page.evaluate(() => document.activeElement?.className), 'cq-settings-button');
+    assert.equal(await page.locator('.cq-number-value').innerText(), '77');
+    assert.equal(await page.locator('#codex-official-usage-host').evaluate(node => getComputedStyle(node).backdropFilter), 'none');
+    await page.evaluate(source);
+    assert.equal(await page.locator('.cq-number-value').innerText(), '77');
+    assert.equal(await page.locator('.cq-settings-button').count(), 1);
+  } finally { await context.close(); }
+});
+
+test('simultaneous windows alert once per threshold and only confirm real replenishment', async () => {
+  const {context, pages} = await sharedPages(2);
+  try {
+    const update = (page, used, reset = 1900000000) => page.evaluate(({used, reset}) => __codexQuotaUpdateOfficial({planName: 'pro', windows: [{label: 'Weekly', usedPercent: used, resetAt: reset}]}), {used, reset});
+    await Promise.all(pages.map(page => update(page, 85)));
+    await pages[0].waitForTimeout(80);
+    assert.equal((await Promise.all(pages.map(page => page.locator('#cq-notice').count()))).reduce((a, b) => a + b), 1);
+    await Promise.all(pages.map(page => page.evaluate(() => document.getElementById('cq-notice')?.remove())));
+    await Promise.all(pages.map(page => update(page, 86)));
+    await pages[0].waitForTimeout(50);
+    assert.equal((await Promise.all(pages.map(page => page.locator('#cq-notice').count()))).reduce((a, b) => a + b), 0);
+    await update(pages[0], 95);
+    await pages[0].waitForTimeout(50);
+    assert.match(await pages[0].locator('#cq-notice').innerText(), /5%/);
+    await pages[0].evaluate(() => document.getElementById('cq-notice').remove());
+    await update(pages[0], 95, 1900600000);
+    await pages[0].waitForTimeout(50);
+    assert.doesNotMatch(await pages[0].locator('#cq-notice').innerText(), /replenished|已恢复/);
+    await update(pages[0], 5, 1901200000);
+    await pages[0].waitForTimeout(50);
+    assert.match(await pages[0].locator('#cq-notice').innerText(), /replenished|已恢复/);
+  } finally { await context.close(); }
+});
+
+test('session reset hides old account values until a fresh response', async () => {
+  const page = await pageFor('account', true);
+  try {
+    await page.evaluate(() => __codexQuotaResetSession());
+    await page.waitForTimeout(60);
+    assert.equal(await page.locator('#native').isVisible(), false);
+    assert.equal(await page.evaluate(() => globalThis.__codexQuotaOfficialPayload), undefined);
+    await page.evaluate(() => __codexQuotaUpdateOfficial({planName: 'pro', windows: [{label: 'Weekly', usedPercent: 61, resetAt: 1900000000}]}));
+    await page.waitForTimeout(60);
+    assert.equal(await page.locator('#native').isVisible(), true);
+    assert.equal(await page.locator('#native .cq-number-value').innerText(), '61');
+  } finally { await page.close(); }
+});
+
+test('auth and rate-limit failures remain distinct while retaining marked old data', async () => {
+  const page = await pageFor('api');
+  try {
+    await page.evaluate(() => __codexQuotaUpdateApi({errorCode: 'AUTH_REQUIRED'}));
+    assert.match(await page.locator('#codex-api-usage-host').innerText(), /Sign in again|重新登录/);
+    await page.evaluate(() => __codexQuotaUpdateApi({errorCode: 'RATE_LIMITED', retryAfterSeconds: 120}));
+    assert.match(await page.locator('#codex-api-usage-host').innerText(), /Rate limited|服务端限流/);
+    assert.equal(await page.locator('.cq-number-value').innerText(), '75');
+  } finally { await page.close(); }
+});
+
+test('native remaining preference settles without repeated layout rebuilds', async () => {
+  const page = await pageFor('account', true);
+  try {
+    await page.locator('.cq-settings-button').click();
+    await page.locator('input[name=remaining]').check();
+    await page.keyboard.press('Escape');
+    await page.waitForTimeout(100);
+    const scans = await page.evaluate(() => layoutScans);
+    const content = await page.locator('#native .codex-native-compact-usage-content').elementHandle();
+    await page.waitForTimeout(150);
+    assert.equal(await page.evaluate(() => layoutScans), scans);
+    assert.equal(await content.evaluate(el => el.isConnected), true);
+    assert.equal(await page.locator('#native .cq-number-value').innerText(), '80');
+  } finally { await page.close(); }
+});
+
+test('recovery alerts work independently and queued old-session alerts are discarded', async () => {
+  const {context, pages: [page]} = await sharedPages();
+  try {
+    await page.locator('.cq-settings-button').click();
+    await page.locator('input[name=alerts]').uncheck();
+    await page.keyboard.press('Escape');
+    await page.evaluate(() => __codexQuotaUpdateOfficial({planName:'pro',windows:[{label:'Weekly',usedPercent:95,resetAt:1900000000}]}));
+    await page.waitForTimeout(50);
+    assert.equal(await page.locator('#cq-notice').count(), 0);
+    await page.evaluate(() => __codexQuotaUpdateOfficial({planName:'pro',windows:[{label:'Weekly',usedPercent:5,resetAt:1900600000}]}));
+    await page.waitForTimeout(50);
+    assert.match(await page.locator('#cq-notice').innerText(), /replenished|已恢复/);
+    await page.evaluate(() => {
+      document.getElementById('cq-notice').remove();
+      navigator.locks.request('codex-usage-card.alerts', () => new Promise(resolve => { globalThis.releaseQuotaLock = resolve; }));
+    });
+    await page.waitForFunction(() => typeof globalThis.releaseQuotaLock === 'function');
+    await page.evaluate(() => {
+      __codexQuotaUpdateOfficial({planName:'pro',windows:[{label:'Weekly',usedPercent:5,resetAt:1901200000}]});
+      __codexQuotaSessionScope = 'other-session';
+      __codexQuotaResetSession();
+      releaseQuotaLock();
+    });
+    await page.waitForTimeout(50);
+    assert.equal(await page.locator('#cq-notice').count(), 0);
+    assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem('codex-usage-card.alerts.v2')).records.Weekly.resetAt), 1900600000);
+  } finally { await context.close(); }
+});
+
+test('same-valued Plus reply restores native card after session reset', async () => {
+  const page = await pageFor('account', true);
+  try {
+    const payload = {planName:'plus',windows:[{label:'5h',usedPercent:23,resetAt:1900000000},{label:'Weekly',usedPercent:41,resetAt:1900600000}]};
+    await page.evaluate(data => __codexQuotaUpdateOfficial(data), payload);
+    await page.evaluate(() => __codexQuotaResetSession());
+    await page.waitForTimeout(50);
+    await page.evaluate(data => __codexQuotaUpdateOfficial(data), payload);
+    await page.waitForTimeout(50);
+    assert.equal(await page.locator('#native').isVisible(), true);
+    assert.equal(await page.locator('#codex-official-usage-host').count(), 0);
+  } finally { await page.close(); }
+});
+
 async function pageFor(mode, native = false) {
   const page = await browser.newPage();
   await page.setContent(`<main id="chat"></main>${footer}${native ? '<div id="native" role="status" class="rounded-2xl border bg-token-main-surface-primary"><progress max="100" value="20"></progress><span class="font-medium">80%</span><div class="text-sm text-token-text-secondary">Resets at 20:00</div></div>' : ''}`);

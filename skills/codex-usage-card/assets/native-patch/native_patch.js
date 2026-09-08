@@ -82,6 +82,188 @@
 
   const apiMode = () => globalThis.__codexQuotaMode === "api";
 
+  const settingsKey = "codex-usage-card.settings.v2";
+  const defaults = {remaining: false, alerts: true, thresholds: "20,10", recovery: true, system: false, hour12: false, transparency: "blur"};
+  const readSettings = () => {
+    try {
+      const value = JSON.parse(localStorage.getItem(settingsKey) || "{}");
+      return Object.fromEntries(Object.entries(defaults).map(([key, fallback]) => [key,
+        typeof value?.[key] === typeof fallback ? value[key] : fallback]));
+    } catch { return {...defaults}; }
+  };
+  let preferences = readSettings();
+  const words = (zh, en) => isChinese ? zh : en;
+  const officialTitle = (fiveHour = false) => preferences.remaining
+    ? (fiveHour ? words("5小时剩余", "5h remaining") : words("本周剩余", "Weekly remaining"))
+    : (fiveHour ? copy.fiveHourTitle : copy.weeklyTitle);
+  const thresholds = () => [...new Set(preferences.thresholds.split(",").map(Number))]
+    .filter(value => Number.isFinite(value) && value > 0 && value < 100).sort((a, b) => b - a);
+
+  const announceQuota = (message) => {
+    let notice = document.getElementById("cq-notice");
+    if (!notice) {
+      notice = document.createElement("div");
+      notice.id = "cq-notice";
+      notice.setAttribute("role", "status");
+      const text = document.createElement("span");
+      const close = document.createElement("button");
+      close.type = "button";
+      close.textContent = words("关闭", "Dismiss");
+      close.onclick = () => notice.remove();
+      notice.append(text, close);
+      document.body.append(notice);
+    }
+    notice.firstElementChild.textContent = message;
+    if (preferences.system && typeof Notification !== "undefined" && Notification.permission === "granted") {
+      try { new Notification("Codex Usage Card", {body: message, tag: "codex-usage-card", silent: true}); }
+      catch { /* The in-app notice remains available when the host blocks system notifications. */ }
+    }
+  };
+
+  const checkAlerts = async (kind, data) => {
+    if ((!preferences.alerts && !preferences.recovery) || document.visibilityState !== "visible") return;
+    const scope = globalThis.__codexQuotaSessionScope;
+    if (!scope) return;
+    const windows = kind === "official" ? data.windows : data.total > 0
+      ? [{label: "API", usedPercent: data.used / data.total * 100, resetAt: null}] : [];
+    const run = () => {
+      if (scope !== globalThis.__codexQuotaSessionScope || document.visibilityState !== "visible") return;
+      const key = "codex-usage-card.alerts.v2";
+      let stored;
+      try { stored = JSON.parse(localStorage.getItem(key) || "{}"); }
+      catch { return; } // Shared storage is required to guarantee cross-window deduplication.
+      const records = stored?.scope === scope && stored.records ? stored.records : {};
+      const messages = [];
+      for (const item of windows || []) {
+        if (!Number.isFinite(item.usedPercent) || item.usedPercent < 0 || item.usedPercent > 100) continue;
+        const remaining = 100 - item.usedPercent;
+        const previous = records[item.label];
+        const replenished = previous && remaining > previous.remaining &&
+          (kind === "official" ? item.resetAt > previous.resetAt : remaining > previous.remaining);
+        const cycleChanged = previous && kind === "official" && item.resetAt > previous.resetAt;
+        const sent = cycleChanged || replenished ? [] : previous?.sent || [];
+        if (preferences.recovery && replenished && previous.remaining <= Math.max(...thresholds(), 0)) {
+          messages.push(`${item.label}: ${words("额度已恢复，剩余", "Quota replenished, remaining")} ${formatPercent(remaining)}%`);
+        }
+        const crossed = preferences.alerts ? thresholds().filter(limit => remaining <= limit && !sent.includes(limit)) : [];
+        if (crossed.length) {
+          messages.push(`${item.label}: ${words("额度偏低，剩余", "Low quota, remaining")} ${formatPercent(remaining)}%`);
+          sent.push(...crossed);
+        }
+        records[item.label] = {remaining, resetAt: item.resetAt, sent};
+      }
+      try { localStorage.setItem(key, JSON.stringify({scope, records})); }
+      catch { return; }
+      if (messages.length) announceQuota(messages.join(" · "));
+    };
+    // Web Locks serialize the read/write across Codex windows without another timer.
+    if (navigator.locks) await navigator.locks.request("codex-usage-card.alerts", run);
+  };
+
+  globalThis.__codexQuotaUpdateDiagnosis = (data) => {
+    const output = document.getElementById("cq-diagnosis");
+    if (!output) return;
+    clearTimeout(globalThis.__codexQuotaDiagnosisTimer);
+    if (data?.errorCode) {
+      output.textContent = words("自检未完成，请重试或运行 doctor.ps1。", "Diagnosis unavailable. Retry or run doctor.ps1.");
+      return;
+    }
+    const labels = {TaskActionMatches: words("启动任务", "Startup task"), HelperWindowless: words("无窗口 Helper", "Windowless helper"),
+      CdpEndpointFound: words("调试连接", "Debug connection"), MainPageFound: words("主页面", "Main page"), CardVisible: words("卡片可见", "Card visible")};
+    output.textContent = Object.entries(labels).map(([key, label]) => `${label}: ${data[key] === true
+      ? words("正常", "OK") : data[key] === false ? words("未就绪", "Not ready") : words("未检查", "Not checked")}`).join("\n") +
+      (Number.isInteger(data.WindowCount) ? `\n${words("可见卡片／主窗口", "Visible cards / main windows")}: ${data.VisibleCardCount} / ${data.WindowCount}${data.UninspectedWindowCount ? ` (${words("未检查", "not checked")}: ${data.UninspectedWindowCount})` : ""}` : "") +
+      (Array.isArray(data.StageCodes) && data.StageCodes.length ? "\n" + data.StageCodes.join(", ") : "");
+  };
+
+  const openSettings = (opener) => {
+    const existing = document.getElementById("cq-settings");
+    if (existing) { existing.querySelector("button")?.focus(); return; }
+    const panel = document.createElement("dialog");
+    panel.id = "cq-settings";
+    panel.setAttribute("aria-labelledby", "cq-settings-title");
+    const host = opener.closest(`.${compactClass}, .${apiCardClass}`);
+    if (host) {
+      const style = getComputedStyle(host);
+      for (const name of ["--cq-solid", "--cq-ink", "--cq-border", "--cq-accent"]) panel.style.setProperty(name, style.getPropertyValue(name));
+    }
+    panel.innerHTML = `<form method="dialog"><header><h2 id="cq-settings-title"></h2><button value="close"></button></header>
+      <div class="cq-options"></div><p class="cq-settings-feedback" role="status"></p>
+      <div class="cq-tools"><button type="button" class="cq-doctor"></button><button type="button" class="cq-copy"></button><a target="_blank" rel="noopener noreferrer" href="https://github.com/DrFanghaiz/codex-usage-card/releases/latest"></a></div>
+      <pre id="cq-diagnosis" role="status"></pre></form>`;
+    panel.querySelector("h2").textContent = words("额度卡设置", "Usage card settings");
+    panel.querySelector("header button").textContent = words("完成", "Done");
+    const feedback = panel.querySelector(".cq-settings-feedback");
+    if (!navigator.locks || !globalThis.__codexQuotaSessionScope) feedback.textContent = words("提醒等待兼容的 Helper 与浏览器连接。", "Alerts require a compatible helper and browser connection.");
+    const save = () => {
+      try { localStorage.setItem(settingsKey, JSON.stringify(preferences)); feedback.textContent = words("已保存", "Saved"); }
+      catch { feedback.textContent = words("无法保存设置，本次窗口内有效。", "Storage unavailable; settings apply to this window only."); }
+      installLayout();
+    };
+    const options = panel.querySelector(".cq-options");
+    for (const [key, label] of [["remaining", words("官方卡主数字显示剩余", "Official card: emphasize remaining")], ["alerts", words("低额度提醒", "Low quota alerts")],
+      ["recovery", words("额度恢复提醒", "Quota recovery alerts")], ["system", words("系统通知", "System notifications")], ["hour12", words("12 小时制", "12-hour clock")]]) {
+      const row = document.createElement("label");
+      row.textContent = label;
+      const input = document.createElement("input");
+      input.type = "checkbox";
+      input.checked = preferences[key];
+      input.name = key;
+      input.onchange = async () => {
+        if (key === "system" && input.checked) {
+          try { input.checked = typeof Notification !== "undefined" && await Notification.requestPermission() === "granted"; }
+          catch { input.checked = false; }
+        }
+        preferences[key] = input.checked;
+        save();
+        if (key === "system" && !input.checked) feedback.textContent = words("系统通知未启用，卡内提醒仍可使用。", "System notifications are off; in-app alerts remain available.");
+      };
+      row.append(input);
+      options.append(row);
+    }
+    const thresholdRow = document.createElement("label");
+    thresholdRow.textContent = words("剩余提醒阈值（%）", "Remaining thresholds (%)");
+    const input = document.createElement("input");
+    input.name = "thresholds";
+    input.value = preferences.thresholds;
+    input.placeholder = "20,10";
+    input.onchange = () => {
+      if (!/^\d{1,2}(\s*,\s*\d{1,2}){0,3}$/.test(input.value) || input.value.split(",").some(value => Number(value) <= 0)) {
+        input.setCustomValidity(words("输入 1–99，逗号分隔，最多四档。", "Enter 1–99, comma-separated, up to four thresholds."));
+        input.reportValidity(); return;
+      }
+      input.setCustomValidity(""); preferences.thresholds = input.value; save();
+    };
+    thresholdRow.append(input); options.append(thresholdRow);
+    const transparencyRow = document.createElement("label");
+    transparencyRow.textContent = words("透明度", "Transparency");
+    const select = document.createElement("select");
+    select.name = "transparency";
+    for (const [value, label] of [["blur", words("保持模糊", "Keep blur")], ["system", words("跟随系统", "Follow system")], ["solid", words("不透明", "Opaque")]]) {
+      select.add(new Option(label, value, false, preferences.transparency === value));
+    }
+    select.onchange = () => { preferences.transparency = select.value; save(); };
+    transparencyRow.append(select); options.append(transparencyRow);
+    const doctor = panel.querySelector(".cq-doctor");
+    doctor.textContent = words("运行自检", "Run diagnosis");
+    doctor.onclick = () => {
+      panel.querySelector("pre").textContent = words("正在检查…", "Checking…");
+      console.debug("__codexQuotaDoctorRequest__");
+      clearTimeout(globalThis.__codexQuotaDiagnosisTimer);
+      globalThis.__codexQuotaDiagnosisTimer = setTimeout(() => globalThis.__codexQuotaUpdateDiagnosis({errorCode: "TIMEOUT"}), 20000);
+    };
+    const copyButton = panel.querySelector(".cq-copy");
+    copyButton.textContent = words("复制诊断", "Copy diagnosis");
+    copyButton.onclick = async () => {
+      try { await navigator.clipboard.writeText(panel.querySelector("pre").textContent); feedback.textContent = words("已复制", "Copied"); }
+      catch { feedback.textContent = words("复制失败，请选中文字手动复制。", "Copy failed; select the diagnostic text to copy manually."); }
+    };
+    panel.querySelector("a").textContent = words("检查更新与版本说明", "Check updates and release notes");
+    panel.onclose = () => { clearTimeout(globalThis.__codexQuotaDiagnosisTimer); panel.remove(); (opener.isConnected ? opener : document.querySelector(".cq-settings-button"))?.focus(); };
+    document.body.append(panel);
+    panel.showModal();
+  };
+
   const adaptiveRefreshDelayMs = (now = Date.now()) => {
     const sinceInteraction = now - Number(globalThis.__codexQuotaLastInteractionAt || 0);
     if (sinceInteraction <= staleAfterMs) return 2 * 60 * 1000;
@@ -375,6 +557,34 @@
       @media (prefers-reduced-motion: reduce) {
         .${compactContentClass} .cq-rule::before, .${compactContentClass} .cq-refresh { transition: none !important; }
       }
+      .${compactContentClass} .cq-thread-head .cq-head-action { width: auto; height: auto; }
+      .${compactContentClass} .cq-actions { display: inline-flex; align-items: center; gap: 6px; }
+      .${compactContentClass} .cq-actions button { width: 24px; height: 24px; padding: 4px; }
+      .${compactContentClass} .cq-refresh::before { inset: 0; }
+      .cq-settings-button { display: inline-grid; place-items: center; border: 0; background: transparent; color: var(--cq-faint); cursor: pointer; }
+      .cq-settings-button svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; }
+      .cq-settings-button:focus-visible, #cq-settings :is(button,input,select,a):focus-visible { outline: 2px solid var(--cq-accent, Highlight); outline-offset: 2px; }
+      [data-cq-transparency="solid"] { background: var(--cq-solid) !important; backdrop-filter: none !important; -webkit-backdrop-filter: none !important; }
+      @media (prefers-reduced-transparency: reduce) {
+        [data-cq-transparency="system"] { background: var(--cq-solid) !important; backdrop-filter: none !important; -webkit-backdrop-filter: none !important; }
+      }
+      #cq-settings { width: min(380px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); margin: auto; padding: 20px; border: 1px solid var(--cq-border, CanvasText); border-radius: 12px; background: var(--cq-solid, Canvas); color: var(--cq-ink, CanvasText); font: inherit; font-size: 13px; box-shadow: 0 8px 28px rgb(0 0 0 / .15); }
+      #cq-settings::backdrop { background: rgb(0 0 0 / .2); }
+      #cq-settings header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 18px; }
+      #cq-settings h2 { font-size: 16px; font-weight: 600; margin: 0; }
+      #cq-settings .cq-options { display: grid; gap: 14px; }
+      #cq-settings label { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+      #cq-settings :is(button,select,input) { font: inherit; color: inherit; accent-color: var(--cq-accent); }
+      #cq-settings :is(button,select,input:not([type=checkbox])) { min-height: 32px; border: 1px solid var(--cq-border, ButtonBorder); border-radius: 5px; padding: 4px 8px; background: var(--cq-solid, Canvas); }
+      #cq-settings input:not([type=checkbox]) { width: 96px; }
+      #cq-settings button { cursor: pointer; }
+      #cq-settings .cq-settings-feedback { min-height: 20px; margin: 12px 0; }
+      #cq-settings .cq-tools { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; border-top: 1px solid var(--cq-border, CanvasText); padding-top: 14px; }
+      #cq-settings a { color: inherit; text-underline-offset: 3px; }
+      #cq-settings pre { font: inherit; line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; margin: 14px 0 0; }
+      #cq-settings pre:empty { display: none; }
+      #cq-notice { position: fixed; bottom: 20px; right: 20px; z-index: 2147483647; display: flex; align-items: center; gap: 16px; max-width: min(460px, calc(100vw - 40px)); padding: 12px 16px; border: 1px solid ButtonBorder; border-radius: 8px; background: Canvas; color: CanvasText; font: inherit; font-size: 13px; box-shadow: 0 4px 16px rgb(0 0 0 / .12); }
+      #cq-notice button { padding: 6px; color: inherit; background: transparent; border: 1px solid ButtonBorder; border-radius: 4px; }
     `;
     if (style.textContent !== css) style.textContent = css;
     if (!style.isConnected) {
@@ -448,7 +658,7 @@
     return new Intl.DateTimeFormat(navigator.language, {
       hour: "2-digit",
       minute: "2-digit",
-      hour12: false,
+      hour12: preferences.hour12,
     }).format(date);
   };
 
@@ -461,7 +671,9 @@
       ? globalThis.__codexQuotaApiLoaded === true
       : globalThis.__codexQuotaOfficialLoaded === true;
     const {lastSuccessAt, cooldownUntil} = quotaTiming(isApi);
-    if (needsData) return {busy: true, text: data ? null : copy.loading};
+    if (needsData) return {busy: true, text: data ? copy.refreshing : copy.loading};
+    if (errorCode === "AUTH_REQUIRED") return {busy: false, text: words("登录已失效，请重新登录；当前数值可能已过期。", "Sign in again; displayed values may be out of date.")};
+    if (errorCode === "RATE_LIMITED") return {busy: false, text: `${words("服务端限流，稍后重试", "Rate limited; retry later")} ${cooldownUntil > Date.now() ? formatStatusTime(cooldownUntil) : ""}${data ? words("；显示上次数据", "; showing previous data") : ""}`};
     if (errorCode && data) {
       const time = formatStatusTime(lastSuccessAt);
       return {busy: false, text: time ? `${copy.stalePrefix}${time}${copy.staleSuffix}` : copy.stale};
@@ -504,7 +716,17 @@
       if (kind === "api") requestApiData(true);
       else requestOfficialData(true);
     });
-    return button;
+    const actions = document.createElement("span");
+    actions.className = "cq-actions";
+    const settings = document.createElement("button");
+    settings.type = "button";
+    settings.className = "cq-settings-button";
+    settings.setAttribute("aria-label", words("额度卡设置", "Usage card settings"));
+    settings.title = settings.getAttribute("aria-label");
+    settings.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 17h16M9 4v6M15 14v6"/></svg>';
+    settings.onclick = () => openSettings(settings);
+    actions.append(settings, button);
+    return actions;
   };
 
   const setCardAccessibility = (card, busy) => {
@@ -512,6 +734,11 @@
     card.removeAttribute("aria-live");
     card.removeAttribute("aria-atomic");
     card.setAttribute("aria-busy", String(busy));
+    const error = quotaErrorCode(apiMode() ? "api" : "official");
+    const {lastSuccessAt} = quotaTiming();
+    card.dataset.cqState = busy ? "refreshing" : error === "AUTH_REQUIRED" ? "auth-required"
+      : error === "RATE_LIMITED" ? "cooldown" : error ? "stale" : lastSuccessAt ? "ready" : "loading";
+    card.title = lastSuccessAt ? `${words("最近成功更新", "Last successful update")}: ${formatStatusTime(lastSuccessAt)}` : copy.loading;
   };
 
   const setContentStatus = (content, text) => {
@@ -633,13 +860,16 @@
     const remainingText = formatPercent(100 - used);
     content.dataset.cqUsed = usedText;
     content.dataset.cqUsageAria = usageAria;
-    content.querySelector(".cq-number-value").textContent = usedText;
-    content.querySelector(".cq-remaining-value").textContent = `${remainingText}%`;
-    content.style.setProperty("--cq-used", `${used}%`);
+    content.querySelector(".cq-number-value").textContent = preferences.remaining ? remainingText : usedText;
+    content.querySelector(".cq-remaining-value").textContent = `${preferences.remaining ? usedText : remainingText}%`;
+    content.querySelector(".cq-remaining-prefix").textContent = preferences.remaining ? copy.used : copy.remainingPrefix;
+    const title = content.querySelector(".cq-title");
+    if (title) title.textContent = officialTitle(usageAria === copy.fiveHourUsedAria);
+    content.style.setProperty("--cq-used", `${preferences.remaining ? 100 - used : used}%`);
     const progress = content.querySelector(".cq-thread-rule");
-    progress.setAttribute("aria-valuenow", usedText);
-    progress.setAttribute("aria-label", usageAria);
-    progress.setAttribute("aria-valuetext", `${usageAria} ${usedText}%`);
+    progress.setAttribute("aria-valuenow", preferences.remaining ? remainingText : usedText);
+    progress.setAttribute("aria-label", preferences.remaining ? copy.remainingAvailable : usageAria);
+    progress.setAttribute("aria-valuetext", preferences.remaining ? `${copy.remainingAvailable} ${remainingText}%` : `${usageAria} ${usedText}%`);
   };
 
   const setOfficialCardAria = (card, content) => {
@@ -865,7 +1095,7 @@
         existing.dataset.cqVariant !== "a2-merge-v1" ||
         !existing.querySelector(".cq-refresh-icon") ||
         !existing.querySelector(".cq-clock") ||
-        existing.querySelector(".cq-title")?.textContent !== copy.weeklyTitle ||
+        existing.querySelector(".cq-title")?.textContent !== officialTitle() ||
         (existing.querySelector(".cq-plan")?.textContent || "") !== planLabel;
       if (progress && staleThread && Number.isFinite(used)) {
         const reset = (existing.querySelector(".cq-reset-value")?.textContent || "").trim() || "Unavailable";
@@ -985,7 +1215,7 @@
     return new Intl.DateTimeFormat(navigator.language, {
       hour: "2-digit",
       minute: "2-digit",
-      hour12: false,
+      hour12: preferences.hour12,
     }).format(date);
   };
 
@@ -1272,10 +1502,13 @@
   };
 
   globalThis.__codexQuotaUpdateOfficial = (data) => {
+    const awaitingSession = globalThis.__codexQuotaAwaitingFreshSession;
     globalThis.__codexQuotaOfficialNeedsData = false;
     globalThis.__codexQuotaOfficialLoaded = true;
     const now = Date.now();
     if (data && !data.errorCode && !data.error && Array.isArray(data.windows)) {
+      globalThis.__codexQuotaAwaitingFreshSession = false;
+      void checkAlerts("official", data);
       const fingerprint = quotaUsageFingerprint(data);
       const previousFingerprint = globalThis.__codexQuotaOfficialUsageFingerprint;
       if (previousFingerprint && previousFingerprint !== fingerprint) {
@@ -1324,14 +1557,18 @@
         quotaErrorCode("official")
       );
     }
+    if (awaitingSession && !globalThis.__codexQuotaAwaitingFreshSession) installLayout();
     if (!apiMode()) scheduleAutoRefresh();
   };
 
   globalThis.__codexQuotaUpdateApi = (data) => {
+    const awaitingSession = globalThis.__codexQuotaAwaitingFreshSession;
     globalThis.__codexQuotaApiNeedsData = false;
     globalThis.__codexQuotaApiLoaded = true;
     const now = Date.now();
     if (data && !data.errorCode && !data.error) {
+      globalThis.__codexQuotaAwaitingFreshSession = false;
+      void checkAlerts("api", data);
       const fingerprint = quotaUsageFingerprint(data);
       const previousFingerprint = globalThis.__codexQuotaApiUsageFingerprint;
       if (previousFingerprint && previousFingerprint !== fingerprint) {
@@ -1360,6 +1597,7 @@
       const card = document.getElementById(apiHostId) || (accountBar() ? apiCard(nativeQuotaCard()) : null);
       if (card) renderApi(card, globalThis.__codexQuotaApiPayload || null, quotaErrorCode("api"));
     }
+    if (awaitingSession && !globalThis.__codexQuotaAwaitingFreshSession) installLayout();
     if (apiMode()) scheduleAutoRefresh();
   };
 
@@ -1386,7 +1624,7 @@
       return;
     }
     removeApiCard();
-    const card = nativeQuotaCard();
+    const card = globalThis.__codexQuotaAwaitingFreshSession ? null : nativeQuotaCard();
     if (card) {
       removeOfficialCard();
       if (setOfficialCardSidebarVisibility(card, Boolean(bar))) {
@@ -1406,7 +1644,7 @@
     const currentLayout = host.firstElementChild?.dataset.cqLayout;
     const presentation = officialPresentation(globalThis.__codexQuotaOfficialPayload || null);
     const expectedVariant = presentation?.kind === "plus-x" ? "a2-plus-x-v1" : "a2-merge-v1";
-    const expectedTitle = presentation?.kind === "plus-x" ? copy.fiveHourTitle : copy.weeklyTitle;
+    const expectedTitle = officialTitle(presentation?.kind === "plus-x");
     const expectedPlan = presentation?.planLabel || "";
     const staleThread = currentLayout === "thread-v2" &&
       (!host.querySelector(".cq-refresh") ||
@@ -1432,8 +1670,33 @@
 
   const installLayout = () => {
     renderLayout();
-    document.querySelectorAll(`.${compactClass}, .${apiCardClass}`).forEach(updatePalette);
+    document.querySelectorAll(`.${compactClass}, .${apiCardClass}`).forEach(card => {
+      updatePalette(card);
+      card.dataset.cqTransparency = preferences.transparency;
+      const content = card.querySelector(`.${compactContentClass}[data-cq-layout="thread-v2"]`);
+      if (content?.dataset.cqUsed) setThreadUsage(content, Number(content.dataset.cqUsed), content.dataset.cqUsageAria);
+    });
   };
+
+  globalThis.__codexQuotaResetSession = () => {
+    clearTimeout(globalThis.__codexQuotaAutoRefreshTimer);
+    for (const kind of ["Api", "Official"]) {
+      for (const suffix of ["Payload", "ErrorCode", "Error", "UsageFingerprint", "LastSuccessAt", "NextAutoAttemptAt", "CooldownUntil", "NeedsData", "Loaded"]) {
+        delete globalThis[`__codexQuota${kind}${suffix}`];
+      }
+    }
+    document.getElementById("cq-notice")?.remove();
+    removeOfficialCard(); removeApiCard();
+    const native = nativeQuotaCard();
+    if (native) { native.hidden = true; native.dataset.codexQuotaSidebarHidden = "true"; }
+    globalThis.__codexQuotaAwaitingFreshSession = true;
+  };
+  globalThis.__codexQuotaSettingsCleanup?.();
+  const settingsChanged = (event) => {
+    if (event.key === settingsKey) { preferences = readSettings(); installLayout(); }
+  };
+  window.addEventListener("storage", settingsChanged);
+  globalThis.__codexQuotaSettingsCleanup = () => window.removeEventListener("storage", settingsChanged);
 
   const observeOfficialCards = () => {
     globalThis.__codexQuotaOfficialCardObserver?.disconnect();

@@ -6,9 +6,9 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$releaseTag = 'v1.9.0'
+$releaseTag = 'v2.0.0'
 $archiveName = 'codex-usage-card.skill.zip'
-$expectedSha256 = '3D00FB4DDAE3E0643070022B418228D63B3E5041C0C3EE568DC60BBDB266AD53'
+$expectedSha256 = '902072E64338B2DEA408B213DF21C3F60B84E063C7D6B628D1E946837C8C19D3'
 $archiveUrl = 'https://github.com/DrFanghaiz/codex-usage-card/releases/download/{0}/{1}' -f $releaseTag, $archiveName
 
 if ($env:OS -ne 'Windows_NT') {
@@ -31,6 +31,9 @@ $InstallRoot = [IO.Path]::GetFullPath($InstallRoot)
 $stagingRoot = Join-Path ([IO.Path]::GetTempPath()) ('codex-usage-card-' + [Guid]::NewGuid().ToString('N'))
 $archivePath = Join-Path $stagingRoot $archiveName
 $extractRoot = Join-Path $stagingRoot 'expanded'
+$backupRoot = Join-Path $SkillRoot ('backups\' + [Guid]::NewGuid().ToString('N'))
+$filesChanged = $false
+$installed = $false
 $relativeFiles = @(
   'SKILL.md',
   'agents\openai.yaml',
@@ -61,6 +64,15 @@ try {
   }
 
   foreach ($relativePath in $relativeFiles) {
+    $destinationPath = Join-Path $SkillRoot $relativePath
+    if (Test-Path -LiteralPath $destinationPath -PathType Leaf) {
+      $savedPath = Join-Path $backupRoot $relativePath
+      New-Item -ItemType Directory -Path (Split-Path -Parent $savedPath) -Force | Out-Null
+      Copy-Item -LiteralPath $destinationPath -Destination $savedPath
+    }
+  }
+  $filesChanged = $true
+  foreach ($relativePath in $relativeFiles) {
     $sourcePath = Join-Path $sourceRoot $relativePath
     $destinationPath = Join-Path $SkillRoot $relativePath
     New-Item -ItemType Directory -Path (Split-Path -Parent $destinationPath) -Force | Out-Null
@@ -71,6 +83,7 @@ try {
   & (Join-Path $SkillRoot 'scripts\install.ps1') `
     -InstallRoot $InstallRoot `
     -SkipTaskRegistration:$SkipTaskRegistration
+  $installed = $true
 
   if ($legacySkillRoot -and (Test-Path -LiteralPath $legacySkillRoot -PathType Container)) {
     $legacyManifest = Join-Path $legacySkillRoot 'SKILL.md'
@@ -98,6 +111,24 @@ try {
       }
     }
   }
+} catch {
+  $installFailure = $_
+  if ($filesChanged -and -not $installed) {
+    try {
+      foreach ($relativePath in $relativeFiles) {
+        $savedPath = Join-Path $backupRoot $relativePath
+        $destinationPath = Join-Path $SkillRoot $relativePath
+        if (Test-Path -LiteralPath $savedPath -PathType Leaf) {
+          Copy-Item -LiteralPath $savedPath -Destination $destinationPath -Force
+        } elseif (Test-Path -LiteralPath $destinationPath -PathType Leaf) {
+          Remove-Item -LiteralPath $destinationPath -Force
+        }
+      }
+    } catch {
+      throw ('Installation failed: {0}. Skill rollback also failed: {1}. Backup retained at {2}' -f $installFailure, $_, $backupRoot)
+    }
+  }
+  throw $installFailure
 } finally {
   if (Test-Path -LiteralPath $stagingRoot -PathType Container) {
     $resolvedTemp = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())

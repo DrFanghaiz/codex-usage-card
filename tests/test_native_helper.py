@@ -43,7 +43,7 @@ class NativeHelperTests(unittest.TestCase):
         self.assertNotIn("using (var replacement = Process.Start(startInfo))", NATIVE_SOURCE)
         self.assertLess(
             NATIVE_SOURCE.index("Codex process identity changed before relaunch"),
-            NATIVE_SOURCE.index("process.Kill()"),
+            NATIVE_SOURCE.index("process.Kill()", NATIVE_SOURCE.index("private static void RelaunchWithRemoteDebugging")),
         )
 
     def test_official_usage_is_fetched_by_the_helper_and_only_payload_enters_the_page(self):
@@ -57,10 +57,10 @@ class NativeHelperTests(unittest.TestCase):
 
     def test_complete_official_login_precedes_api_and_partial_official_login_waits(self):
         self.assertIn(
-            """            official = HasOfficialAccount();
-            if (official) return true;
-            api = LoadApiConfiguration();
-            return api != null;""",
+            """            var account = LoadOfficialConfiguration();
+            official = account != null;
+            if (!official) api = LoadApiConfiguration();
+            if (!official && api == null) return false;""",
             NATIVE_SOURCE,
         )
         self.assertNotIn("return official != (api != null);", NATIVE_SOURCE)
@@ -85,12 +85,20 @@ class NativeHelperTests(unittest.TestCase):
         )
 
     def test_page_error_payloads_are_stable_codes_without_raw_messages(self):
-        self.assertEqual(NATIVE_SOURCE.count('{ "errorCode", "NETWORK_ERROR" }'), 2)
-        self.assertEqual(NATIVE_SOURCE.count('{ "errorCode", "INVALID_RESPONSE" }'), 2)
-        self.assertIn('payload["retryAfterSeconds"] = retryAfter;', NATIVE_SOURCE)
+        self.assertIn('"NETWORK_ERROR"', NATIVE_SOURCE)
+        self.assertIn('{ "errorCode", "INVALID_RESPONSE" }', NATIVE_SOURCE)
+        self.assertIn('"AUTH_REQUIRED"', NATIVE_SOURCE)
+        self.assertIn('"RATE_LIMITED"', NATIVE_SOURCE)
+        self.assertIn('WebErrorPayload(exception)', NATIVE_SOURCE)
         self.assertNotIn("usage network request failed", NATIVE_SOURCE)
         self.assertNotIn("usage response is invalid", NATIVE_SOURCE)
         self.assertNotIn("exception.Message", NATIVE_SOURCE)
+
+    def test_graphical_doctor_uses_required_powershell_7_without_a_console(self):
+        self.assertIn('@"PowerShell\\7\\pwsh.exe"', NATIVE_SOURCE)
+        self.assertIn('CreateNoWindow = true', NATIVE_SOURCE)
+        self.assertIn('WindowStyle = ProcessWindowStyle.Hidden', NATIVE_SOURCE)
+        self.assertIn('SanitizeDiagnosis(', NATIVE_SOURCE)
 
     def test_skill_helper_source_matches_the_project_source(self):
         self.assertEqual(NATIVE_SOURCE, SKILL_NATIVE_SOURCE)
@@ -107,7 +115,8 @@ class NativeHelperTests(unittest.TestCase):
         self.assertIn("'CodexUsageCard'", SKILL_INSTALL_SCRIPT)
         self.assertIn("$legacyTaskName = 'Codex Quota Card Repair'", SKILL_INSTALL_SCRIPT)
         self.assertIn("'CodexBar'", SKILL_INSTALL_SCRIPT)
-        self.assertIn("The legacy task points to another path", SKILL_INSTALL_SCRIPT)
+        self.assertIn("The legacy task action does not match", SKILL_INSTALL_SCRIPT)
+        self.assertIn("$taskActionMatches $legacyTask $legacyExecutable", SKILL_INSTALL_SCRIPT)
         self.assertIn("Unregister-ScheduledTask", SKILL_INSTALL_SCRIPT)
         self.assertIn("WaitForExit(5000)", SKILL_INSTALL_SCRIPT)
         self.assertLess(
@@ -116,10 +125,10 @@ class NativeHelperTests(unittest.TestCase):
                 "Unregister-ScheduledTask -TaskPath '\\' -TaskName $legacyTaskName"
             ),
         )
-        self.assertIn("$releaseTag = 'v1.9.0'", ROOT_INSTALL_SCRIPT)
+        self.assertIn("$releaseTag = 'v2.0.0'", ROOT_INSTALL_SCRIPT)
         self.assertIn("$archiveName = 'codex-usage-card.skill.zip'", ROOT_INSTALL_SCRIPT)
         self.assertIn("'scripts\\doctor.ps1'", ROOT_INSTALL_SCRIPT)
-        self.assertIn("3D00FB4DDAE3E0643070022B418228D63B3E5041C0C3EE568DC60BBDB266AD53", ROOT_INSTALL_SCRIPT)
+        self.assertIn("902072E64338B2DEA408B213DF21C3F60B84E063C7D6B628D1E946837C8C19D3", ROOT_INSTALL_SCRIPT)
 
 
 if __name__ == "__main__":

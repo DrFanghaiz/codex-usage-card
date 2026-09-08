@@ -29,10 +29,12 @@ $fileNames = @(
   'native_patch.js'
 )
 
-foreach ($fileName in $fileNames) {
-  $source = Join-Path $sourceDirectory $fileName
-  if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
-    throw ('Skill asset is missing: {0}' -f $fileName)
+$deploymentFiles = @($fileNames | ForEach-Object {
+  @{ Source = (Join-Path $sourceDirectory $_); Relative = ('native-patch\' + $_) }
+}) + @(@{ Source = (Join-Path $PSScriptRoot 'doctor.ps1'); Relative = 'scripts\doctor.ps1' })
+foreach ($file in $deploymentFiles) {
+  if (-not (Test-Path -LiteralPath $file.Source -PathType Leaf)) {
+    throw ('Skill asset is missing: {0}' -f $file.Relative)
   }
 }
 
@@ -58,6 +60,17 @@ $stopExactProcesses = {
   }
 }
 
+$taskActionMatches = {
+  param($Task, [string]$ExpectedExecutable)
+  if ($Task.Actions.Count -ne 1) { return $false }
+  $action = $Task.Actions[0]
+  return -not [String]::IsNullOrWhiteSpace($action.Execute) -and
+    -not [String]::IsNullOrWhiteSpace($action.WorkingDirectory) -and
+    [String]::Equals([IO.Path]::GetFullPath($action.Execute), $ExpectedExecutable, [StringComparison]::OrdinalIgnoreCase) -and
+    [String]::Equals([IO.Path]::GetFullPath($action.WorkingDirectory), (Split-Path -Parent $ExpectedExecutable), [StringComparison]::OrdinalIgnoreCase) -and
+    [String]::IsNullOrWhiteSpace($action.Arguments)
+}
+
 $existingTask = $null
 $legacyTask = $null
 if (-not $SkipTaskRegistration) {
@@ -67,12 +80,10 @@ if (-not $SkipTaskRegistration) {
       throw 'The existing task has an unexpected number of actions.'
     }
     $actualExecutable = [IO.Path]::GetFullPath($existingTask.Actions[0].Execute)
-    if (-not [String]::Equals($actualExecutable, $executable, [StringComparison]::OrdinalIgnoreCase)) {
-      throw ('The existing task points to another path: {0}' -f $actualExecutable)
+    if (-not (& $taskActionMatches $existingTask $executable)) {
+      throw ('The existing task action does not match the expected executable, working directory and empty arguments: {0}' -f $actualExecutable)
     }
-    Stop-ScheduledTask -TaskPath '\' -TaskName $TaskName
   }
-  & $stopExactProcesses $executable
 
   $legacyTask = Get-ScheduledTask -TaskPath '\' -TaskName $legacyTaskName -ErrorAction SilentlyContinue
   if ($legacyTask) {
@@ -80,91 +91,158 @@ if (-not $SkipTaskRegistration) {
       throw 'The legacy task has an unexpected number of actions.'
     }
     $actualLegacyExecutable = [IO.Path]::GetFullPath($legacyTask.Actions[0].Execute)
-    if (-not [String]::Equals($actualLegacyExecutable, $legacyExecutable, [StringComparison]::OrdinalIgnoreCase)) {
-      throw ('The legacy task points to another path: {0}' -f $actualLegacyExecutable)
+    if (-not (& $taskActionMatches $legacyTask $legacyExecutable)) {
+      throw ('The legacy task action does not match the expected executable, working directory and empty arguments: {0}' -f $actualLegacyExecutable)
     }
   }
 }
 
-New-Item -ItemType Directory -Path $installDirectory -Force | Out-Null
-foreach ($fileName in $fileNames) {
-  Copy-Item -LiteralPath (Join-Path $sourceDirectory $fileName) -Destination (Join-Path $installDirectory $fileName) -Force
-}
-
-if ($SkipTaskRegistration) {
-  [pscustomobject]@{
-    Installed = $true
-    InstallRoot = $InstallRoot
-    TaskRegistered = $false
-  } | Format-List
-  return
-}
-
-$userId = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
-$action = New-ScheduledTaskAction -Execute $executable -WorkingDirectory $installDirectory
-$trigger = New-ScheduledTaskTrigger -AtLogOn -User $userId
-$principal = New-ScheduledTaskPrincipal -UserId $userId -LogonType Interactive -RunLevel Limited
-$settings = New-ScheduledTaskSettingsSet `
-  -AllowStartIfOnBatteries `
-  -DontStopIfGoingOnBatteries `
-  -StartWhenAvailable `
-  -MultipleInstances IgnoreNew `
-  -RestartCount 3 `
-  -RestartInterval (New-TimeSpan -Minutes 1) `
-  -ExecutionTimeLimit ([TimeSpan]::Zero)
-
-Register-ScheduledTask `
-  -TaskPath '\' `
-  -TaskName $TaskName `
-  -Action $action `
-  -Trigger $trigger `
-  -Principal $principal `
-  -Settings $settings `
-  -Description 'Runs Codex Usage Card without a console window.' `
-  -Force | Out-Null
-
-Start-ScheduledTask -TaskPath '\' -TaskName $TaskName
-Start-Sleep -Milliseconds 750
-
-$task = Get-ScheduledTask -TaskPath '\' -TaskName $TaskName -ErrorAction Stop
-if ($task.Actions.Count -ne 1) {
-  throw 'The registered task has an unexpected number of actions.'
-}
-$actualExecutable = [IO.Path]::GetFullPath($task.Actions[0].Execute)
-if (-not [String]::Equals($actualExecutable, $executable, [StringComparison]::OrdinalIgnoreCase)) {
-  throw ('Registered task path is incorrect: {0}' -f $actualExecutable)
-}
-$running = @(Get-CimInstance Win32_Process | Where-Object {
-  $_.ExecutablePath -and
-  [String]::Equals([IO.Path]::GetFullPath($_.ExecutablePath), $executable, [StringComparison]::OrdinalIgnoreCase)
-})
-if ($running.Count -ne 1) {
-  throw ('Expected one helper process, found {0}.' -f $running.Count)
-}
-$windowHandle = (Get-Process -Id $running[0].ProcessId).MainWindowHandle
-if ($windowHandle -ne 0) {
-  throw 'The helper unexpectedly created a window.'
-}
-
-if ($legacyTask) {
-  Stop-ScheduledTask -TaskPath '\' -TaskName $legacyTaskName
-  & $stopExactProcesses $legacyExecutable
-  Unregister-ScheduledTask -TaskPath '\' -TaskName $legacyTaskName -Confirm:$false
-  foreach ($fileName in $fileNames) {
-    $legacyPath = Join-Path $legacyInstallDirectory $fileName
-    if (Test-Path -LiteralPath $legacyPath -PathType Leaf) {
-      Remove-Item -LiteralPath $legacyPath -Force
-    }
-  }
-  foreach ($legacyDirectory in @($legacyInstallDirectory, $legacyInstallRoot)) {
-    if ((Test-Path -LiteralPath $legacyDirectory -PathType Container) -and
-        @(Get-ChildItem -LiteralPath $legacyDirectory -Force).Count -eq 0) {
-      Remove-Item -LiteralPath $legacyDirectory -Force
-    }
+$backupDirectory = Join-Path $InstallRoot ('backups\' + [Guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $backupDirectory -Force | Out-Null
+foreach ($file in $deploymentFiles) {
+  $installedPath = Join-Path $InstallRoot $file.Relative
+  if (Test-Path -LiteralPath $installedPath -PathType Leaf) {
+    $savedPath = Join-Path $backupDirectory $file.Relative
+    New-Item -ItemType Directory -Path (Split-Path -Parent $savedPath) -Force | Out-Null
+    Copy-Item -LiteralPath $installedPath -Destination $savedPath
   }
 }
+$previousTaskXml = if ($existingTask) { Export-ScheduledTask -TaskPath '\' -TaskName $TaskName } else { $null }
+if ($previousTaskXml) {
+  Set-Content -LiteralPath (Join-Path $backupDirectory 'task.xml') -Value $previousTaskXml -Encoding UTF8
+}
+$legacyTaskXml = if ($legacyTask) { Export-ScheduledTask -TaskPath '\' -TaskName $legacyTaskName } else { $null }
+if ($legacyTaskXml) {
+  Set-Content -LiteralPath (Join-Path $backupDirectory 'legacy-task.xml') -Value $legacyTaskXml -Encoding UTF8
+}
+$taskChanged = $false
+$legacyChanged = $false
+$processesStopped = $false
+$filesChanged = $false
+try {
+  if (-not $SkipTaskRegistration) {
+    $processesStopped = $true
+    if ($existingTask) { Stop-ScheduledTask -TaskPath '\' -TaskName $TaskName }
+    & $stopExactProcesses $executable
+  }
+  New-Item -ItemType Directory -Path $installDirectory -Force | Out-Null
+  $filesChanged = $true
+  foreach ($file in $deploymentFiles) {
+    $installedPath = Join-Path $InstallRoot $file.Relative
+    New-Item -ItemType Directory -Path (Split-Path -Parent $installedPath) -Force | Out-Null
+    Copy-Item -LiteralPath $file.Source -Destination $installedPath -Force
+  }
 
-$diagnosis = & (Join-Path $PSScriptRoot 'doctor.ps1') -TaskName $TaskName -InstallRoot $InstallRoot
+  if ($SkipTaskRegistration) {
+    [pscustomobject]@{
+      Installed = $true
+      InstallRoot = $InstallRoot
+      TaskRegistered = $false
+    } | Format-List
+    return
+  }
+
+  $userId = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+  $action = New-ScheduledTaskAction -Execute $executable -WorkingDirectory $installDirectory
+  $trigger = New-ScheduledTaskTrigger -AtLogOn -User $userId
+  $principal = New-ScheduledTaskPrincipal -UserId $userId -LogonType Interactive -RunLevel Limited
+  $settings = New-ScheduledTaskSettingsSet `
+    -AllowStartIfOnBatteries `
+    -DontStopIfGoingOnBatteries `
+    -StartWhenAvailable `
+    -MultipleInstances IgnoreNew `
+    -RestartCount 3 `
+    -RestartInterval (New-TimeSpan -Minutes 1) `
+    -ExecutionTimeLimit ([TimeSpan]::Zero)
+
+  $taskChanged = $true
+  Register-ScheduledTask `
+    -TaskPath '\' `
+    -TaskName $TaskName `
+    -Action $action `
+    -Trigger $trigger `
+    -Principal $principal `
+    -Settings $settings `
+    -Description 'Runs Codex Usage Card without a console window.' `
+    -Force | Out-Null
+
+  Start-ScheduledTask -TaskPath '\' -TaskName $TaskName
+  Start-Sleep -Milliseconds 750
+
+  $task = Get-ScheduledTask -TaskPath '\' -TaskName $TaskName -ErrorAction Stop
+  if ($task.Actions.Count -ne 1) {
+    throw 'The registered task has an unexpected number of actions.'
+  }
+  $actualExecutable = [IO.Path]::GetFullPath($task.Actions[0].Execute)
+  if (-not (& $taskActionMatches $task $executable)) {
+    throw ('Registered task action is incorrect: {0}' -f $actualExecutable)
+  }
+  $running = @(Get-CimInstance Win32_Process | Where-Object {
+    $_.ExecutablePath -and
+    [String]::Equals([IO.Path]::GetFullPath($_.ExecutablePath), $executable, [StringComparison]::OrdinalIgnoreCase)
+  })
+  if ($running.Count -ne 1) {
+    throw ('Expected one helper process, found {0}.' -f $running.Count)
+  }
+  $windowHandle = (Get-Process -Id $running[0].ProcessId).MainWindowHandle
+  if ($windowHandle -ne 0) {
+    throw 'The helper unexpectedly created a window.'
+  }
+  $diagnosis = & (Join-Path $PSScriptRoot 'doctor.ps1') -TaskName $TaskName -InstallRoot $InstallRoot
+  if ($legacyTask) {
+    $legacyChanged = $true
+    Stop-ScheduledTask -TaskPath '\' -TaskName $legacyTaskName
+    & $stopExactProcesses $legacyExecutable
+    Unregister-ScheduledTask -TaskPath '\' -TaskName $legacyTaskName -Confirm:$false
+    # Retain the legacy files alongside the saved task XML for recovery.
+  }
+} catch {
+  $installFailure = $_
+  try {
+    if ($taskChanged) {
+      $rollbackTask = Get-ScheduledTask -TaskPath '\' -TaskName $TaskName -ErrorAction SilentlyContinue
+      if ($rollbackTask) {
+        if (-not (& $taskActionMatches $rollbackTask $executable)) {
+          throw 'Task identity changed during installation; refusing to overwrite it during rollback.'
+        }
+        Stop-ScheduledTask -TaskPath '\' -TaskName $TaskName
+      }
+      & $stopExactProcesses $executable
+    }
+    if ($filesChanged) {
+      foreach ($file in $deploymentFiles) {
+        $savedPath = Join-Path $backupDirectory $file.Relative
+        $installedPath = Join-Path $InstallRoot $file.Relative
+        if (Test-Path -LiteralPath $savedPath -PathType Leaf) {
+          Copy-Item -LiteralPath $savedPath -Destination $installedPath -Force
+        } elseif (Test-Path -LiteralPath $installedPath -PathType Leaf) {
+          Remove-Item -LiteralPath $installedPath -Force
+        }
+      }
+    }
+    if ($taskChanged) {
+      if ($previousTaskXml) {
+        Register-ScheduledTask -TaskPath '\' -TaskName $TaskName -Xml $previousTaskXml -Force | Out-Null
+      } else {
+        Unregister-ScheduledTask -TaskPath '\' -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
+      }
+    }
+    if ($processesStopped -and $existingTask -and $existingTask.State -eq 'Running') {
+      Start-ScheduledTask -TaskPath '\' -TaskName $TaskName
+    }
+    if ($legacyChanged) {
+      $rollbackLegacyTask = Get-ScheduledTask -TaskPath '\' -TaskName $legacyTaskName -ErrorAction SilentlyContinue
+      if ($rollbackLegacyTask -and -not (& $taskActionMatches $rollbackLegacyTask $legacyExecutable)) {
+        throw 'Legacy task identity changed during installation; refusing to overwrite it during rollback.'
+      }
+      Register-ScheduledTask -TaskPath '\' -TaskName $legacyTaskName -Xml $legacyTaskXml -Force | Out-Null
+      if ($legacyTask.State -eq 'Running') { Start-ScheduledTask -TaskPath '\' -TaskName $legacyTaskName }
+    }
+  } catch {
+    throw ('Installation failed: {0}. Rollback also failed: {1}. Backup retained at {2}' -f $installFailure, $_, $backupDirectory)
+  }
+  throw ('Installation failed; previous files and task restored: {0}. Backup: {1}' -f $installFailure, $backupDirectory)
+}
 
 [pscustomobject]@{
   Installed = $true
@@ -173,6 +251,7 @@ $diagnosis = & (Join-Path $PSScriptRoot 'doctor.ps1') -TaskName $TaskName -Insta
   TaskState = $task.State
   ProcessId = $running[0].ProcessId
   MainWindowHandle = $windowHandle
+  BackupDirectory = $backupDirectory
   ActivationState = $diagnosis.ActivationState
   StageCodes = $diagnosis.StageCodes
   TaskActionMatches = $diagnosis.TaskActionMatches
