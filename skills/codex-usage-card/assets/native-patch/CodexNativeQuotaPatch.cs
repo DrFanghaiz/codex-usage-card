@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
+using System.Globalization;
 using System.Management;
 using System.Net;
 using System.Net.Sockets;
@@ -19,19 +20,33 @@ internal static class CodexNativeQuotaPatch
     private const uint ExtendedStartupInfoPresent = 0x00080000;
     private const uint ProcessCreateProcess = 0x0080;
     private static readonly IntPtr ProcThreadAttributeParentProcess = new IntPtr(0x00020000);
-    private static readonly JavaScriptSerializer Json = new JavaScriptSerializer();
+    private static JavaScriptSerializer Json { get { return new JavaScriptSerializer(); } }
     private static string NativeScript;
     private static int NextCommandId;
+    private static volatile string SessionScope = Guid.NewGuid().ToString("N");
+    private static string LoginFingerprint;
+    private static int SessionGeneration;
+    private static int CachedPayloadGeneration;
+    private static readonly object PayloadGate = new object();
+    private static string CachedPayloadScope;
+    private static bool CachedPayloadOfficial;
+    private static Dictionary<string, object> CachedPayload;
+    private static DateTimeOffset CachedPayloadExpiresAt;
 
     private static void Main()
     {
         try
         {
-            ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12;
-            NativeScript = File.ReadAllText(
-                Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "native_patch.js"),
-                Encoding.UTF8);
-            MainAsync().GetAwaiter().GetResult();
+            bool firstInstance;
+            using (var instance = new Mutex(true, @"Local\CodexUsageCard.Helper", out firstInstance))
+            {
+                if (!firstInstance) return;
+                ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12;
+                NativeScript = File.ReadAllText(
+                    Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "native_patch.js"),
+                    Encoding.UTF8);
+                MainAsync().GetAwaiter().GetResult();
+            }
         }
         catch
         {
@@ -58,27 +73,26 @@ internal static class CodexNativeQuotaPatch
                     await WaitForCodexStartAsync();
                     continue;
                 }
-                var target = await FindTargetAsync();
+                var targets = await FindTargetsAsync();
                 ApiConfiguration api;
                 bool official;
                 if (!TryLoadLoginConfiguration(out api, out official))
                 {
+                    foreach (var target in targets)
+                    using (var socket = new CdpSocket(target.WebSocketDebuggerUrl))
+                    {
+                        socket.Connect();
+                        ResetPageSession(socket);
+                    }
                     await WaitForLoginConfigurationChangeAsync();
                     continue;
                 }
-                using (var socket = new CdpSocket(target.WebSocketDebuggerUrl))
+                using (var sessions = new PageSessions(api, official))
+                using (var loginWatcher = WatchLoginConfiguration(sessions.Close, api, official))
                 {
-                    socket.Connect();
-                    retrySeconds = 1;
-                    using (var loginWatcher = WatchLoginConfiguration(socket, api, official))
-                    {
-                        InstallForCurrentAndFuturePages(socket, official ? "account" : "api");
-                        if (official && PageDataRequested(socket, "__codexQuotaOfficialNeedsData"))
-                            PublishOfficialPayload(socket);
-                        if (!official && PageDataRequested(socket, "__codexQuotaApiNeedsData"))
-                            PublishApiPayload(socket, api);
-                        KeepSessionOpen(socket, api, official);
-                    }
+                    foreach (var target in targets) sessions.Start(target);
+                    if (await sessions.Ready.Task) retrySeconds = 1;
+                    await sessions.Completion.Task;
                 }
             }
             catch
@@ -92,18 +106,36 @@ internal static class CodexNativeQuotaPatch
 
     private static void InstallForCurrentAndFuturePages(CdpSocket socket, string mode)
     {
+        var initialization = "globalThis.__codexQuotaSessionScope=" + Json.Serialize(SessionScope) +
+            ";globalThis.__codexQuotaMode=" + Json.Serialize(mode) + ";";
         SendCommand(socket, "Page.enable", new Dictionary<string, object>());
         SendCommand(socket, "Runtime.enable", new Dictionary<string, object>());
         SendCommand(socket, "Page.addScriptToEvaluateOnNewDocument", new Dictionary<string, object>
         {
-            { "source", "globalThis.__codexQuotaMode=" + Json.Serialize(mode) + ";" }
+            { "source", initialization }
         });
         SendCommand(socket, "Page.addScriptToEvaluateOnNewDocument", new Dictionary<string, object>
         {
             { "source", NativeScript }
         });
-        Evaluate(socket, "globalThis.__codexQuotaMode=" + Json.Serialize(mode) + ";");
+        Evaluate(socket, initialization);
         Evaluate(socket, NativeScript);
+    }
+
+    private static void ResetPageSession(CdpSocket socket)
+    {
+        Evaluate(socket, @"if (typeof globalThis.__codexQuotaResetSession === 'function') {
+            globalThis.__codexQuotaResetSession();
+        } else {
+            for (const mode of ['Api', 'Official']) {
+                for (const suffix of ['Payload', 'Error', 'ErrorCode', 'LastSuccessAt', 'NextAutoAttemptAt',
+                    'CooldownUntil', 'UsageFingerprint', 'NeedsData', 'Loaded']) {
+                    delete globalThis['__codexQuota' + mode + suffix];
+                }
+            }
+            document.getElementById('codex-api-usage-host')?.remove();
+            document.getElementById('codex-official-usage-host')?.remove();
+        }");
     }
 
     private static async Task WaitForLoginConfigurationChangeAsync()
@@ -161,10 +193,23 @@ internal static class CodexNativeQuotaPatch
         official = false;
         try
         {
-            official = HasOfficialAccount();
-            if (official) return true;
-            api = LoadApiConfiguration();
-            return api != null;
+            var account = LoadOfficialConfiguration();
+            official = account != null;
+            if (!official) api = LoadApiConfiguration();
+            if (!official && api == null) return false;
+            // The credential fingerprint stays in the helper; pages receive only a random scope.
+            string fingerprint;
+            using (var hash = SHA256.Create())
+                fingerprint = Convert.ToBase64String(hash.ComputeHash(Encoding.UTF8.GetBytes(official
+                    ? Json.Serialize(new[] { "account", account.AccountId })
+                    : Json.Serialize(new[] { "api", api.Url, api.ApiKey }))));
+            if (LoginFingerprint != null && LoginFingerprint != fingerprint)
+            {
+                SessionScope = Guid.NewGuid().ToString("N");
+                Interlocked.Increment(ref SessionGeneration);
+            }
+            LoginFingerprint = fingerprint;
+            return true;
         }
         catch (ArgumentException)
         {
@@ -177,10 +222,11 @@ internal static class CodexNativeQuotaPatch
     }
 
     private static FileSystemWatcher WatchLoginConfiguration(
-        CdpSocket socket,
+        Action close,
         ApiConfiguration activeApi,
         bool activeOfficial)
     {
+        var generation = Volatile.Read(ref SessionGeneration);
         var root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".codex");
         if (!Directory.Exists(root)) return null;
         var watcher = new FileSystemWatcher(root)
@@ -191,14 +237,18 @@ internal static class CodexNativeQuotaPatch
         {
             var name = Path.GetFileName(change.FullPath);
             if (String.Equals(name, "auth.json", StringComparison.OrdinalIgnoreCase) ||
-                String.Equals(name, "config.toml", StringComparison.OrdinalIgnoreCase)) socket.Close();
+                String.Equals(name, "config.toml", StringComparison.OrdinalIgnoreCase))
+            {
+                Interlocked.Increment(ref SessionGeneration);
+                close();
+            }
         };
         RenamedEventHandler renamed = (sender, change) => changed(sender, change);
         watcher.Changed += changed;
         watcher.Created += changed;
         watcher.Deleted += changed;
         watcher.Renamed += renamed;
-        watcher.Error += (sender, error) => socket.Close();
+        watcher.Error += (sender, error) => close();
         try
         {
             watcher.EnableRaisingEvents = true;
@@ -207,8 +257,13 @@ internal static class CodexNativeQuotaPatch
             ApiConfiguration currentApi;
             bool currentOfficial;
             if (!TryLoadLoginConfiguration(out currentApi, out currentOfficial) ||
+                Volatile.Read(ref SessionGeneration) != generation ||
                 currentOfficial != activeOfficial ||
-                !SameApiConfiguration(currentApi, activeApi)) socket.Close();
+                !SameApiConfiguration(currentApi, activeApi))
+            {
+                Interlocked.Increment(ref SessionGeneration);
+                close();
+            }
             return watcher;
         }
         catch
@@ -230,12 +285,138 @@ internal static class CodexNativeQuotaPatch
         while (true)
         {
             // Page events are consumed so they cannot build up in the local socket buffer.
-            var message = socket.ReceiveText();
-            if (official && message.IndexOf("__codexQuotaOfficialRequest__", StringComparison.Ordinal) >= 0)
+            var message = socket.PendingEvents.Count > 0 ? socket.PendingEvents.Dequeue() : socket.ReceiveText();
+            if (socket.OnEvent != null) socket.OnEvent(message);
+            if (IsConsoleRequest(message, "__codexQuotaDoctorRequest__"))
+                PublishDiagnosis(socket);
+            else if (official && IsConsoleRequest(message, "__codexQuotaOfficialRequest__"))
                 PublishOfficialPayload(socket);
-            else if (!official && message.IndexOf("__codexQuotaApiRequest__", StringComparison.Ordinal) >= 0)
+            else if (!official && IsConsoleRequest(message, "__codexQuotaApiRequest__"))
                 PublishApiPayload(socket, api);
         }
+    }
+
+    private static bool IsConsoleRequest(string message, string name)
+    {
+        var root = Json.DeserializeObject(message) as Dictionary<string, object>;
+        if (root == null || StringValue(root, "method") != "Runtime.consoleAPICalled") return false;
+        var parameters = root.ContainsKey("params") ? root["params"] as Dictionary<string, object> : null;
+        var args = parameters != null && parameters.ContainsKey("args") ? parameters["args"] as object[] : null;
+        var argument = args != null && args.Length == 1 ? args[0] as Dictionary<string, object> : null;
+        return argument != null && StringValue(argument, "type") == "string" && StringValue(argument, "value") == name;
+    }
+
+    private static Dictionary<string, object> HttpErrorPayload(int statusCode, string retryAfter, DateTimeOffset now)
+    {
+        var payload = new Dictionary<string, object> {
+            { "errorCode", statusCode == 401 || statusCode == 403 ? "AUTH_REQUIRED" :
+                statusCode == 429 ? "RATE_LIMITED" : "NETWORK_ERROR" }
+        };
+        if (statusCode == 429)
+        {
+            int seconds;
+            DateTimeOffset date;
+            if (Int32.TryParse(retryAfter, NumberStyles.None, CultureInfo.InvariantCulture, out seconds) && seconds >= 0)
+                payload["retryAfterSeconds"] = Math.Max(1, seconds);
+            else if (DateTimeOffset.TryParseExact(retryAfter, "r", CultureInfo.InvariantCulture,
+                DateTimeStyles.AssumeUniversal, out date) && date > now)
+                payload["retryAfterSeconds"] = (int)Math.Min(Int32.MaxValue, Math.Ceiling((date - now).TotalSeconds));
+        }
+        return payload;
+    }
+
+    private static Dictionary<string, object> WebErrorPayload(WebException exception)
+    {
+        using (var response = exception.Response as HttpWebResponse)
+            return HttpErrorPayload(response == null ? 0 : (int)response.StatusCode,
+                response == null ? null : response.Headers["Retry-After"], DateTimeOffset.UtcNow);
+    }
+
+    private static Dictionary<string, object> SanitizeDiagnosis(Dictionary<string, object> raw)
+    {
+        if (raw == null) throw new InvalidOperationException("Invalid diagnosis");
+        var result = new Dictionary<string, object>();
+        foreach (var key in new[] { "Installed", "TaskFound", "TaskActionMatches", "HelperFilePresent", "HelperWindowless",
+            "CodexRunning", "CdpEndpointFound", "MainPageFound", "CardVisible" })
+        {
+            object value;
+            if (!raw.TryGetValue(key, out value) || (value != null && !(value is bool)))
+                throw new InvalidOperationException("Invalid diagnosis status");
+            result[key] = value;
+        }
+        foreach (var key in new[] { "HelperProcessCount", "WindowCount", "VisibleCardCount", "UninspectedWindowCount" })
+        {
+            object count;
+            if (raw.TryGetValue(key, out count) && (count == null || (count is int && (int)count >= 0)))
+                result[key] = count;
+        }
+        foreach (var entry in new[] {
+            new[] { "ActivationState", "InspectionFailed", "NotInstalled", "TaskActionMismatch", "HelperMissing", "TaskNotRunning",
+                "HelperNotRunning", "HelperMultipleProcesses", "HelperWindowVisible", "InstalledWaitingForCodex",
+                "InstalledWaitingForDebugPort", "InstalledWaitingForMainPage", "Active", "InstalledCardMissing" },
+            new[] { "TaskState", "Unknown", "Disabled", "Queued", "Ready", "Running" },
+            new[] { "CardKind", "Api", "Official", "Mixed" }
+        })
+        {
+            var value = StringValue(raw, entry[0]);
+            result[entry[0]] = Array.IndexOf(entry, value, 1) >= 1 ? value : null;
+        }
+        var allowedCodes = new HashSet<string>(new[] { "TASK_INSPECTION_FAILED", "TASK_NOT_FOUND", "TASK_ACTION_MISMATCH",
+            "TASK_NOT_RUNNING", "HELPER_FILE_NOT_FOUND", "HELPER_INSPECTION_FAILED", "HELPER_NOT_RUNNING",
+            "HELPER_MULTIPLE_PROCESSES", "HELPER_WINDOW_VISIBLE", "CODEX_INSPECTION_FAILED", "CODEX_NOT_RUNNING",
+            "CDP_PORT_UNAVAILABLE", "CDP_ENDPOINT_UNAVAILABLE", "CDP_MAIN_PAGE_UNAVAILABLE", "CDP_MAIN_PAGE_AMBIGUOUS",
+            "CARD_NOT_VISIBLE", "CARD_INSPECTION_FAILED", "CDP_INSPECTION_FAILED" });
+        var codes = raw.ContainsKey("StageCodes") ? raw["StageCodes"] as object[] : null;
+        var safeCodes = new List<string>();
+        if (codes != null) foreach (var code in codes)
+            if (code is string && allowedCodes.Contains((string)code)) safeCodes.Add((string)code);
+        result["StageCodes"] = safeCodes;
+        return result;
+    }
+
+    private static void PublishDiagnosis(CdpSocket socket)
+    {
+        Dictionary<string, object> payload;
+        try
+        {
+            var root = Path.GetFullPath(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, ".."));
+            var script = Path.Combine(root, "scripts", "doctor.ps1");
+            if (!File.Exists(script)) script = Path.Combine(root, "scripts", "doctor_usage_card.ps1");
+            if (!File.Exists(script)) throw new FileNotFoundException();
+            var command = "$ErrorActionPreference='Stop'; [Console]::OutputEncoding=[Text.Encoding]::UTF8; & '" +
+                script.Replace("'", "''") + "' -InstallRoot '" + root.Replace("'", "''") + "' | ConvertTo-Json -Compress -Depth 4";
+            var startInfo = new ProcessStartInfo {
+                // Doctor uses the PowerShell 7 runtime required by the installer.
+                FileName = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
+                    @"PowerShell\7\pwsh.exe"),
+                Arguments = "-NoProfile -NonInteractive -EncodedCommand " + Convert.ToBase64String(Encoding.Unicode.GetBytes(command)),
+                UseShellExecute = false, CreateNoWindow = true, WindowStyle = ProcessWindowStyle.Hidden,
+                RedirectStandardOutput = true, RedirectStandardError = true, StandardOutputEncoding = Encoding.UTF8
+            };
+            using (var process = Process.Start(startInfo))
+            {
+                if (process == null) throw new InvalidOperationException();
+                var output = process.StandardOutput.ReadToEndAsync();
+                process.ErrorDataReceived += (sender, line) => { }; // Drain, never log raw diagnostic errors.
+                process.BeginErrorReadLine();
+                if (!process.WaitForExit(15000))
+                {
+                    process.Kill();
+                    payload = new Dictionary<string, object> { { "errorCode", "DIAGNOSIS_TIMEOUT" } };
+                }
+                else
+                {
+                    if (process.ExitCode != 0) throw new InvalidOperationException();
+                    payload = SanitizeDiagnosis(Json.DeserializeObject(output.GetAwaiter().GetResult()) as Dictionary<string, object>);
+                }
+            }
+        }
+        catch
+        {
+            // Never publish process output, exception messages, file paths, or account data.
+            payload = new Dictionary<string, object> { { "errorCode", "DIAGNOSIS_UNAVAILABLE" } };
+        }
+        Evaluate(socket, "globalThis.__codexQuotaUpdateDiagnosis(" + Json.Serialize(payload) + ")");
     }
 
     private static bool PageDataRequested(CdpSocket socket, string name)
@@ -247,55 +428,56 @@ internal static class CodexNativeQuotaPatch
 
     private static void PublishOfficialPayload(CdpSocket socket)
     {
-        Dictionary<string, object> payload;
-        try
-        {
-            var official = LoadOfficialConfiguration();
-            if (official == null) throw new InvalidOperationException();
-            payload = FetchOfficialPayload(official);
-        }
-        catch (WebException exception)
-        {
-            payload = new Dictionary<string, object> { { "errorCode", "NETWORK_ERROR" } };
-            var response = exception.Response as HttpWebResponse;
-            if (response != null && (int)response.StatusCode == 429)
-            {
-                int retryAfter;
-                if (Int32.TryParse(response.Headers["Retry-After"], out retryAfter) && retryAfter > 0)
-                    payload["retryAfterSeconds"] = retryAfter;
-            }
-        }
-        catch
-        {
-            payload = new Dictionary<string, object> { { "errorCode", "INVALID_RESPONSE" } };
-        }
-        Evaluate(socket, "globalThis.__codexQuotaUpdateOfficial(" + Json.Serialize(payload) + ")");
+        Evaluate(socket, "globalThis.__codexQuotaUpdateOfficial(" + Json.Serialize(SharedPayload(null, true, socket.Scope, socket.Generation)) + ")");
     }
 
     private static void PublishApiPayload(CdpSocket socket, ApiConfiguration api)
     {
-        Dictionary<string, object> payload;
-        try
+        Evaluate(socket, "globalThis.__codexQuotaUpdateApi(" + Json.Serialize(SharedPayload(api, false, socket.Scope, socket.Generation)) + ")");
+    }
+
+    private static Dictionary<string, object> SharedPayload(ApiConfiguration api, bool official, string scope, int generation)
+    {
+        // ponytail: one fetch lock per helper; split by account only if concurrent accounts are supported.
+        lock (PayloadGate)
         {
-            if (api == null) throw new InvalidOperationException();
-            payload = FetchApiPayload(api);
-        }
-        catch (WebException exception)
-        {
-            payload = new Dictionary<string, object> { { "errorCode", "NETWORK_ERROR" } };
-            var response = exception.Response as HttpWebResponse;
-            if (response != null && (int)response.StatusCode == 429)
+            if (scope != SessionScope || generation != Volatile.Read(ref SessionGeneration)) throw new IOException("Login session changed");
+            var now = DateTimeOffset.UtcNow;
+            if (CachedPayload != null && CachedPayloadScope == scope && CachedPayloadOfficial == official && now < CachedPayloadExpiresAt &&
+                (CachedPayloadGeneration == generation || StringValue(CachedPayload, "errorCode") == "RATE_LIMITED"))
             {
-                int retryAfter;
-                if (Int32.TryParse(response.Headers["Retry-After"], out retryAfter) && retryAfter > 0)
-                    payload["retryAfterSeconds"] = retryAfter;
+                var cached = new Dictionary<string, object>(CachedPayload);
+                if (StringValue(cached, "errorCode") == "RATE_LIMITED")
+                    cached["retryAfterSeconds"] = Math.Max(1, (int)Math.Ceiling((CachedPayloadExpiresAt - now).TotalSeconds));
+                return cached;
             }
+            Dictionary<string, object> payload;
+            try
+            {
+                if (official)
+                {
+                    var account = LoadOfficialConfiguration();
+                    payload = account == null
+                        ? new Dictionary<string, object> { { "errorCode", "AUTH_REQUIRED" } }
+                        : FetchOfficialPayload(account);
+                }
+                else
+                {
+                    if (api == null) throw new InvalidOperationException();
+                    payload = FetchApiPayload(api);
+                }
+            }
+            catch (WebException exception) { payload = WebErrorPayload(exception); }
+            catch { payload = new Dictionary<string, object> { { "errorCode", "INVALID_RESPONSE" } }; }
+            var seconds = StringValue(payload, "errorCode") == "RATE_LIMITED"
+                ? (payload.ContainsKey("retryAfterSeconds") ? (int)payload["retryAfterSeconds"] : 30) : 5;
+            CachedPayload = payload;
+            CachedPayloadScope = scope;
+            CachedPayloadGeneration = generation;
+            CachedPayloadOfficial = official;
+            CachedPayloadExpiresAt = DateTimeOffset.UtcNow.AddSeconds(seconds);
+            return new Dictionary<string, object>(payload);
         }
-        catch
-        {
-            payload = new Dictionary<string, object> { { "errorCode", "INVALID_RESPONSE" } };
-        }
-        Evaluate(socket, "globalThis.__codexQuotaUpdateApi(" + Json.Serialize(payload) + ")");
     }
 
     private static ApiConfiguration LoadApiConfiguration()
@@ -329,11 +511,6 @@ internal static class CodexNativeQuotaPatch
             Url = baseUrl + (baseUrl.EndsWith("/v1", StringComparison.OrdinalIgnoreCase) ? "/usage" : "/v1/usage"),
             ApiKey = apiKey
         };
-    }
-
-    private static bool HasOfficialAccount()
-    {
-        return LoadOfficialConfiguration() != null;
     }
 
     private static OfficialConfiguration LoadOfficialConfiguration()
@@ -698,7 +875,7 @@ internal static class CodexNativeQuotaPatch
         });
     }
 
-    private static async Task<CdpTarget> FindTargetAsync()
+    private static async Task<List<CdpTarget>> FindTargetsAsync()
     {
         var processIds = new HashSet<int>();
         foreach (var process in Process.GetProcessesByName("ChatGPT"))
@@ -744,7 +921,7 @@ internal static class CodexNativeQuotaPatch
                             pages.Add(target);
                         }
                     }
-                    if (pages.Count == 1) matches.Add(pages[0]);
+                    matches.AddRange(pages);
                 }
             }
             catch
@@ -752,8 +929,8 @@ internal static class CodexNativeQuotaPatch
                 // Ignore unrelated local listeners and ports that are closing.
             }
         }
-        if (matches.Count != 1) throw new InvalidOperationException("Codex page target is not unique");
-        return matches[0];
+        if (matches.Count == 0) throw new InvalidOperationException("Codex page target is unavailable");
+        return matches;
     }
 
     private static async Task<HashSet<int>> FindListeningPortsAsync(HashSet<int> processIds)
@@ -805,7 +982,15 @@ internal static class CodexNativeQuotaPatch
         {
             var message = socket.ReceiveText();
             var root = Json.DeserializeObject(message) as Dictionary<string, object>;
-            if (root == null || !root.ContainsKey("id")) continue;
+            if (root == null || !root.ContainsKey("id"))
+            {
+                if (socket.OnEvent != null) socket.OnEvent(message);
+                // Runtime.enable replays console history; only queue requests from the live session.
+                if (method != "Runtime.enable" && (IsConsoleRequest(message, "__codexQuotaDoctorRequest__") ||
+                    IsConsoleRequest(message, "__codexQuotaOfficialRequest__") || IsConsoleRequest(message, "__codexQuotaApiRequest__")))
+                    socket.PendingEvents.Enqueue(message);
+                continue;
+            }
             if (Convert.ToInt32(root["id"]) != id) continue;
             if (root.ContainsKey("error")) throw new InvalidOperationException("CDP command failed");
             return root.ContainsKey("result")
@@ -834,6 +1019,88 @@ internal static class CodexNativeQuotaPatch
     private static string StringValue(Dictionary<string, object> values, string key)
     {
         return values.ContainsKey(key) && values[key] != null ? Convert.ToString(values[key]) : "";
+    }
+
+    private static CdpTarget TargetFromEvent(string message, string sourceUrl)
+    {
+        var root = Json.DeserializeObject(message) as Dictionary<string, object>;
+        if (root == null) return null;
+        var method = StringValue(root, "method");
+        if (method != "Target.targetCreated" && method != "Target.targetInfoChanged") return null;
+        var parameters = root.ContainsKey("params") ? root["params"] as Dictionary<string, object> : null;
+        var info = parameters != null && parameters.ContainsKey("targetInfo")
+            ? parameters["targetInfo"] as Dictionary<string, object> : null;
+        if (info == null || StringValue(info, "type") != "page" ||
+            !Regex.IsMatch(StringValue(info, "title"), "^(ChatGPT|Codex)$", RegexOptions.IgnoreCase) ||
+            !String.Equals(StringValue(info, "url"), "app://-/index.html", StringComparison.OrdinalIgnoreCase)) return null;
+        var id = StringValue(info, "targetId");
+        if (!Regex.IsMatch(id, "^[A-Za-z0-9_-]+$")) return null;
+        var source = new Uri(sourceUrl);
+        return new CdpTarget { Type = "page", Title = StringValue(info, "title"), Url = StringValue(info, "url"),
+            WebSocketDebuggerUrl = source.GetLeftPart(UriPartial.Authority) + "/devtools/page/" + id };
+    }
+
+    private sealed class PageSessions : IDisposable
+    {
+        private readonly object gate = new object();
+        private readonly Dictionary<string, CdpSocket> sockets = new Dictionary<string, CdpSocket>();
+        private readonly ApiConfiguration api;
+        private readonly bool official;
+        private bool closed;
+        public readonly TaskCompletionSource<bool> Ready = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        public readonly TaskCompletionSource<bool> Completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public PageSessions(ApiConfiguration api, bool official) { this.api = api; this.official = official; }
+
+        public void Start(CdpTarget target)
+        {
+            lock (gate)
+            {
+                if (closed || sockets.ContainsKey(target.WebSocketDebuggerUrl)) return;
+                var socket = new CdpSocket(target.WebSocketDebuggerUrl);
+                sockets.Add(target.WebSocketDebuggerUrl, socket);
+                socket.OnEvent = message => {
+                    var created = TargetFromEvent(message, target.WebSocketDebuggerUrl);
+                    if (created != null) Start(created);
+                };
+                Task.Run(() => {
+                    try
+                    {
+                        using (socket)
+                        {
+                            socket.Connect();
+                            lock (gate) { if (closed) return; }
+                            ResetPageSession(socket);
+                            SendCommand(socket, "Target.setDiscoverTargets", new Dictionary<string, object> { { "discover", true } });
+                            InstallForCurrentAndFuturePages(socket, official ? "account" : "api");
+                            if (PageDataRequested(socket, official ? "__codexQuotaOfficialNeedsData" : "__codexQuotaApiNeedsData"))
+                            {
+                                if (official) PublishOfficialPayload(socket);
+                                else PublishApiPayload(socket, api);
+                            }
+                            Ready.TrySetResult(true);
+                            KeepSessionOpen(socket, api, official);
+                        }
+                    }
+                    catch { Close(); }
+                });
+            }
+        }
+
+        public void Close()
+        {
+            lock (gate)
+            {
+                if (closed) return;
+                closed = true;
+                foreach (var socket in sockets.Values) socket.Close();
+                // A closed renderer restarts discovery for all current windows, preserving notification scope.
+                Ready.TrySetResult(false);
+                Completion.TrySetException(new IOException("Codex page session ended"));
+            }
+        }
+
+        public void Dispose() { Close(); }
     }
 
     private sealed class ApiConfiguration
@@ -944,6 +1211,10 @@ internal static class CodexNativeQuotaPatch
     private sealed class CdpSocket : IDisposable
     {
         private readonly Uri uri;
+        public readonly string Scope = SessionScope;
+        public readonly int Generation = Volatile.Read(ref SessionGeneration);
+        public Action<string> OnEvent;
+        public readonly Queue<string> PendingEvents = new Queue<string>();
         private TcpClient client;
         private NetworkStream stream;
         private readonly Random random = new Random();

@@ -8,6 +8,17 @@ $ErrorActionPreference = 'Stop'
 $InstallRoot = [IO.Path]::GetFullPath($InstallRoot)
 $installDirectory = Join-Path $InstallRoot 'native-patch'
 $executable = Join-Path $installDirectory 'CodexNativeQuotaPatch.next.exe'
+$taskActionMatches = {
+  param($Task, [string]$ExpectedExecutable)
+  if ($Task.Actions.Count -ne 1) { return $false }
+  $action = $Task.Actions[0]
+  return -not [String]::IsNullOrWhiteSpace($action.Execute) -and
+    -not [String]::IsNullOrWhiteSpace($action.WorkingDirectory) -and
+    [String]::Equals([IO.Path]::GetFullPath($action.Execute), $ExpectedExecutable, [StringComparison]::OrdinalIgnoreCase) -and
+    [String]::Equals([IO.Path]::GetFullPath($action.WorkingDirectory), (Split-Path -Parent $ExpectedExecutable), [StringComparison]::OrdinalIgnoreCase) -and
+    [String]::IsNullOrWhiteSpace($action.Arguments)
+}
+
 $task = Get-ScheduledTask -TaskPath '\' -TaskName $TaskName -ErrorAction SilentlyContinue
 
 if ($task) {
@@ -15,8 +26,8 @@ if ($task) {
     throw 'The task has an unexpected number of actions and was not removed.'
   }
   $actualExecutable = [IO.Path]::GetFullPath($task.Actions[0].Execute)
-  if (-not [String]::Equals($actualExecutable, $executable, [StringComparison]::OrdinalIgnoreCase)) {
-    throw ('The task points to another path and was not removed: {0}' -f $actualExecutable)
+  if (-not (& $taskActionMatches $task $executable)) {
+    throw ('The task action does not match and was not removed: {0}' -f $actualExecutable)
   }
   Stop-ScheduledTask -TaskPath '\' -TaskName $TaskName
   Unregister-ScheduledTask -TaskPath '\' -TaskName $TaskName -Confirm:$false
@@ -43,6 +54,15 @@ foreach ($fileName in @('CodexNativeQuotaPatch.cs', 'CodexNativeQuotaPatch.next.
 if ((Test-Path -LiteralPath $installDirectory -PathType Container) -and
     @(Get-ChildItem -LiteralPath $installDirectory -Force).Count -eq 0) {
   Remove-Item -LiteralPath $installDirectory -Force
+}
+$doctorPath = Join-Path $InstallRoot 'scripts\doctor.ps1'
+if (Test-Path -LiteralPath $doctorPath -PathType Leaf) {
+  Remove-Item -LiteralPath $doctorPath -Force
+}
+$scriptsDirectory = Join-Path $InstallRoot 'scripts'
+if ((Test-Path -LiteralPath $scriptsDirectory -PathType Container) -and
+    @(Get-ChildItem -LiteralPath $scriptsDirectory -Force).Count -eq 0) {
+  Remove-Item -LiteralPath $scriptsDirectory -Force
 }
 if ((Test-Path -LiteralPath $InstallRoot -PathType Container) -and
     @(Get-ChildItem -LiteralPath $InstallRoot -Force).Count -eq 0) {

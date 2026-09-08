@@ -5,6 +5,22 @@ description: Install, build, deploy, repair, and verify Codex Usage Card for Win
 
 # Codex Usage Card
 
+## 2.0 maintenance additions
+
+Version 2.0 adds settings and diagnostics, not an expandable quota-details panel or a usage-history database. Preserve the existing default card appearance and API remaining semantics. The official main number can switch between used and remaining; its title, progress accessibility values and layout invalidation checks must switch together. The transparency setting defaults to the previously requested blur and can explicitly follow system reduced transparency or use an opaque surface.
+
+Alerts use only sanitized quota data and a random helper-provided session scope. Never put credentials or account identifiers in browser storage. Low-quota and recovery alerts have independent switches. Cross-window state changes must run under Web Locks and recheck the active scope before publishing. Store only the latest deduplication state, not history. Official recovery requires a real response with a later reset window and increased remaining quota. Helper restart starts a new reminder scope; do not claim persistent per-account deduplication across restarts.
+
+Connect all discovered main pages, reuse server cooldowns across windows, and invalidate old in-flight requests when login files change. Keep a stable reminder scope for the same official account across token refreshes. Newly created windows in an attached browser are discovered through Target events, not polling.
+
+Do not queue historical console requests replayed by `Runtime.enable`. Continue queueing real requests while other CDP commands await replies. Preserve an unexpired 429 cooldown across configuration generations for the same account scope, while keeping normal response data generation-specific.
+
+The settings dialog invokes only the fixed read-only Doctor script through PowerShell 7 (the documented installation prerequisite, standard Program Files location). Ship `scripts/doctor.ps1` under the runtime install root as well as the Skill. Doctor must inspect every discovered window and report missing/unknown windows without hiding them behind another window's success. Return only whitelisted diagnostic fields to the page. Do not substitute Windows PowerShell 5.1: its .NET Framework WebSocket handshake is rejected by the tested Electron CDP endpoint.
+
+Installation must validate task identities before stopping anything, retain exact previous files and task XML under `backups`, and restore them if deployment or startup checks fail. Preserve unrelated files and backup directories on uninstall. Public installer tags and archive hashes change only when the actual release artifact is published.
+
+In addition to Python and JavaScript checks, run `node --test tests/native_patch_runtime.cjs` with the existing Playwright runtime, and run `tests/native_helper_regressions.ps1` and `tests/installer_regressions.ps1` in Windows PowerShell 5.1. Compile to an isolated candidate before stopping the exact deployed helper; retain the old executable before replacement.
+
 Use this skill to install the bundled helper on another Windows computer or maintain the existing implementation in a checked-out project. Treat the project as the source of truth; do not redesign the card or invent a second authentication flow.
 
 ## Install on another Windows computer

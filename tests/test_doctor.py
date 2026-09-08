@@ -1,4 +1,7 @@
 import unittest
+import json
+import shutil
+import subprocess
 from pathlib import Path
 
 
@@ -13,6 +16,39 @@ INSTALLER = (
 
 
 class DoctorContractTests(unittest.TestCase):
+    def test_doctor_checks_every_unique_window_and_reports_counts(self):
+        self.assertIn('foreach ($target in $targets)', ROOT_DOCTOR)
+        self.assertIn('Sort-Object WebSocketDebuggerUrl -Unique', ROOT_DOCTOR)
+        self.assertNotIn('$targets[0]', ROOT_DOCTOR)
+        self.assertNotIn('CDP_MAIN_PAGE_AMBIGUOUS', ROOT_DOCTOR)
+        for field in ('WindowCount', 'VisibleCardCount', 'UninspectedWindowCount'):
+            self.assertIn(field + ' = $', ROOT_DOCTOR)
+
+    @unittest.skipUnless(shutil.which('powershell.exe'), 'Windows PowerShell required')
+    def test_multiwindow_visibility_aggregation_preserves_missing_and_unknown(self):
+        start = ROOT_DOCTOR.index('if ($windowCount -gt 0) {')
+        end = ROOT_DOCTOR.index('$installed = ', start)
+        aggregate = ROOT_DOCTOR[start:end]
+        command = '''$ErrorActionPreference = 'Stop'
+$cases = @(@(2,2,0), @(2,1,0), @(2,1,1), @(2,0,1), @(2,0,2), @(0,0,0))
+$results = @(foreach ($case in $cases) {
+  $windowCount, $visibleCardCount, $uninspectedWindowCount = $case
+  $cardVisible = $null
+  $cardKinds = @('Api', 'Official')
+  $cardKind = $null
+''' + aggregate + '''
+  [pscustomobject]@{ visible = $cardVisible; kind = $cardKind }
+})
+ConvertTo-Json -Compress -InputObject $results
+'''
+        result = subprocess.run(
+            ['powershell.exe', '-NoProfile', '-Command', command],
+            capture_output=True, text=True, check=True, timeout=15,
+        )
+        values = json.loads(result.stdout)
+        self.assertEqual([row['visible'] for row in values], [True, False, None, False, None, None])
+        self.assertEqual(values[0]['kind'], 'Mixed')
+
     def test_root_and_skill_doctors_are_exact_mirrors(self):
         self.assertEqual(ROOT_DOCTOR, SKILL_DOCTOR)
 

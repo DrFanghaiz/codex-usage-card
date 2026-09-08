@@ -4,12 +4,12 @@ Codex Usage Card 在 Codex 桌面端侧栏账号行上方显示用量与剩余�
 
 ## 一键安装
 
-要求：Windows 11、PowerShell 7，以及能够正常启动的 Codex 桌面端。
+要求：Windows 11、PowerShell 7，以及能够正常启动的 Codex 桌面端。卡内自检使用标准安装位置 `%ProgramFiles%\PowerShell\7\pwsh.exe`。
 
 在 PowerShell 7 中运行：
 
 ```powershell
-$installer = Join-Path $env:TEMP 'install-codex-usage-card.ps1'; Invoke-WebRequest 'https://raw.githubusercontent.com/DrFanghaiz/codex-usage-card/v1.9.0/install.ps1' -OutFile $installer; Unblock-File -LiteralPath $installer; & $installer
+$installer = Join-Path $env:TEMP 'install-codex-usage-card.ps1'; Invoke-WebRequest 'https://raw.githubusercontent.com/DrFanghaiz/codex-usage-card/v2.0.0/install.ps1' -OutFile $installer; Unblock-File -LiteralPath $installer; & $installer
 ```
 
 安装器会校验发布包的 SHA-256，把 Skill 安装到 `$CODEX_HOME\skills`（未设置时为 `$env:USERPROFILE\.codex\skills`），把无窗口修复器部署到 `$env:LOCALAPPDATA\CodexUsageCard`，并注册当前用户的计划任务 `Codex Usage Card`。从旧版升级时，只迁移路径与动作完全匹配的旧任务。安装完成后会输出 `ActivationState`、`StageCodes` 和 `CardVisible` 等只读验收结果；Codex 未运行时显示等待状态，不把已完成安装误报为失败。
@@ -36,7 +36,20 @@ python "$env:USERPROFILE\.codex\skills\.system\skill-installer\scripts\install-s
 
 Codex 必须暴露本机调试端口，修复器才能向页面注入控件。安装或升级 Helper 前已经存在的无调试会话不会被强制关闭，需要关闭后重新从官方入口启动一次。若官方彻底删除调试入口、阻止启动参数或改变内部额度组件契约，修复器会明确失效，不会用猜测规则伪装成功。
 
-## 只读自检
+## 2.0 更新
+
+- 卡片右上角的设置按钮提供官方卡已用／剩余主数字、低额度提醒、恢复提醒、系统通知、提醒阈值、12 小时制和透明度设置。API 卡继续默认突出剩余量。保留当前模糊效果为默认，可选择跟随系统或不透明；高对比和强制颜色始终使用实色。
+- 默认剩余 20%、10% 提醒，各额度窗口分别去重；一次下降越过多档只提示一次。恢复提醒独立开关，官方模式需真实回包显示重置时间推进且额度增加，API 模式依据真实剩余比例回升。没有后台历史记录或趋势图，只保存当前提醒去重所需的最近状态。Helper 重启后随机会话标记更新，提醒重新计数。
+- 提醒在有可见 Codex 页面并收到额度更新时触发。设置与通知去重使用本机浏览器存储和 Web Locks；系统通知需显式开启，宿主未授权时仍保留卡内提示。页面全部隐藏时继续沿用停表策略，不承诺关闭客户端后的后台通知。
+- 官方与 API 明确区分刷新中、登录失效、服务端冷却及保留旧数据的失败状态；悬停卡片可查看最近成功更新时间。账号切换先隐藏旧数据，收到新会话数据后恢复；同账号令牌或配置更新不清空提醒去重状态。
+- 设置中可以运行只读自检、复制脱敏结果，以及打开公开最新版本说明。自检逐个检查 Codex 主窗口，全部卡片可见才报告成功，缺卡或未检查不会被其他窗口的成功掩盖。
+- Helper 同时连接发现的多个主窗口，并通过页面目标事件接入同进程新窗口；并发刷新复用 5 秒请求缓存，服务端限流跨窗口共享。单窗口断线会重新发现整组页面。独立新进程的额外调试端口在下一次发现时接入。
+- 重连时不会重放历史自检与刷新请求；同账号配置变化后仍遵循服务端未到期的冷却时间。
+- 安装器先核实精确任务身份，再备份旧文件和任务配置。复制或启动检查失败会恢复旧版；运行目录与 Skill 目录的 `backups` 保留回滚证据。安装完成和卡片实际可见分别报告。
+
+开发回归：`node --test tests/native_patch_runtime.cjs`（Playwright + Edge）；Windows PowerShell 5.1 运行 `tests/native_helper_regressions.ps1` 和 `tests/installer_regressions.ps1`。Python 测试继续使用下方命令。
+
+## 命令行自检
 
 安装后可随时运行：
 
@@ -54,7 +67,7 @@ Doctor 只检查精确计划任务、无窗口 Helper、Codex 本机调试页面
 & "$env:USERPROFILE\.codex\skills\codex-usage-card\scripts\uninstall.ps1"
 ```
 
-卸载脚本只删除该 Skill 部署的精确计划任务、进程和三个运行文件，不操作 Codex 客户端或其他进程。
+卸载脚本只删除该 Skill 部署的精确计划任务、进程、三个原生运行文件和自检脚本，保留 `backups`，不操作 Codex 客户端或其他进程。
 
 ## 开发验证
 
