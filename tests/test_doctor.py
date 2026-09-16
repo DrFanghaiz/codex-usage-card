@@ -70,7 +70,8 @@ ConvertTo-Json -Compress -InputObject $results
     def test_doctor_checks_the_real_visible_card_over_cdp(self):
         self.assertIn("ClientWebSocket", ROOT_DOCTOR)
         self.assertIn("method = 'Runtime.evaluate'", ROOT_DOCTOR)
-        self.assertIn("app://-/index.html", ROOT_DOCTOR)
+        self.assertIn("$item.url -eq 'app://-/index.html'", ROOT_DOCTOR)
+        self.assertNotIn("$item.title -match", ROOT_DOCTOR)
         self.assertIn("codex-api-usage-host", ROOT_DOCTOR)
         self.assertIn("codex-official-usage-host", ROOT_DOCTOR)
         self.assertIn(".codex-native-compact-usage", ROOT_DOCTOR)

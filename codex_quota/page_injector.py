@@ -1,7 +1,6 @@
 import argparse
 import json
 import os
-import re
 import subprocess
 import time
 from pathlib import Path
@@ -242,10 +241,7 @@ def _targets(port: int) -> list[dict[str, Any]]:
 
 
 def _is_codex_main_page(value: dict[str, Any]) -> bool:
-    return (
-        re.fullmatch(r"(ChatGPT|Codex)", str(value.get("title", "")), re.IGNORECASE) is not None
-        and value.get("url") == "app://-/index.html"
-    )
+    return value.get("url") == "app://-/index.html"
 
 
 def target_info(port: int) -> dict[str, Any]:

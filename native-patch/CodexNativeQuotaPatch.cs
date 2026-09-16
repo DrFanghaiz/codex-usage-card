@@ -23,6 +23,7 @@ internal static class CodexNativeQuotaPatch
     private static JavaScriptSerializer Json { get { return new JavaScriptSerializer(); } }
     private static string NativeScript;
     private static int NextCommandId;
+    private const int IoDeadlineMilliseconds = 15000;
     private static volatile string SessionScope = Guid.NewGuid().ToString("N");
     private static string LoginFingerprint;
     private static int SessionGeneration;
@@ -287,23 +288,42 @@ internal static class CodexNativeQuotaPatch
             // Page events are consumed so they cannot build up in the local socket buffer.
             var message = socket.PendingEvents.Count > 0 ? socket.PendingEvents.Dequeue() : socket.ReceiveText();
             if (socket.OnEvent != null) socket.OnEvent(message);
+            string requestId;
             if (IsConsoleRequest(message, "__codexQuotaDoctorRequest__"))
                 PublishDiagnosis(socket);
-            else if (official && IsConsoleRequest(message, "__codexQuotaOfficialRequest__"))
-                PublishOfficialPayload(socket);
-            else if (!official && IsConsoleRequest(message, "__codexQuotaApiRequest__"))
-                PublishApiPayload(socket, api);
+            else if (official && TryConsoleRequest(message, "__codexQuotaOfficialRequest__", out requestId))
+                PublishOfficialPayload(socket, requestId);
+            else if (!official && TryConsoleRequest(message, "__codexQuotaApiRequest__", out requestId))
+                PublishApiPayload(socket, api, requestId);
         }
     }
 
     private static bool IsConsoleRequest(string message, string name)
     {
+        string requestId;
+        return TryConsoleRequest(message, name, out requestId);
+    }
+
+    private static bool ValidRequestId(string value)
+    {
+        return value != null && value.Length <= 80 && Regex.IsMatch(value, "\\A[A-Za-z0-9-]+\\z");
+    }
+
+    private static bool TryConsoleRequest(string message, string name, out string requestId)
+    {
+        requestId = null;
         var root = Json.DeserializeObject(message) as Dictionary<string, object>;
         if (root == null || StringValue(root, "method") != "Runtime.consoleAPICalled") return false;
         var parameters = root.ContainsKey("params") ? root["params"] as Dictionary<string, object> : null;
         var args = parameters != null && parameters.ContainsKey("args") ? parameters["args"] as object[] : null;
-        var argument = args != null && args.Length == 1 ? args[0] as Dictionary<string, object> : null;
-        return argument != null && StringValue(argument, "type") == "string" && StringValue(argument, "value") == name;
+        var argument = args != null && (args.Length == 1 || args.Length == 2) ? args[0] as Dictionary<string, object> : null;
+        if (argument == null || StringValue(argument, "type") != "string" || StringValue(argument, "value") != name) return false;
+        if (args.Length == 1) return true; // Previous helpers/pages used a single marker.
+        if (name != "__codexQuotaOfficialRequest__" && name != "__codexQuotaApiRequest__") return false;
+        var id = args[1] as Dictionary<string, object>;
+        if (id == null || StringValue(id, "type") != "string" || !ValidRequestId(StringValue(id, "value"))) return false;
+        requestId = StringValue(id, "value");
+        return true;
     }
 
     private static Dictionary<string, object> HttpErrorPayload(int statusCode, string retryAfter, DateTimeOffset now)
@@ -327,6 +347,8 @@ internal static class CodexNativeQuotaPatch
 
     private static Dictionary<string, object> WebErrorPayload(WebException exception)
     {
+        if (exception.Status == WebExceptionStatus.Timeout)
+            return new Dictionary<string, object> { { "errorCode", "REQUEST_TIMEOUT" } };
         using (var response = exception.Response as HttpWebResponse)
             return HttpErrorPayload(response == null ? 0 : (int)response.StatusCode,
                 response == null ? null : response.Headers["Retry-After"], DateTimeOffset.UtcNow);
@@ -419,21 +441,32 @@ internal static class CodexNativeQuotaPatch
         Evaluate(socket, "globalThis.__codexQuotaUpdateDiagnosis(" + Json.Serialize(payload) + ")");
     }
 
-    private static bool PageDataRequested(CdpSocket socket, string name)
+    private static bool PageDataRequested(CdpSocket socket, string kind, out string requestId)
     {
-        var result = Evaluate(socket, "globalThis[" + Json.Serialize(name) + "] === true");
-        var value = result.ContainsKey("result") ? result["result"] as Dictionary<string, object> : null;
-        return value != null && value.ContainsKey("value") && value["value"] is bool && (bool)value["value"];
+        requestId = null;
+        var prefix = "__codexQuota" + kind;
+        var result = Evaluate(socket, "({needsData:globalThis[" + Json.Serialize(prefix + "NeedsData") + "]===true,id:globalThis[" +
+            Json.Serialize(prefix + "RequestId") + "]??null})");
+        var remote = result.ContainsKey("result") ? result["result"] as Dictionary<string, object> : null;
+        var value = remote != null && remote.ContainsKey("value") ? remote["value"] as Dictionary<string, object> : null;
+        if (value == null || !value.ContainsKey("needsData") || !(value["needsData"] is bool) || !(bool)value["needsData"]) return false;
+        object id;
+        if (value.TryGetValue("id", out id) && id != null)
+        {
+            if (!(id is string) || !ValidRequestId((string)id)) return false;
+            requestId = (string)id;
+        }
+        return true;
     }
 
-    private static void PublishOfficialPayload(CdpSocket socket)
+    private static void PublishOfficialPayload(CdpSocket socket, string requestId = null)
     {
-        Evaluate(socket, "globalThis.__codexQuotaUpdateOfficial(" + Json.Serialize(SharedPayload(null, true, socket.Scope, socket.Generation)) + ")");
+        Evaluate(socket, "globalThis.__codexQuotaUpdateOfficial(" + Json.Serialize(SharedPayload(null, true, socket.Scope, socket.Generation)) + "," + Json.Serialize(requestId) + ")");
     }
 
-    private static void PublishApiPayload(CdpSocket socket, ApiConfiguration api)
+    private static void PublishApiPayload(CdpSocket socket, ApiConfiguration api, string requestId = null)
     {
-        Evaluate(socket, "globalThis.__codexQuotaUpdateApi(" + Json.Serialize(SharedPayload(api, false, socket.Scope, socket.Generation)) + ")");
+        Evaluate(socket, "globalThis.__codexQuotaUpdateApi(" + Json.Serialize(SharedPayload(api, false, socket.Scope, socket.Generation)) + "," + Json.Serialize(requestId) + ")");
     }
 
     private static Dictionary<string, object> SharedPayload(ApiConfiguration api, bool official, string scope, int generation)
@@ -543,10 +576,7 @@ internal static class CodexNativeQuotaPatch
         request.ReadWriteTimeout = 10000;
         request.Accept = "application/json";
         request.Headers[HttpRequestHeader.Authorization] = "Bearer " + api.ApiKey;
-        Dictionary<string, object> response;
-        using (var http = (HttpWebResponse)request.GetResponse())
-        using (var reader = new StreamReader(http.GetResponseStream()))
-            response = Json.DeserializeObject(reader.ReadToEnd()) as Dictionary<string, object>;
+        var response = ReadQuotaResponse(request);
         if (response == null || !BooleanValue(response, "isValid")) throw new InvalidOperationException();
         var planName = StringValue(response, "planName");
         var unit = StringValue(response, "unit");
@@ -584,10 +614,7 @@ internal static class CodexNativeQuotaPatch
         request.Accept = "application/json";
         request.Headers[HttpRequestHeader.Authorization] = "Bearer " + official.AccessToken;
         request.Headers["ChatGPT-Account-ID"] = official.AccountId;
-        Dictionary<string, object> response;
-        using (var http = (HttpWebResponse)request.GetResponse())
-        using (var reader = new StreamReader(http.GetResponseStream()))
-            response = Json.DeserializeObject(reader.ReadToEnd()) as Dictionary<string, object>;
+        var response = ReadQuotaResponse(request);
         var planName = response == null ? "" : StringValue(response, "plan_type");
         var rateLimit = response != null && response.ContainsKey("rate_limit")
             ? response["rate_limit"] as Dictionary<string, object>
@@ -603,6 +630,28 @@ internal static class CodexNativeQuotaPatch
         if (primary != null) windows.Add(primary);
         if (secondary != null) windows.Add(secondary);
         return new Dictionary<string, object> { { "planName", planName }, { "windows", windows } };
+    }
+
+    private static Dictionary<string, object> ReadQuotaResponse(HttpWebRequest request)
+    {
+        using (var deadline = new CancellationTokenSource(IoDeadlineMilliseconds))
+        using (deadline.Token.Register(request.Abort))
+        {
+            try
+            {
+                using (var http = (HttpWebResponse)request.GetResponse())
+                using (var reader = new StreamReader(http.GetResponseStream()))
+                    return Json.DeserializeObject(reader.ReadToEnd()) as Dictionary<string, object>;
+            }
+            catch (Exception error)
+            {
+                // Only our elapsed deadline turns an aborted request/body read into a timeout.
+                var webError = error as WebException;
+                if (!deadline.IsCancellationRequested || !(error is IOException ||
+                    (webError != null && webError.Status == WebExceptionStatus.RequestCanceled))) throw;
+                throw new WebException("Quota request timed out", error, WebExceptionStatus.Timeout, null);
+            }
+        }
     }
 
     private static Dictionary<string, object> OfficialWindowPayload(
@@ -914,7 +963,6 @@ internal static class CodexNativeQuotaPatch
                             WebSocketDebuggerUrl = StringValue(item, "webSocketDebuggerUrl")
                         };
                         if (target.Type == "page" &&
-                            Regex.IsMatch(target.Title ?? "", "^(ChatGPT|Codex)$", RegexOptions.IgnoreCase) &&
                             String.Equals(target.Url, "app://-/index.html", StringComparison.OrdinalIgnoreCase) &&
                             !String.IsNullOrWhiteSpace(target.WebSocketDebuggerUrl))
                         {
@@ -976,26 +1024,31 @@ internal static class CodexNativeQuotaPatch
             { "method", method },
             { "params", parameters }
         };
-        socket.SendText(Json.Serialize(request));
-
-        while (true)
+        // Bound active commands, while idle page event listeners stay blocking and timer-free.
+        using (var deadline = new CancellationTokenSource(IoDeadlineMilliseconds))
+        using (deadline.Token.Register(socket.Close))
         {
-            var message = socket.ReceiveText();
-            var root = Json.DeserializeObject(message) as Dictionary<string, object>;
-            if (root == null || !root.ContainsKey("id"))
+            socket.SendText(Json.Serialize(request));
+
+            while (true)
             {
-                if (socket.OnEvent != null) socket.OnEvent(message);
-                // Runtime.enable replays console history; only queue requests from the live session.
-                if (method != "Runtime.enable" && (IsConsoleRequest(message, "__codexQuotaDoctorRequest__") ||
-                    IsConsoleRequest(message, "__codexQuotaOfficialRequest__") || IsConsoleRequest(message, "__codexQuotaApiRequest__")))
-                    socket.PendingEvents.Enqueue(message);
-                continue;
+                var message = socket.ReceiveText();
+                var root = Json.DeserializeObject(message) as Dictionary<string, object>;
+                if (root == null || !root.ContainsKey("id"))
+                {
+                    if (socket.OnEvent != null) socket.OnEvent(message);
+                    // Runtime.enable replays console history; only queue requests from the live session.
+                    if (method != "Runtime.enable" && (IsConsoleRequest(message, "__codexQuotaDoctorRequest__") ||
+                        IsConsoleRequest(message, "__codexQuotaOfficialRequest__") || IsConsoleRequest(message, "__codexQuotaApiRequest__")))
+                        socket.PendingEvents.Enqueue(message);
+                    continue;
+                }
+                if (Convert.ToInt32(root["id"]) != id) continue;
+                if (root.ContainsKey("error")) throw new InvalidOperationException("CDP command failed");
+                return root.ContainsKey("result")
+                    ? root["result"] as Dictionary<string, object> ?? new Dictionary<string, object>()
+                    : new Dictionary<string, object>();
             }
-            if (Convert.ToInt32(root["id"]) != id) continue;
-            if (root.ContainsKey("error")) throw new InvalidOperationException("CDP command failed");
-            return root.ContainsKey("result")
-                ? root["result"] as Dictionary<string, object> ?? new Dictionary<string, object>()
-                : new Dictionary<string, object>();
         }
     }
 
@@ -1031,7 +1084,6 @@ internal static class CodexNativeQuotaPatch
         var info = parameters != null && parameters.ContainsKey("targetInfo")
             ? parameters["targetInfo"] as Dictionary<string, object> : null;
         if (info == null || StringValue(info, "type") != "page" ||
-            !Regex.IsMatch(StringValue(info, "title"), "^(ChatGPT|Codex)$", RegexOptions.IgnoreCase) ||
             !String.Equals(StringValue(info, "url"), "app://-/index.html", StringComparison.OrdinalIgnoreCase)) return null;
         var id = StringValue(info, "targetId");
         if (!Regex.IsMatch(id, "^[A-Za-z0-9_-]+$")) return null;
@@ -1073,10 +1125,11 @@ internal static class CodexNativeQuotaPatch
                             ResetPageSession(socket);
                             SendCommand(socket, "Target.setDiscoverTargets", new Dictionary<string, object> { { "discover", true } });
                             InstallForCurrentAndFuturePages(socket, official ? "account" : "api");
-                            if (PageDataRequested(socket, official ? "__codexQuotaOfficialNeedsData" : "__codexQuotaApiNeedsData"))
+                            string requestId;
+                            if (PageDataRequested(socket, official ? "Official" : "Api", out requestId))
                             {
-                                if (official) PublishOfficialPayload(socket);
-                                else PublishApiPayload(socket, api);
+                                if (official) PublishOfficialPayload(socket, requestId);
+                                else PublishApiPayload(socket, api, requestId);
                             }
                             Ready.TrySetResult(true);
                             KeepSessionOpen(socket, api, official);

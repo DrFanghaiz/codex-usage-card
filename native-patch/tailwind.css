@@ -1,0 +1,4 @@
+/* Only component-prefixed utilities; never reset the host application's styles. */
+@import "tailwindcss/theme.css" prefix(cq) theme(inline);
+@import "tailwindcss/utilities.css" prefix(cq) source(none);
+@source "./native_patch.source.js";

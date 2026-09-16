@@ -1,0 +1,15 @@
+{
+  "name": "codex-usage-card-ui",
+  "private": true,
+  "scripts": {
+    "build": "node scripts/build_ui.mjs",
+    "build:check": "node scripts/build_ui.mjs --check"
+  },
+  "devDependencies": {
+    "@tailwindcss/cli": "4.3.3",
+    "esbuild": "0.28.2",
+    "lucide": "1.45.0",
+    "motion": "13.2.0",
+    "tailwindcss": "4.3.3"
+  }
+}
