@@ -26,6 +26,16 @@ $pageSessions = $source.Substring($start, $end - $start)
 $start = $source.IndexOf('    private static Dictionary<string, object> SendCommand(')
 $end = $source.IndexOf('    private static Dictionary<string, object> Evaluate(', $start)
 $sendCommand = $source.Substring($start, $end - $start)
+$start = $source.IndexOf('    private static bool PageDataRequested(')
+$end = $source.IndexOf('    private static Dictionary<string, object> SharedPayload(', $start)
+$publishMethods = $source.Substring($start, $end - $start)
+$start = $source.IndexOf('    private static Dictionary<string, object> FetchApiPayload(')
+$end = $source.IndexOf('    private static IWebProxy ApiProxy()', $start)
+$httpMethods = $source.Substring($start, $end - $start).Replace('FetchApiPayload(', 'FetchApiPayloadReal(').Replace('FetchOfficialPayload(', 'FetchOfficialPayloadReal(')
+$start = $source.IndexOf('    private static bool NumberValue(')
+$end = $source.IndexOf('    private static bool RelaunchNewDirectCodexProcess(', $start)
+$httpMethods += $source.Substring($start, $end - $start)
+if ($source -notmatch 'private const int IoDeadlineMilliseconds = 15000;') { throw 'Production I/O deadline changed; review test timing.' }
 $backoff = [regex]::Match($source, 'retrySeconds = Math\.Min\(retrySeconds \* 2, \d+\);').Value
 if (-not $backoff -or $source -notmatch 'if \(await sessions\.Ready\.Task\) retrySeconds = 1;') {
     throw 'Missing bounded backoff or successful-connect reset.'
@@ -49,6 +59,7 @@ public static class NativeHelperRegressions
 {
     private static JavaScriptSerializer Json { get { return new JavaScriptSerializer(); } }
     private static int NextCommandId;
+    private const int IoDeadlineMilliseconds = 150;
     private static readonly IOException LoginError = new IOException("Synthetic configuration read failure");
     private static string TestRoot;
     private static FileSystemWatcher LastWatcher;
@@ -56,8 +67,8 @@ public static class NativeHelperRegressions
     private static string SessionScope = "test-session";
     private static int SessionGeneration;
     private static int CachedPayloadGeneration;
-    private sealed class ApiConfiguration { }
-    private sealed class OfficialConfiguration { }
+    private sealed class ApiConfiguration { public string Url, ApiKey; }
+    private sealed class OfficialConfiguration { public string Url, AccessToken, AccountId; }
     private static readonly object PayloadGate = new object();
     private static string CachedPayloadScope;
     private static bool CachedPayloadOfficial;
@@ -82,6 +93,13 @@ public static class NativeHelperRegressions
     {
         public readonly string Url;
         public string RequestEvent;
+        public readonly string Scope = SessionScope;
+        public readonly int Generation = SessionGeneration;
+        public Dictionary<string, object> PageState;
+        public string LastExpression;
+        public bool Stall;
+        public bool Closed;
+        private readonly ManualResetEventSlim closedSignal = new ManualResetEventSlim();
         public readonly Queue<string> PendingEvents = new Queue<string>();
         private readonly Queue<string> replies = new Queue<string>();
         public void SendText(string request)
@@ -90,19 +108,49 @@ public static class NativeHelperRegressions
             if (RequestEvent != null) replies.Enqueue(RequestEvent);
             replies.Enqueue(Json.Serialize(new Dictionary<string, object> { { "id", value["id"] } }));
         }
-        public string ReceiveText() { return replies.Dequeue(); }
+        public string ReceiveText() { if (Stall) { closedSignal.Wait(); throw new IOException("Synthetic command timeout"); } return replies.Dequeue(); }
         public Action<string> OnEvent;
         public CdpSocket(string url) { Url = url; }
         public void Connect() { if (Interlocked.Increment(ref ConnectedPages) == 2) BothPages.Set(); }
-        public void Close() { ReleasePages.Set(); }
+        public void Close() { Closed = true; closedSignal.Set(); ReleasePages.Set(); }
         public void Dispose() { }
     }
     private static void ResetPageSession(CdpSocket socket) { }
 __SEND_COMMAND__
     private static void InstallForCurrentAndFuturePages(CdpSocket socket, string mode) { }
-    private static bool PageDataRequested(CdpSocket socket, string name) { return false; }
-    private static void PublishOfficialPayload(CdpSocket socket) { throw new Exception("No page quota request expected"); }
-    private static void PublishApiPayload(CdpSocket socket, ApiConfiguration api) { throw new Exception("No page quota request expected"); }
+__PUBLISH_METHODS__
+    private static Dictionary<string, object> Evaluate(CdpSocket socket, string expression)
+    {
+        socket.LastExpression = expression;
+        return new Dictionary<string, object> { { "result", new Dictionary<string, object> { { "value", socket.PageState } } } };
+    }
+    private static IWebProxy ApiProxy() { return null; }
+__HTTP_METHODS__
+    private static void CheckSlowBody(bool official)
+    {
+        var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        var url = "http://127.0.0.1:" + ((IPEndPoint)listener.LocalEndpoint).Port;
+        var server = Task.Run(() => {
+            try { using (var peer = listener.AcceptTcpClient()) {
+                var stream = peer.GetStream();
+                var headers = Encoding.ASCII.GetBytes("HTTP/1.1 200 OK\r\nContent-Length: 1000\r\nConnection: close\r\n\r\n");
+                stream.Write(headers, 0, headers.Length);
+                for (var i = 0; i < 30; i++) { Thread.Sleep(20); stream.WriteByte(32); stream.Flush(); }
+            } } catch (IOException) { }
+        });
+        var clock = Stopwatch.StartNew();
+        try {
+            try {
+                if (official) FetchOfficialPayloadReal(new OfficialConfiguration { Url = url, AccessToken = "synthetic", AccountId = "synthetic" });
+                else FetchApiPayloadReal(new ApiConfiguration { Url = url, ApiKey = "synthetic" });
+                throw new Exception("Slow response did not time out");
+            } catch (WebException error) {
+                Check((string)WebErrorPayload(error)["errorCode"] == "REQUEST_TIMEOUT", "Elapsed body deadline must report a retryable timeout");
+            }
+            Check(clock.ElapsedMilliseconds >= 100 && clock.ElapsedMilliseconds < 1000, "Whole-body deadline must bound drip-fed responses");
+        } finally { server.GetAwaiter().GetResult(); listener.Stop(); }
+    }
     private static void KeepSessionOpen(CdpSocket socket, ApiConfiguration api, bool official)
     {
         if (socket.Url.EndsWith("/first"))
@@ -153,8 +201,11 @@ __SEND_COMMAND__
                 if (mode != "headers")
                 {
                     var body = mode == "body" ? "[" :
-                        "[{\"type\":\"page\",\"title\":\"Codex\",\"url\":\"app://-/index.html\",\"webSocketDebuggerUrl\":\"ws://127.0.0.1/test\"}]";
+                        "[{\"type\":\"page\",\"title\":\"Task title changed\",\"url\":\"app://-/index.html\",\"webSocketDebuggerUrl\":\"ws://127.0.0.1/test\"}]";
                     if (mode == "multiple") body = body.Substring(0, body.Length - 1) + "," + body.Substring(1).Replace("/test", "/second");
+                    if (mode != "body") body = body.Substring(0, body.Length - 1) +
+                        ",{\"type\":\"page\",\"title\":\"Codex\",\"url\":\"app://-/index.html?initialRoute=overlay\",\"webSocketDebuggerUrl\":\"ws://127.0.0.1/overlay\"}," +
+                        "{\"type\":\"page\",\"title\":\"Codex\",\"url\":\"app://-/detached-window.html?initialRoute=task\",\"webSocketDebuggerUrl\":\"ws://127.0.0.1/detached\"}]";
                     var length = mode == "body" ? 999 : Encoding.UTF8.GetByteCount(body);
                     var bytes = Encoding.UTF8.GetBytes("HTTP/1.1 200 OK\r\nContent-Length: " + length + "\r\nConnection: close\r\n\r\n" + body);
                     peer.GetStream().Write(bytes, 0, bytes.Length);
@@ -171,7 +222,7 @@ __SEND_COMMAND__
             try
             {
                 var target = discovery.GetAwaiter().GetResult();
-                Check((mode == "success" || mode == "multiple") && target[0].Title == "Codex", mode + ": unexpected success");
+                Check((mode == "success" || mode == "multiple") && target[0].Title == "Task title changed", mode + ": unexpected success");
                 Check(target.Count == (mode == "multiple" ? 2 : 1), "All Codex windows must be discovered");
             }
             catch (InvalidOperationException error)
@@ -195,6 +246,9 @@ __SEND_COMMAND__
         Check((string)HttpErrorPayload(401, null, now)["errorCode"] == "AUTH_REQUIRED", "401 must require login");
         Check((string)HttpErrorPayload(403, null, now)["errorCode"] == "AUTH_REQUIRED", "403 must require login");
         Check((string)HttpErrorPayload(500, "30", now)["errorCode"] == "NETWORK_ERROR", "500 classification");
+        Check((string)WebErrorPayload(new WebException("synthetic", WebExceptionStatus.Timeout))["errorCode"] == "REQUEST_TIMEOUT", "Transport timeout classification");
+        Check((string)WebErrorPayload(new WebException("synthetic", WebExceptionStatus.RequestCanceled))["errorCode"] == "NETWORK_ERROR", "Unrelated cancellation is not a timeout");
+        Check((string)WebErrorPayload(new WebException("synthetic", WebExceptionStatus.ConnectFailure))["errorCode"] == "NETWORK_ERROR", "Connection failure is not a timeout");
         Check((int)HttpErrorPayload(429, "30", now)["retryAfterSeconds"] == 30, "Retry-After seconds");
         Check((int)HttpErrorPayload(429, now.AddSeconds(45).ToString("r"), now)["retryAfterSeconds"] == 45, "Retry-After date");
         Check((int)HttpErrorPayload(429, "0", now)["retryAfterSeconds"] == 1, "Retry-After zero must not spin");
@@ -214,6 +268,14 @@ __SEND_COMMAND__
             Check(replay.PendingEvents.Count == 1 && replay.PendingEvents.Dequeue() == consoleEvent,
                 "Live requests during commands must remain queued");
         }
+        string requestId;
+        var quotaEvent = consoleEvent.Replace("__codexQuotaDoctorRequest__", "__codexQuotaOfficialRequest__");
+        var correlated = quotaEvent.Replace("}]", "},{\"type\":\"string\",\"value\":\"nonce-7\"}]");
+        Check(TryConsoleRequest(correlated, "__codexQuotaOfficialRequest__", out requestId) && requestId == "nonce-7", "Quota event preserves original request ID");
+        foreach (var invalid in new[] { "", "unsafe_id", "nonce-7\n", new string('a', 81) })
+            Check(!TryConsoleRequest(correlated.Replace("nonce-7", invalid.Replace("\n", "\\n")), "__codexQuotaOfficialRequest__", out requestId), "Invalid request ID rejected");
+        Check(!TryConsoleRequest(correlated.Replace("__codexQuotaOfficialRequest__", "__codexQuotaDoctorRequest__"), "__codexQuotaDoctorRequest__", out requestId), "Doctor remains single-argument");
+        Check(TryConsoleRequest(quotaEvent, "__codexQuotaOfficialRequest__", out requestId) && requestId == null, "Legacy marker remains supported");
         var diagnosis = new Dictionary<string, object> {
             { "Installed", true }, { "TaskFound", true }, { "TaskActionMatches", true }, { "HelperFilePresent", true },
             { "HelperWindowless", true }, { "CodexRunning", true }, { "CdpEndpointFound", true }, { "MainPageFound", true },
@@ -229,8 +291,10 @@ __SEND_COMMAND__
         diagnosis["Installed"] = "secret";
         try { SanitizeDiagnosis(diagnosis); throw new Exception("Non-boolean diagnosis accepted"); }
         catch (InvalidOperationException) { }
-        var targetEvent = "{\"method\":\"Target.targetCreated\",\"params\":{\"targetInfo\":{\"targetId\":\"ABC123\",\"type\":\"page\",\"title\":\"Codex\",\"url\":\"app://-/index.html\"}}}";
+        var targetEvent = "{\"method\":\"Target.targetCreated\",\"params\":{\"targetInfo\":{\"targetId\":\"ABC123\",\"type\":\"page\",\"title\":\"Task title changed\",\"url\":\"app://-/index.html\"}}}";
         Check(TargetFromEvent(targetEvent, "ws://127.0.0.1:123/devtools/page/first").WebSocketDebuggerUrl == "ws://127.0.0.1:123/devtools/page/ABC123", "New Codex window event");
+        Check(TargetFromEvent(targetEvent.Replace("app://-/index.html", "app://-/index.html?initialRoute=overlay"), "ws://127.0.0.1:123/devtools/page/first") == null, "Overlay target ignored");
+        Check(TargetFromEvent(targetEvent.Replace("app://-/index.html", "app://-/detached-window.html?initialRoute=task"), "ws://127.0.0.1:123/devtools/page/first") == null, "Detached target ignored");
         Check(TargetFromEvent(targetEvent.Replace("app://-/index.html", "https://example.com"), "ws://127.0.0.1:123/devtools/page/first") == null, "Unrelated target ignored");
         Check(TargetFromEvent(targetEvent.Replace("ABC123", "../unsafe"), "ws://127.0.0.1:123/devtools/page/first") == null, "Unsafe target ID ignored");
         var fetches = new List<Task>();
@@ -291,6 +355,29 @@ __SEND_COMMAND__
             if (LastWatcher != null) LastWatcher.Dispose();
             Directory.Delete(TestRoot);
         }
+        using (var socket = new CdpSocket("synthetic")) {
+            socket.PageState = new Dictionary<string, object> { { "needsData", true }, { "id", "nonce-7" } };
+            Check(PageDataRequested(socket, "Official", out requestId) && requestId == "nonce-7", "Bootstrap preserves pending ID");
+            socket.PageState["id"] = "nonce-8";
+            PublishOfficialPayload(socket, requestId);
+            Check(socket.LastExpression.EndsWith(",\"nonce-7\")"), "Late official reply must echo original ID");
+            PublishApiPayload(socket, new ApiConfiguration(), requestId);
+            Check(socket.LastExpression.EndsWith(",\"nonce-7\")"), "Late API reply must echo original ID");
+            socket.PageState["id"] = "invalid_id";
+            Check(!PageDataRequested(socket, "Api", out requestId), "Bootstrap rejects malformed ID");
+            socket.PageState["id"] = null;
+            Check(PageDataRequested(socket, "Api", out requestId) && requestId == null, "Legacy bootstrap supported");
+            SendCommand(socket, "Runtime.evaluate", new Dictionary<string, object>());
+            Thread.Sleep(IoDeadlineMilliseconds * 2);
+            Check(!socket.Closed, "Completed command must cancel deadline");
+            socket.Stall = true;
+            var clock = Stopwatch.StartNew();
+            try { SendCommand(socket, "Runtime.evaluate", new Dictionary<string, object>()); throw new Exception("Stalled command succeeded"); }
+            catch (IOException) { }
+            Check(socket.Closed && clock.ElapsedMilliseconds >= 100 && clock.ElapsedMilliseconds < 1000, "Stalled command closes socket within deadline");
+        }
+        CheckSlowBody(false);
+        CheckSlowBody(true);
         CheckDiscovery("success");
         CheckDiscovery("multiple");
         CheckDiscovery("headers");
@@ -304,7 +391,7 @@ __SHARED_PAYLOAD__
 __PAGE_SESSIONS__
 }
 '@
-$harness = $harness.Replace('__BACKOFF__', $backoff).Replace('__DISCOVERY__', $discovery).Replace('__WATCHER__', $watcher).Replace('__PAYLOAD_METHODS__', $payloadMethods).Replace('__TARGET_EVENTS__', $targetEvents).Replace('__SHARED_PAYLOAD__', $sharedPayload).Replace('__PAGE_SESSIONS__', $pageSessions).Replace('__SEND_COMMAND__', $sendCommand)
+$harness = $harness.Replace('__BACKOFF__', $backoff).Replace('__DISCOVERY__', $discovery).Replace('__WATCHER__', $watcher).Replace('__PAYLOAD_METHODS__', $payloadMethods).Replace('__TARGET_EVENTS__', $targetEvents).Replace('__SHARED_PAYLOAD__', $sharedPayload).Replace('__PAGE_SESSIONS__', $pageSessions).Replace('__SEND_COMMAND__', $sendCommand).Replace('__PUBLISH_METHODS__', $publishMethods).Replace('__HTTP_METHODS__', $httpMethods)
 Add-Type -TypeDefinition $harness -ReferencedAssemblies System.dll, System.Core.dll, System.Web.Extensions.dll
 [NativeHelperRegressions]::Run()
-'Native helper regressions: 14 groups passed, 0 failed (backoff, watcher cleanup, 4 discovery cases, HTTP errors, console requests, diagnosis sanitization, invalid diagnosis, new window events, shared fetch/cache/cooldown, page session scheduling, console history replay)'
+'Native helper regressions: 18 groups passed, 0 failed (backoff, watcher cleanup, 4 discovery cases, HTTP errors, console requests, diagnosis sanitization, invalid diagnosis, new window events, shared fetch/cache/cooldown, page session scheduling, console history replay, request IDs, bootstrap and reply correlation, CDP deadline, HTTP whole-body deadlines)'

@@ -6,6 +6,8 @@ $testRoot = Join-Path $workspace ('.runtime-test\installer-' + [Guid]::NewGuid()
 $installer = Join-Path $workspace 'skills\codex-usage-card\scripts\install.ps1'
 $fileNames = @('CodexNativeQuotaPatch.cs', 'CodexNativeQuotaPatch.next.exe', 'native_patch.js')
 function Assert($Condition, $Message) { if (-not $Condition) { throw $Message } }
+$global:installerTest_expectedSha256 = [regex]::Match((Get-Content -LiteralPath (Join-Path $workspace 'install.ps1') -Raw), '\$expectedSha256\s*=\s*''([0-9A-Fa-f]{64})''').Groups[1].Value
+Assert ($global:installerTest_expectedSha256.Length -eq 64) 'Release archive hash was not found in install.ps1'
 function Get-ScheduledTask {
   param($TaskPath, $TaskName, $ErrorAction)
   if ($TaskName -eq 'Codex Quota Card Repair') {
@@ -66,7 +68,7 @@ function Copy-Item {
   Microsoft.PowerShell.Management\Copy-Item -LiteralPath $LiteralPath -Destination $Destination -Force:$Force
 }
 function Invoke-WebRequest { param($Uri, $OutFile) Set-Content -LiteralPath $OutFile -Value 'isolated archive' }
-function Get-FileHash { param($LiteralPath, $Algorithm) [pscustomobject]@{ Hash = '902072E64338B2DEA408B213DF21C3F60B84E063C7D6B628D1E946837C8C19D3' } }
+function Get-FileHash { param($LiteralPath, $Algorithm) [pscustomobject]@{ Hash = $global:installerTest_expectedSha256 } }
 function Unblock-File { param($LiteralPath) }
 function Expand-Archive {
   param($LiteralPath, $DestinationPath)

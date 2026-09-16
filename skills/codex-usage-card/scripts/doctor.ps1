@@ -150,7 +150,6 @@ if (-not $codexInspectionFailed -and -not $codexRunning) {
             $cdpEndpointFound = $true
             foreach ($item in $items) {
               if ($item.type -eq 'page' -and
-                  $item.title -match '^(ChatGPT|Codex)$' -and
                   $item.url -eq 'app://-/index.html' -and
                   -not [String]::IsNullOrWhiteSpace($item.webSocketDebuggerUrl)) {
                 $targets += [pscustomobject]@{

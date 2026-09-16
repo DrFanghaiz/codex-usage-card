@@ -17,6 +17,7 @@ ROOT_INSTALL_SCRIPT = (ROOT / "install.ps1").read_text(encoding="utf-8")
 class NativeHelperTests(unittest.TestCase):
     def test_codex_update_recovery_is_version_independent(self):
         self.assertNotIn("WindowsApps", NATIVE_SOURCE)
+        self.assertNotIn("^(ChatGPT|Codex)$", NATIVE_SOURCE)
         self.assertIn('Process.GetProcessesByName("ChatGPT")', NATIVE_SOURCE)
         self.assertIn("FindListeningPortsAsync(processIds)", NATIVE_SOURCE)
         self.assertIn('String.Equals(target.Url, "app://-/index.html"', NATIVE_SOURCE)
