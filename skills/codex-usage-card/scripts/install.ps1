@@ -2,6 +2,7 @@
 param(
   [string]$TaskName = 'Codex Usage Card',
   [string]$InstallRoot = (Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'CodexUsageCard'),
+  [string]$ShortcutPath = (Join-Path ([Environment]::GetFolderPath('DesktopDirectory')) ('Codex' + [char]0xff08 + [char]0x989d + [char]0x5ea6 + [char]0x5361 + [char]0xff09 + '.lnk')),
   [switch]$SkipTaskRegistration
 )
 
@@ -73,7 +74,25 @@ $taskActionMatches = {
 
 $existingTask = $null
 $legacyTask = $null
+$existingShortcut = $false
+$shortcutMatches = {
+  param($Shortcut)
+  return -not [String]::IsNullOrWhiteSpace($Shortcut.TargetPath) -and
+    -not [String]::IsNullOrWhiteSpace($Shortcut.WorkingDirectory) -and
+    [String]::Equals([IO.Path]::GetFullPath($Shortcut.TargetPath), $executable, [StringComparison]::OrdinalIgnoreCase) -and
+    [String]::Equals([IO.Path]::GetFullPath($Shortcut.WorkingDirectory), $installDirectory, [StringComparison]::OrdinalIgnoreCase) -and
+    $Shortcut.Arguments -ceq '--launch'
+}
 if (-not $SkipTaskRegistration) {
+  $ShortcutPath = [IO.Path]::GetFullPath($ShortcutPath)
+  if ([IO.Path]::GetExtension($ShortcutPath) -ine '.lnk') { throw 'ShortcutPath must be a .lnk file.' }
+  $shortcutShell = New-Object -ComObject WScript.Shell
+  $existingShortcut = Test-Path -LiteralPath $ShortcutPath
+  if ($existingShortcut -and
+      (-not (Test-Path -LiteralPath $ShortcutPath -PathType Leaf) -or
+       -not (& $shortcutMatches ($shortcutShell.CreateShortcut($ShortcutPath))))) {
+    throw ('The existing shortcut does not match this installation and was not changed: {0}' -f $ShortcutPath)
+  }
   $existingTask = Get-ScheduledTask -TaskPath '\' -TaskName $TaskName -ErrorAction SilentlyContinue
   if ($existingTask) {
     if ($existingTask.Actions.Count -ne 1) {
@@ -99,6 +118,9 @@ if (-not $SkipTaskRegistration) {
 
 $backupDirectory = Join-Path $InstallRoot ('backups\' + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $backupDirectory -Force | Out-Null
+if ($existingShortcut) {
+  Copy-Item -LiteralPath $ShortcutPath -Destination (Join-Path $backupDirectory 'launch-shortcut.lnk')
+}
 foreach ($file in $deploymentFiles) {
   $installedPath = Join-Path $InstallRoot $file.Relative
   if (Test-Path -LiteralPath $installedPath -PathType Leaf) {
@@ -119,6 +141,7 @@ $taskChanged = $false
 $legacyChanged = $false
 $processesStopped = $false
 $filesChanged = $false
+$shortcutCreated = $false
 try {
   if (-not $SkipTaskRegistration) {
     $processesStopped = $true
@@ -140,6 +163,19 @@ try {
       TaskRegistered = $false
     } | Format-List
     return
+  }
+
+  if (-not $existingShortcut) {
+    $stagedShortcut = Join-Path $backupDirectory 'new-launch-shortcut.lnk'
+    $shortcut = $shortcutShell.CreateShortcut($stagedShortcut)
+    $shortcut.TargetPath = $executable
+    $shortcut.Arguments = '--launch'
+    $shortcut.WorkingDirectory = $installDirectory
+    $shortcut.Description = 'Launch Codex with the usage card.'
+    $shortcut.Save()
+    New-Item -ItemType Directory -Path (Split-Path -Parent $ShortcutPath) -Force | Out-Null
+    Move-Item -LiteralPath $stagedShortcut -Destination $ShortcutPath
+    $shortcutCreated = $true
   }
 
   $userId = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
@@ -179,13 +215,16 @@ try {
   }
   $running = @(Get-CimInstance Win32_Process | Where-Object {
     $_.ExecutablePath -and
+    $_.CommandLine -cnotmatch '(?:^|\s)(?:--launch|"--launch")\s*\z' -and
     [String]::Equals([IO.Path]::GetFullPath($_.ExecutablePath), $executable, [StringComparison]::OrdinalIgnoreCase)
   })
   if ($running.Count -ne 1) {
     throw ('Expected one helper process, found {0}.' -f $running.Count)
   }
-  $windowHandle = (Get-Process -Id $running[0].ProcessId).MainWindowHandle
-  if ($windowHandle -ne 0) {
+  $helperProcess = Get-Process -Id $running[0].ProcessId
+  $windowHandle = $helperProcess.MainWindowHandle
+  $startupPromptVisible = $windowHandle -ne 0 -and $helperProcess.MainWindowTitle -cmatch '\A\u52a0\u8f7d Codex \u989d\u5ea6\u5361\z'
+  if ($windowHandle -ne 0 -and -not $startupPromptVisible) {
     throw 'The helper unexpectedly created a window.'
   }
   $diagnosis = & (Join-Path $PSScriptRoot 'doctor.ps1') -TaskName $TaskName -InstallRoot $InstallRoot
@@ -199,6 +238,12 @@ try {
 } catch {
   $installFailure = $_
   try {
+    if ($shortcutCreated -and (Test-Path -LiteralPath $ShortcutPath)) {
+      if (-not (& $shortcutMatches ($shortcutShell.CreateShortcut($ShortcutPath)))) {
+        throw 'Shortcut identity changed during installation; refusing to remove it during rollback.'
+      }
+      Remove-Item -LiteralPath $ShortcutPath -Force
+    }
     if ($taskChanged) {
       $rollbackTask = Get-ScheduledTask -TaskPath '\' -TaskName $TaskName -ErrorAction SilentlyContinue
       if ($rollbackTask) {
@@ -247,6 +292,7 @@ try {
 [pscustomobject]@{
   Installed = $true
   InstallRoot = $InstallRoot
+  ShortcutPath = $ShortcutPath
   TaskName = $TaskName
   TaskState = $task.State
   ProcessId = $running[0].ProcessId
@@ -257,6 +303,7 @@ try {
   TaskActionMatches = $diagnosis.TaskActionMatches
   HelperProcessCount = $diagnosis.HelperProcessCount
   HelperWindowless = $diagnosis.HelperWindowless
+  StartupPromptVisible = $diagnosis.StartupPromptVisible
   CodexRunning = $diagnosis.CodexRunning
   CdpEndpointFound = $diagnosis.CdpEndpointFound
   MainPageFound = $diagnosis.MainPageFound

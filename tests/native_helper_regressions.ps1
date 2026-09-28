@@ -33,7 +33,7 @@ $start = $source.IndexOf('    private static Dictionary<string, object> FetchApi
 $end = $source.IndexOf('    private static IWebProxy ApiProxy()', $start)
 $httpMethods = $source.Substring($start, $end - $start).Replace('FetchApiPayload(', 'FetchApiPayloadReal(').Replace('FetchOfficialPayload(', 'FetchOfficialPayloadReal(')
 $start = $source.IndexOf('    private static bool NumberValue(')
-$end = $source.IndexOf('    private static bool RelaunchNewDirectCodexProcess(', $start)
+$end = $source.IndexOf('    private static void LaunchCodex()', $start)
 $httpMethods += $source.Substring($start, $end - $start)
 if ($source -notmatch 'private const int IoDeadlineMilliseconds = 15000;') { throw 'Production I/O deadline changed; review test timing.' }
 $backoff = [regex]::Match($source, 'retrySeconds = Math\.Min\(retrySeconds \* 2, \d+\);').Value
@@ -285,6 +285,16 @@ __HTTP_METHODS__
         var safe = SanitizeDiagnosis(diagnosis);
         Check((string)safe["ActivationState"] == "Active" && (int)safe["HelperProcessCount"] == 1, "Doctor valid values preserved");
         Check(!Json.Serialize(safe).Contains("secret"), "Doctor must not expose arbitrary values");
+        diagnosis["StartupPromptVisible"] = true;
+        diagnosis["ActivationState"] = "AwaitingStartupDecision";
+        diagnosis["StageCodes"] = new object[] { "STARTUP_CONFIRMATION_PENDING", "secret" };
+        safe = SanitizeDiagnosis(diagnosis);
+        Check((bool)safe["StartupPromptVisible"] && (string)safe["ActivationState"] == "AwaitingStartupDecision" &&
+            Json.Serialize(safe["StageCodes"]) == "[\"STARTUP_CONFIRMATION_PENDING\"]", "Expected startup interaction survives diagnosis sanitization");
+        diagnosis["StartupPromptVisible"] = "secret";
+        try { SanitizeDiagnosis(diagnosis); throw new Exception("Non-boolean startup prompt accepted"); }
+        catch (InvalidOperationException) { }
+        diagnosis.Remove("StartupPromptVisible");
         diagnosis["ActivationState"] = "secret";
         diagnosis["CardKind"] = "secret";
         Check(!Json.Serialize(SanitizeDiagnosis(diagnosis)).Contains("secret"), "Doctor string fields are allowlisted");
