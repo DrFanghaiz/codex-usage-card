@@ -23,29 +23,35 @@ class NativeHelperTests(unittest.TestCase):
         self.assertIn('String.Equals(target.Url, "app://-/index.html"', NATIVE_SOURCE)
 
     def test_codex_restart_wait_is_event_driven(self):
-        self.assertIn("ManagementEventWatcher", NATIVE_SOURCE)
-        self.assertIn("Win32_ProcessStartTrace", NATIVE_SOURCE)
-        self.assertIn("if (IsCodexRunning()) return", NATIVE_SOURCE)
+        self.assertIn("SetWinEventHook", NATIVE_SOURCE)
+        self.assertIn("GetMessage(out message", NATIVE_SOURCE)
+        self.assertNotIn("Win32_ProcessStartTrace", NATIVE_SOURCE)
+        self.assertIn("if (InspectCodexStartup()) return", NATIVE_SOURCE)
 
-    def test_direct_codex_start_is_relaunched_once_with_loopback_cdp(self):
-        self.assertIn("var observedCodexProcesses = new HashSet<string>();", NATIVE_SOURCE)
-        self.assertIn("ProcessId, CreationDate, ExecutablePath, CommandLine", NATIVE_SOURCE)
-        self.assertNotIn("observedProcessIds.RemoveWhere", NATIVE_SOURCE)
+    def test_legacy_startup_restarts_only_new_unconnected_roots(self):
+        self.assertIn("ObservedCodexRoots.Add(process.Identity)", NATIVE_SOURCE)
+        self.assertIn("if (ObservedCodexRoots.Contains(root.Identity)) continue", NATIVE_SOURCE)
+        self.assertIn("if (!ObservedCodexRoots.Add(root.Identity)) return", NATIVE_SOURCE)
+        self.assertIn("RelaunchWithRemoteDebugging(root)", NATIVE_SOURCE)
         self.assertIn('StartsWith("OpenAI.Codex_", StringComparison.OrdinalIgnoreCase)', NATIVE_SOURCE)
         self.assertIn('Regex.IsMatch(commandLine, "(?:^|\\\\s)--type="', NATIVE_SOURCE)
-        self.assertIn("!observedProcesses.Add(process.Identity)", NATIVE_SOURCE)
-        self.assertIn("HasRemoteDebuggingPort(process.CommandLine)", NATIVE_SOURCE)
+        self.assertIn('args[0] == "--launch"', NATIVE_SOURCE)
+        self.assertLess(NATIVE_SOURCE.index("if (launchRequested)"), NATIVE_SOURCE.index('Local\\CodexUsageCard.Helper'))
         self.assertIn("--remote-debugging-address=127.0.0.1", NATIVE_SOURCE)
         self.assertIn("--remote-debugging-port=", NATIVE_SOURCE)
         self.assertIn("--remote-allow-origins=http://127.0.0.1:", NATIVE_SOURCE)
-        self.assertIn("ProcThreadAttributeParentProcess", NATIVE_SOURCE)
-        self.assertIn("ExtendedStartupInfoPresent", NATIVE_SOURCE)
-        self.assertIn('Process.GetProcessesByName("explorer")', NATIVE_SOURCE)
+        self.assertIn("activation.ActivateApplication(appId, arguments, 0, out processId)", NATIVE_SOURCE)
+        self.assertIn("CoCreateInstance(ref classId, IntPtr.Zero, 4, ref interfaceId, out activation)", NATIVE_SOURCE)
+        self.assertIn("Get-AppxPackageManifest", NATIVE_SOURCE)
+        self.assertNotIn("ProcThreadAttributeParentProcess", NATIVE_SOURCE)
         self.assertNotIn("using (var replacement = Process.Start(startInfo))", NATIVE_SOURCE)
-        self.assertLess(
-            NATIVE_SOURCE.index("Codex process identity changed before relaunch"),
-            NATIVE_SOURCE.index("process.Kill()", NATIVE_SOURCE.index("private static void RelaunchWithRemoteDebugging")),
-        )
+        launch = NATIVE_SOURCE[NATIVE_SOURCE.index("private static void LaunchCodex()"):NATIVE_SOURCE.index("private static string FindInstalledCodexAppId()")]
+        self.assertIn("process.Kill()", launch)
+        self.assertIn("process.WaitForExit(5000)", launch)
+        self.assertIn("process.StartTime.ToUniversalTime().Ticks / 10 != expectedTicks / 10", launch)
+        self.assertNotIn("StartupPromptPanel.Show", NATIVE_SOURCE)
+        self.assertNotIn("CloseMainWindow()", launch)
+        self.assertIn("Get-AppxPackage -Name OpenAI.Codex", NATIVE_SOURCE)
 
     def test_official_usage_is_fetched_by_the_helper_and_only_payload_enters_the_page(self):
         self.assertIn("https://chatgpt.com/backend-api/wham/usage", NATIVE_SOURCE)
@@ -126,10 +132,10 @@ class NativeHelperTests(unittest.TestCase):
                 "Unregister-ScheduledTask -TaskPath '\\' -TaskName $legacyTaskName"
             ),
         )
-        self.assertIn("$releaseTag = 'v2.0.0'", ROOT_INSTALL_SCRIPT)
+        self.assertIn("$releaseTag = 'v2.2.0'", ROOT_INSTALL_SCRIPT)
         self.assertIn("$archiveName = 'codex-usage-card.skill.zip'", ROOT_INSTALL_SCRIPT)
         self.assertIn("'scripts\\doctor.ps1'", ROOT_INSTALL_SCRIPT)
-        self.assertIn("902072E64338B2DEA408B213DF21C3F60B84E063C7D6B628D1E946837C8C19D3", ROOT_INSTALL_SCRIPT)
+        self.assertIn("B1F4FEA43705C3A85E52B7E046A6A30E102504ECDB1C482CFD9069EB108E2587", ROOT_INSTALL_SCRIPT)
 
 
 if __name__ == "__main__":

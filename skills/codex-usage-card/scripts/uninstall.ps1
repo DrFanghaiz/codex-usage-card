@@ -1,13 +1,24 @@
 [CmdletBinding()]
 param(
   [string]$TaskName = 'Codex Usage Card',
-  [string]$InstallRoot = (Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'CodexUsageCard')
+  [string]$InstallRoot = (Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'CodexUsageCard'),
+  [string]$ShortcutPath = (Join-Path ([Environment]::GetFolderPath('DesktopDirectory')) ('Codex' + [char]0xff08 + [char]0x989d + [char]0x5ea6 + [char]0x5361 + [char]0xff09 + '.lnk'))
 )
 
 $ErrorActionPreference = 'Stop'
 $InstallRoot = [IO.Path]::GetFullPath($InstallRoot)
 $installDirectory = Join-Path $InstallRoot 'native-patch'
 $executable = Join-Path $installDirectory 'CodexNativeQuotaPatch.next.exe'
+$ShortcutPath = [IO.Path]::GetFullPath($ShortcutPath)
+$shortcutMatches = $false
+if (Test-Path -LiteralPath $ShortcutPath -PathType Leaf) {
+  $shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut($ShortcutPath)
+  $shortcutMatches = -not [String]::IsNullOrWhiteSpace($shortcut.TargetPath) -and
+    -not [String]::IsNullOrWhiteSpace($shortcut.WorkingDirectory) -and
+    [String]::Equals([IO.Path]::GetFullPath($shortcut.TargetPath), $executable, [StringComparison]::OrdinalIgnoreCase) -and
+    [String]::Equals([IO.Path]::GetFullPath($shortcut.WorkingDirectory), $installDirectory, [StringComparison]::OrdinalIgnoreCase) -and
+    $shortcut.Arguments -ceq '--launch'
+}
 $taskActionMatches = {
   param($Task, [string]$ExpectedExecutable)
   if ($Task.Actions.Count -ne 1) { return $false }
@@ -44,6 +55,8 @@ foreach ($process in $matchingProcesses) {
     throw ('Helper process did not exit: {0}' -f $nativeProcess.Id)
   }
 }
+
+if ($shortcutMatches) { Remove-Item -LiteralPath $ShortcutPath -Force }
 
 foreach ($fileName in @('CodexNativeQuotaPatch.cs', 'CodexNativeQuotaPatch.next.exe', 'native_patch.js')) {
   $path = Join-Path $installDirectory $fileName

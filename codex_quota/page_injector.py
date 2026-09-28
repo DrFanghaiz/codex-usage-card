@@ -357,12 +357,34 @@ def inject(port: int, payload: dict[str, Any] | None = None) -> None:
 
 
 def card_present(port: int, target: dict[str, Any] | None = None) -> bool:
-    """Return whether either the official or API quota card is present."""
+    """Return whether a quota entry or a supported legacy card is visible."""
     connection = _connect(target or target_info(port))
     try:
         value = _evaluate(
             connection,
             """(() => {
+              const trigger = document.getElementById('codex-quota-trigger');
+              const triggerVisible = (element) => {
+                if (!element.isConnected) return false;
+                for (let ancestor = element; ancestor instanceof HTMLElement; ancestor = ancestor.parentElement) {
+                  const style = getComputedStyle(ancestor);
+                  if (ancestor.hidden || ancestor.inert || style.display === 'none' ||
+                      style.visibility === 'hidden' || style.visibility === 'collapse' ||
+                      Number(style.opacity) === 0) return false;
+                }
+                const rect = element.getBoundingClientRect();
+                return rect.width > 0 && rect.height > 0 && rect.right > 0 && rect.bottom > 0 &&
+                  rect.left < innerWidth && rect.top < innerHeight;
+              };
+              if (trigger && trigger instanceof HTMLButtonElement &&
+                  trigger.getAttribute('aria-controls') === 'codex-quota-popover' &&
+                  ['api', 'official'].includes(trigger.getAttribute('data-cq-kind')) && triggerVisible(trigger)) {
+                const popover = document.getElementById('codex-quota-popover');
+                if (popover instanceof HTMLElement && popover.isConnected) {
+                  return true;
+                }
+              }
+              if (trigger) return false;
               const visible = (element) => element instanceof HTMLElement && !element.hidden && element.offsetParent !== null;
               const api = document.getElementById('codex-api-usage-host');
               if (visible(api) && api.querySelector('.codex-native-compact-usage-content')) return true;
