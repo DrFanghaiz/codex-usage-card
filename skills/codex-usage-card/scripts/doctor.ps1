@@ -254,18 +254,14 @@ if (-not $codexInspectionFailed -and -not $codexRunning) {
   };
   if (trigger && trigger instanceof HTMLButtonElement &&
       trigger.getAttribute('aria-controls') === 'codex-quota-popover' &&
-      ['api', 'official'].includes(trigger.getAttribute('data-cq-kind')) && triggerVisible(trigger)) {
+      trigger.getAttribute('data-cq-kind') === 'official' && triggerVisible(trigger)) {
     const popover = document.getElementById('codex-quota-popover');
     if (popover instanceof HTMLElement && popover.isConnected) {
-      return {visible: true, kind: trigger.getAttribute('data-cq-kind') === 'api' ? 'Api' : 'Official'};
+      return {visible: true, kind: 'Official'};
     }
   }
   if (trigger) return {visible: false, kind: null};
   const visible = (element) => element instanceof HTMLElement && !element.hidden && element.offsetParent !== null;
-  const api = document.getElementById('codex-api-usage-host');
-  if (visible(api) && api.querySelector('.codex-native-compact-usage-content')) {
-    return {visible: true, kind: 'Api'};
-  }
   const fallback = document.getElementById('codex-official-usage-host');
   if (visible(fallback) && fallback.querySelector('[data-cq-layout="thread-v2"], [data-cq-layout="thread-v2-fallback"], .cq-compact-fallback')) {
     return {visible: true, kind: 'Official'};

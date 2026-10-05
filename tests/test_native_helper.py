@@ -62,15 +62,15 @@ class NativeHelperTests(unittest.TestCase):
         self.assertIn('"resetAt"', NATIVE_SOURCE)
         self.assertNotIn("Console.WriteLine", NATIVE_SOURCE)
 
-    def test_complete_official_login_precedes_api_and_partial_official_login_waits(self):
+    def test_only_complete_official_login_is_accepted_and_no_api_key_is_read(self):
         self.assertIn(
             """            var account = LoadOfficialConfiguration();
-            official = account != null;
-            if (!official) api = LoadApiConfiguration();
-            if (!official && api == null) return false;""",
+            if (account == null) return false;""",
             NATIVE_SOURCE,
         )
-        self.assertNotIn("return official != (api != null);", NATIVE_SOURCE)
+        for removed in ("LoadApiConfiguration", "FetchApiPayload", "ApiConfiguration", "OPENAI_API_KEY", "__codexQuotaUpdateApi", "__codexQuotaApiRequest__"):
+            self.assertNotIn(removed, NATIVE_SOURCE)
+        self.assertIn('String.Equals(mode, "apikey", StringComparison.OrdinalIgnoreCase)', NATIVE_SOURCE)
         self.assertIn('!auth.ContainsKey("tokens") || auth["tokens"] == null', NATIVE_SOURCE)
         self.assertIn("if (tokens == null) throw new InvalidOperationException();", NATIVE_SOURCE)
         self.assertIn(
@@ -132,10 +132,10 @@ class NativeHelperTests(unittest.TestCase):
                 "Unregister-ScheduledTask -TaskPath '\\' -TaskName $legacyTaskName"
             ),
         )
-        self.assertIn("$releaseTag = 'v2.2.0'", ROOT_INSTALL_SCRIPT)
+        self.assertIn("$releaseTag = 'v2.3.0'", ROOT_INSTALL_SCRIPT)
         self.assertIn("$archiveName = 'codex-usage-card.skill.zip'", ROOT_INSTALL_SCRIPT)
         self.assertIn("'scripts\\doctor.ps1'", ROOT_INSTALL_SCRIPT)
-        self.assertIn("B1F4FEA43705C3A85E52B7E046A6A30E102504ECDB1C482CFD9069EB108E2587", ROOT_INSTALL_SCRIPT)
+        self.assertIn("E3BFBF7B61434DBB44A06646A60C2F4D821F2A93DB1F1FE65951D5BD3BD47E61", ROOT_INSTALL_SCRIPT)
 
 
 if __name__ == "__main__":

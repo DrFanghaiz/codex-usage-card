@@ -77,157 +77,6 @@ NATIVE_QUOTA_SCRIPT = (
 ).read_text(encoding="utf-8")
 
 
-# Rollback-only renderer retained for older API-mode installs. The active path
-# never creates this DOM and instead enables the client's own quota component.
-CARD_SCRIPT = r"""
-(() => {
-  const hostId = "codex-quota-card-host";
-  const accountButton = [...document.querySelectorAll('button[aria-label="打开个人资料菜单"]')]
-    .find((button) => button instanceof HTMLElement && button.offsetParent !== null);
-  if (!accountButton) throw new Error("account menu not found");
-  let footer = accountButton;
-  while (footer && footer !== document.body) {
-    const style = getComputedStyle(footer);
-    if (style.position === "absolute" && style.bottom === "0px") break;
-    footer = footer.parentElement;
-  }
-  if (!footer || footer === document.body) throw new Error("account footer not found");
-  let accountBar = accountButton;
-  while (accountBar.parentElement && accountBar.parentElement !== footer) {
-    accountBar = accountBar.parentElement;
-  }
-  if (accountBar.parentElement !== footer) throw new Error("account footer row not found");
-  let host = document.getElementById(hostId);
-  if (!host) {
-    host = document.createElement("div");
-    host.id = hostId;
-    host.attachShadow({mode: "open"});
-  }
-  host.style.cssText = "all:initial;display:block;width:100%;box-sizing:border-box";
-  if (host.parentElement !== footer || host.nextElementSibling !== accountBar) {
-    footer.insertBefore(host, accountBar);
-  }
-  const root = host.shadowRoot;
-  root.innerHTML = `
-    <style>
-      :host { all: initial; display: block; }
-      .card { box-sizing: border-box; width: calc(100% - 16px); margin: 8px 8px 8px; padding: 10px 10px 9px;
-        border: 1px solid #e7e7e7;
-        border-radius: 12px; background: #fff; color: #202020; box-shadow: 0 4px 14px rgba(0,0,0,.06);
-        font: 12px/1.35 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
-      .title { margin-bottom: 9px; font-weight: 600; }
-      .muted { color: #777; font-size: 10px; }
-      .row { display: flex; justify-content: space-between; gap: 8px; margin-top: 7px; }
-      .track { height: 5px; margin-top: 4px; overflow: hidden; border-radius: 4px; background: #ededed; }
-      .fill { height: 100%; background: #202020; }
-      .actions { display: flex; justify-content: flex-end; margin-top: 8px; }
-      .refresh { box-sizing: border-box; padding: 3px 8px; border: 1px solid #dedede; border-radius: 7px;
-        background: #fff; color: #555; cursor: pointer; font: inherit; }
-      .refresh:hover { background: #f5f5f5; }
-      .refresh:disabled { cursor: wait; opacity: .55; }
-      .error { color: #777; white-space: normal; word-break: break-word; }
-    </style>
-    <div class="card" role="status" aria-label="Codex Usage">
-      <div id="title" class="title">Codex Usage</div>
-      <div id="body" class="muted">Unavailable</div>
-      <div class="actions"><button id="refresh" class="refresh" type="button">刷新</button></div>
-    </div>`;
-  const refreshButton = root.getElementById("refresh");
-  if (refreshButton) {
-    refreshButton.addEventListener("click", () => {
-      window.__codexQuotaRefreshRequested = true;
-      refreshButton.disabled = true;
-      refreshButton.textContent = "刷新中…";
-    });
-  }
-  window.__codexQuotaRefreshRequested = false;
-  window.__codexQuotaUpdate = (data) => {
-    const body = root.getElementById("body");
-    const title = root.getElementById("title");
-    const button = root.getElementById("refresh");
-    if (button) {
-      button.disabled = false;
-      button.textContent = "刷新";
-    }
-    if (!body) return;
-    if (!data || data.error) {
-      body.className = "error";
-      body.textContent = data?.error || "Unavailable";
-      return;
-    }
-    const hasTotal = Number.isFinite(data.total) && data.total > 0;
-    const usedRatio = hasTotal ? Math.max(0, Math.min(1, data.used / data.total)) : 0;
-    const remainingRatio = hasTotal ? Math.max(0, Math.min(1, data.remaining / data.total)) : 0;
-    const formatAmount = (value) => Number(value).toFixed(2);
-    body.className = "";
-    body.replaceChildren();
-    const addText = (tag, className, value) => {
-      const element = document.createElement(tag);
-      if (className) element.className = className;
-      element.textContent = String(value);
-      body.appendChild(element);
-      return element;
-    };
-    const addRow = (label, value) => {
-      const row = document.createElement("div");
-      row.className = "row";
-      const left = document.createElement("span");
-      left.textContent = label;
-      const right = document.createElement("span");
-      right.textContent = value;
-      row.append(left, right);
-      body.appendChild(row);
-    };
-    const addTrack = (ratio) => {
-      const track = document.createElement("div");
-      track.className = "track";
-      const fill = document.createElement("div");
-      fill.className = "fill";
-      fill.style.width = `${ratio * 100}%`;
-      track.appendChild(fill);
-      body.appendChild(track);
-    };
-    if (data.kind === "official") {
-      if (!Array.isArray(data.windows) || data.windows.length === 0) {
-        body.className = "error";
-        body.textContent = "No usage windows";
-        return;
-      }
-      if (title) title.textContent = "Codex Usage";
-      addText("div", "muted", `Plan: ${data.plan_name}`);
-      for (const window of data.windows) {
-        const used = Number(window?.used_percent);
-        if (!Number.isFinite(used) || used < 0 || used > 100) {
-          body.className = "error";
-          body.textContent = "Invalid usage window";
-          return;
-        }
-        addRow(window?.label || "Window", `${formatAmount(used)}%`);
-        addTrack(used / 100);
-        if (window?.reset_at) addText("div", "muted", `Reset: ${window.reset_at}`);
-      }
-      return;
-    }
-    if (data.kind !== "api") {
-      body.className = "error";
-      body.textContent = "Unknown usage type";
-      return;
-    }
-    if (title) title.textContent = "API Usage";
-    const usedText = hasTotal ? `${formatAmount(data.used)} / ${formatAmount(data.total)} ${data.unit}` : `${formatAmount(data.used)} ${data.unit}`;
-    const remainingText = `${formatAmount(data.remaining)} ${data.unit}`;
-    addText("div", "muted", data.plan_name);
-    addRow("Used", usedText);
-    if (hasTotal) addTrack(usedRatio);
-    addRow("Remaining", remainingText);
-    if (hasTotal) addTrack(remainingRatio);
-    if (!hasTotal) addText("div", "muted", "No daily limit");
-  };
-  return true;
-})()
-"""
-
-
 def _targets(port: int) -> list[dict[str, Any]]:
     try:
         request = Request(f"http://127.0.0.1:{port}/json/list", method="GET")
@@ -281,12 +130,17 @@ def _send_command(
         connection.send(json.dumps({"id": command_id, "method": method, "params": params or {}}))
         while True:
             message = json.loads(connection.recv())
+            if not isinstance(message, dict):
+                raise PageInjectionError(f"invalid CDP response: {method}")
             if message.get("id") != command_id:
                 continue
             if "error" in message:
                 raise PageInjectionError(f"CDP command failed: {method}")
-            return message.get("result")
-    except (websocket.WebSocketException, OSError, json.JSONDecodeError) as exc:
+            result = message.get("result")
+            if not isinstance(result, dict):
+                raise PageInjectionError(f"invalid CDP result: {method}")
+            return result
+    except (websocket.WebSocketException, OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise PageInjectionError(f"CDP communication failed: {method}") from exc
 
 
@@ -297,10 +151,25 @@ def _evaluate(connection: websocket.WebSocket, expression: str, command_id: int)
         {"expression": expression, "returnByValue": True},
         command_id,
     )
-    result = response.get("result", {})
+    result = response.get("result")
+    if not isinstance(result, dict):
+        raise PageInjectionError("invalid page evaluation result")
     if response.get("exceptionDetails") or result.get("subtype") == "error":
         raise PageInjectionError("page injection script failed")
     return result.get("value")
+
+
+# Installation readiness is independent of sidebar visibility and Statsig flags.
+NATIVE_PATCH_READY_SCRIPT = """(() => {
+  const trigger = document.getElementById('codex-quota-trigger');
+  const popover = document.getElementById('codex-quota-popover');
+  return trigger instanceof HTMLButtonElement && trigger.isConnected &&
+    trigger.getAttribute('data-cq-kind') === 'official' &&
+    trigger.getAttribute('aria-controls') === 'codex-quota-popover' &&
+    popover instanceof HTMLElement && popover.isConnected &&
+    document.querySelectorAll('#codex-quota-trigger').length === 1 &&
+    document.querySelectorAll('#codex-quota-popover').length === 1;
+})()"""
 
 
 def native_patch_present(port: int, target: dict[str, Any] | None = None) -> bool:
@@ -308,7 +177,7 @@ def native_patch_present(port: int, target: dict[str, Any] | None = None) -> boo
     try:
         value = _evaluate(
             connection,
-            "Boolean(globalThis.__STATSIG__?.instance?.().__codexNativeQuotaPatched)",
+            NATIVE_PATCH_READY_SCRIPT,
             1,
         )
         return value is True
@@ -332,12 +201,12 @@ def _patch_connection(connection: websocket.WebSocket, persist: bool = True, wai
     while time.monotonic() < deadline:
         if _evaluate(
             connection,
-            "Boolean(globalThis.__STATSIG__?.instance?.().__codexNativeQuotaPatched)",
+            NATIVE_PATCH_READY_SCRIPT,
             4,
         ) is True:
             return
         time.sleep(0.25)
-    raise PageInjectionError("native quota alert component was not patched")
+    raise PageInjectionError("official quota entry was not installed")
 
 
 def install_native_patch(port: int, persist: bool = True, wait_seconds: float = 30.0) -> None:
@@ -350,9 +219,8 @@ def install_native_patch(port: int, persist: bool = True, wait_seconds: float = 
         connection.close()
 
 
-def inject(port: int, payload: dict[str, Any] | None = None) -> None:
-    """Enable the built-in quota alert; payload remains for API compatibility."""
-    del payload
+def inject(port: int) -> None:
+    """Enable the official quota entry."""
     install_native_patch(port)
 
 
@@ -378,7 +246,7 @@ def card_present(port: int, target: dict[str, Any] | None = None) -> bool:
               };
               if (trigger && trigger instanceof HTMLButtonElement &&
                   trigger.getAttribute('aria-controls') === 'codex-quota-popover' &&
-                  ['api', 'official'].includes(trigger.getAttribute('data-cq-kind')) && triggerVisible(trigger)) {
+                  trigger.getAttribute('data-cq-kind') === 'official' && triggerVisible(trigger)) {
                 const popover = document.getElementById('codex-quota-popover');
                 if (popover instanceof HTMLElement && popover.isConnected) {
                   return true;
@@ -386,8 +254,6 @@ def card_present(port: int, target: dict[str, Any] | None = None) -> bool:
               }
               if (trigger) return false;
               const visible = (element) => element instanceof HTMLElement && !element.hidden && element.offsetParent !== null;
-              const api = document.getElementById('codex-api-usage-host');
-              if (visible(api) && api.querySelector('.codex-native-compact-usage-content')) return true;
               const fallback = document.getElementById('codex-official-usage-host');
               if (visible(fallback) && fallback.querySelector(
                 '[data-cq-layout="thread-v2"], [data-cq-layout="thread-v2-fallback"], .cq-compact-fallback'
@@ -404,43 +270,6 @@ def card_present(port: int, target: dict[str, Any] | None = None) -> bool:
                  (card.classList.contains("ring-border") &&
                   card.classList.contains("bg-surface/80")))).length === 1;
             })()""",
-            1,
-        )
-        return value is True
-    finally:
-        connection.close()
-
-
-def _legacy_card_present(port: int, target: dict[str, Any] | None = None) -> bool:
-    connection = _connect(target or target_info(port))
-    try:
-        value = _evaluate(
-            connection,
-            "Boolean(document.getElementById('codex-quota-card-host')?.shadowRoot)",
-            1,
-        )
-        return value is True
-    finally:
-        connection.close()
-
-
-def _legacy_inject(port: int, payload: dict[str, Any]) -> None:
-    target = target_info(port)
-    connection = _connect(target)
-    try:
-        _evaluate(connection, CARD_SCRIPT, 1)
-        encoded = json.dumps(payload, ensure_ascii=True).replace("</", "<\\/")
-        _evaluate(connection, f"window.__codexQuotaUpdate({encoded})", 2)
-    finally:
-        connection.close()
-
-
-def refresh_requested(port: int, target: dict[str, Any] | None = None) -> bool:
-    connection = _connect(target or target_info(port))
-    try:
-        value = _evaluate(
-            connection,
-            "(() => { const requested = window.__codexQuotaRefreshRequested === true; window.__codexQuotaRefreshRequested = false; return requested; })()",
             1,
         )
         return value is True

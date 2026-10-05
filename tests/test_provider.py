@@ -1,111 +1,79 @@
+import os
+import json
 import unittest
-from datetime import datetime
+from unittest.mock import patch
 
 from codex_quota.discover import DiscoveredCredentials
 from codex_quota.model import OfficialUsageSnapshot
 from codex_quota.provider import (
-    ApiQuotaProvider,
+    OfficialQuotaProvider,
     QuotaProviderError,
-    parse_api_usage_payload,
     parse_official_usage_payload,
-    parse_quota_payload,
-    select_provider,
     snapshot_to_card_payload,
 )
 
 
+def official_payload():
+    return {"plan_type": "plus", "rate_limit": {"allowed": True, "limit_reached": False,
+        "primary_window": {"used_percent": 28, "limit_window_seconds": 604800, "reset_at": 1785379445},
+        "secondary_window": None}}
+
+
 class ProviderTests(unittest.TestCase):
-    def test_parses_contract(self):
-        snapshot = parse_quota_payload({
-            "five_hour": {"used_percent": 5, "reset_at": "2026-07-25T07:52:00+08:00"},
-            "weekly": {"used_percent": 30, "reset_at": None},
-        })
-        self.assertEqual(snapshot.five_hour.used_percent, 5.0)
-        self.assertIsInstance(snapshot.five_hour.reset_at, datetime)
-        self.assertIsNone(snapshot.weekly.reset_at)
-
-    def test_rejects_unknown_shape(self):
-        with self.assertRaises(QuotaProviderError):
-            parse_quota_payload({"usage": 30})
-
-    def test_rejects_invalid_percentage(self):
-        with self.assertRaises(QuotaProviderError):
-            parse_quota_payload({
-                "five_hour": {"used_percent": 101, "reset_at": None},
-                "weekly": {"used_percent": 30, "reset_at": None},
-            })
-
-    def test_parses_api_usage_contract(self):
-        snapshot = parse_api_usage_payload({
-            "isValid": True,
-            "planName": "Daily",
-            "unit": "USD",
-            "remaining": 80.0,
-            "subscription": {"daily_usage_usd": 20.0, "daily_limit_usd": 100},
-        })
-        self.assertEqual(snapshot.remaining, 80.0)
-        self.assertEqual(snapshot.unit, "USD")
-
-    def test_accepts_zero_daily_limit_as_unlimited(self):
-        snapshot = parse_api_usage_payload({
-            "isValid": True,
-            "planName": "Unlimited",
-            "remaining": 10,
-            "unit": "USD",
-            "subscription": {"daily_usage_usd": 20.0, "daily_limit_usd": 0},
-        })
-        self.assertIsNone(snapshot.total)
-
-    def test_parses_current_api_daily_usage_contract(self):
-        snapshot = parse_api_usage_payload({
-            "isValid": True,
-            "planName": "API",
-            "remaining": 80,
-            "unit": "USD",
-            "usage": {"today": {"cost": 20}},
-        })
-        self.assertEqual(snapshot.used, 20.0)
-        self.assertIsNone(snapshot.total)
-
     def test_parses_official_usage_windows(self):
-        snapshot = parse_official_usage_payload({
-            "plan_type": "plus",
-            "rate_limit": {
-                "allowed": True,
-                "limit_reached": False,
-                "primary_window": {
-                    "used_percent": 28,
-                    "limit_window_seconds": 604800,
-                    "reset_at": 1785379445,
-                },
-                "secondary_window": None,
-            },
-        })
+        snapshot = parse_official_usage_payload(official_payload())
         self.assertIsInstance(snapshot, OfficialUsageSnapshot)
         self.assertEqual(snapshot.primary.window_minutes, 10080)
         self.assertIsNone(snapshot.secondary)
         payload = snapshot_to_card_payload(snapshot)
         self.assertEqual(payload["kind"], "official")
         self.assertEqual(payload["windows"][0]["label"], "Weekly")
+        self.assertEqual(payload["windows"][0]["used_percent"], 28)
 
     def test_rejects_official_unknown_shape(self):
+        for payload in ({"plan_type": "plus", "rate_limit": {}}, {"isValid": True, "remaining": 100}):
+            with self.subTest(payload=payload), self.assertRaises(QuotaProviderError):
+                parse_official_usage_payload(payload)
+
+    def test_rejects_invalid_official_windows(self):
+        for field in ("used_percent", "limit_window_seconds", "reset_at"):
+            for value in (float("nan"), float("inf"), float("-inf"), 10 ** 1000, True, -1):
+                with self.subTest(field=field, value=str(value)[:16]):
+                    payload = official_payload()
+                    payload["rate_limit"]["primary_window"][field] = value
+                    with self.assertRaises(QuotaProviderError):
+                        parse_official_usage_payload(payload)
+        payload = official_payload()
+        payload["rate_limit"]["primary_window"]["used_percent"] = 101
         with self.assertRaises(QuotaProviderError):
-            parse_official_usage_payload({"plan_type": "plus", "rate_limit": {}})
+            parse_official_usage_payload(payload)
 
-    def test_official_auth_selects_official_provider(self):
-        provider = select_provider(DiscoveredCredentials(
-            base_url=None,
-            api_key=None,
-            source="test",
-            access_token="token",
-            account_id="account",
-        ))
-        self.assertEqual(provider.__class__.__name__, "OfficialQuotaProvider")
+    def test_missing_official_login_fails_before_network(self):
+        for token, account in ((None, None), ("token", None), (None, "account"), (" ", "account")):
+            with self.subTest(token=token, account=account), patch("codex_quota.provider._get_json") as request:
+                provider = OfficialQuotaProvider(credentials=DiscoveredCredentials("test", token, account))
+                with self.assertRaisesRegex(QuotaProviderError, "未登录官方账户"):
+                    provider.fetch()
+                request.assert_not_called()
 
-    def test_api_usage_url_does_not_duplicate_v1(self):
-        provider = ApiQuotaProvider(credentials=DiscoveredCredentials(
-            base_url="https://api.example.test/v1",
-            api_key="test-key",
-            source="test",
-        ))
-        self.assertEqual(provider.url, "https://api.example.test/v1/usage")
+    def test_official_fetch_ignores_legacy_external_endpoints(self):
+        with patch.dict(os.environ, {"CODEX_USAGE_URL": "https://unused.example.test/balance",
+                "CODEX_OFFICIAL_USAGE_URL": "https://unused.example.test/quota"}, clear=True), \
+             patch("codex_quota.provider._get_json", return_value=official_payload()) as request:
+            snapshot = OfficialQuotaProvider(credentials=DiscoveredCredentials("test", "token", "account")).fetch()
+        self.assertEqual(snapshot.primary.used_percent, 28)
+        request.assert_called_once_with("https://chatgpt.com/backend-api/wham/usage", {
+            "Accept": "application/json", "Authorization": "Bearer token", "ChatGPT-Account-ID": "account",
+        }, 10.0)
+
+    def test_unreadable_or_invalid_auth_is_a_reportable_provider_error(self):
+        for error in (PermissionError("synthetic auth denied"),
+                      json.JSONDecodeError("synthetic invalid auth", "{", 0),
+                      UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid")):
+            with self.subTest(error=type(error).__name__), \
+                 patch("codex_quota.provider.discover_credentials", side_effect=error), \
+                 patch("codex_quota.provider._get_json") as request:
+                with self.assertRaisesRegex(QuotaProviderError, "官方登录信息读取失败") as raised:
+                    OfficialQuotaProvider()
+                self.assertIs(raised.exception.__cause__, error)
+                request.assert_not_called()

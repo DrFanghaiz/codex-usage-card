@@ -6,9 +6,10 @@
     document.addEventListener("DOMContentLoaded", installQuotaUI, {once: true});
     return false;
   }
-  const {animate, spring, createElement, Gauge, ChevronUp} = __codexQuotaLibraries;
+  const {animate, spring, createElement, ChevronUp} = __codexQuotaLibraries;
   const restoreOpen = Boolean(document.getElementById("codex-quota-popover")?.matches(":popover-open"));
   globalThis.__codexQuotaMotionCleanup?.();
+  for (const key of Object.keys(globalThis)) if (key.startsWith("__codexQuotaApi") || key === "__codexQuotaUpdateApi") delete globalThis[key];
   document.getElementById("cq-settings")?.remove();
   globalThis.__codexQuotaGeometryCleanup?.();
   for (const id of ["codex-quota-trigger", "codex-quota-footer", "codex-quota-popover", "codex-official-usage-host", "codex-api-usage-host"]) document.getElementById(id)?.remove();
@@ -17,11 +18,14 @@
   const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
   const motions = new Map();
   let sharedPopover = null;
+  let paneMotion = null;
   const refreshFeedbackTimers = new Map();
   const requestTimers = new Map();
   const requestEpoch = crypto.getRandomValues(new Uint32Array(2)).join("-");
   let requestSequence = 0;
   let manualRefresh = null;
+  let alertGeneration = 0;
+  let installRetryTimer = null;
   const hideRefreshMessage = (button) => {
     const message = document.getElementById("cq-refresh-message");
     if (!button || message?.cqOwner === button) message?.remove();
@@ -36,7 +40,7 @@
     message.setAttribute("role", "status");
     message.cqOwner = button;
     message.textContent = text;
-    const style = getComputedStyle(button.closest(".codex-native-compact-usage, .codex-api-compact-usage"));
+    const style = getComputedStyle(button.closest(".codex-native-compact-usage"));
     for (const name of ["--cq-solid", "--cq-ink", "--cq-border"]) message.style.setProperty(name, style.getPropertyValue(name));
     document.body.append(message);
     message.showPopover();
@@ -62,8 +66,8 @@
     const current = motions.get(element);
     if (!current) return;
     motions.delete(element);
-    // Looping indicators have no final pose to commit, especially after hiding.
-    if (current.looping) current.control.cancel();
+    // Hidden/detached elements cannot commit an animation's presentation styles.
+    if (current.looping || !element.getClientRects().length) current.control.cancel();
     else current.control.stop();
     current.cleanup?.();
   };
@@ -72,7 +76,7 @@
   };
   const move = (element, frames, options = {}, cleanup) => {
     stopMotion(element);
-    const instant = reducedMotion.matches || document.visibilityState !== "visible";
+    const instant = reducedMotion.matches || document.visibilityState !== "visible" || !element.getClientRects().length;
     if (instant) { finalStyle(element, frames); cleanup?.(); return Promise.resolve(); }
     const control = animate(element, frames, {...options, ...(options.type === "spring" ? {type: spring} : {})});
     const record = {control, cleanup, frames, looping: options.repeat === Infinity};
@@ -86,6 +90,7 @@
     return control;
   };
   const finishMotion = () => {
+    finishPaneMotion();
     finishSharedPopover();
     for (const [element, record] of [...motions]) {
       stopMotion(element);
@@ -101,6 +106,7 @@
     settings: [["path", {d: "M2.5 5h3M8.5 5h5M2.5 11h5M10.5 11h3"}], ["circle", {cx: "7", cy: "5", r: "1.5"}], ["circle", {cx: "9", cy: "11", r: "1.5"}]],
     done: [["path", {d: "m3.5 8.25 3 3 6.25-6.5"}]],
     warning: [["circle", {cx: "8", cy: "8", r: "5.5"}], ["path", {d: "M8 4.75v3.5M8 11.25h.01"}]],
+    back: [["path", {d: "m9.75 3.5-4.5 4.5 4.5 4.5"}]],
   };
   const toolIcon = (name, className) => createElement(toolIcons[name], {
     class: className, viewBox: "0 0 16 16", width: "16", height: "16",
@@ -133,7 +139,14 @@
     const first = !fill.dataset.target || !fill.isConnected;
     fill.dataset.target = target;
     if (first) finalStyle(fill, {width: target});
-    else move(fill, {width: target}, {duration: .2, ease: [.2, .8, .2, 1]});
+    else {
+      const previous = fill.getBoundingClientRect().width;
+      stopMotion(fill);
+      finalStyle(fill, {width: target});
+      const next = fill.getBoundingClientRect().width;
+      if (previous && next && previous !== next) move(fill, {transform: [`scaleX(${previous / next})`, "scaleX(1)"]},
+        {duration: .2, ease: [.2, .8, .2, 1]}, () => fill.style.removeProperty("transform"));
+    }
   };
   const refreshMotion = (button) => {
     const glyph = button.querySelector(".cq-refresh-icon");
@@ -162,6 +175,7 @@
   window.addEventListener("blur", onMotionPreference);
   globalThis.__codexQuotaMotionCleanup = () => {
     disposed = true;
+    clearInterval(installRetryTimer);
     for (const timer of requestTimers.values()) clearTimeout(timer);
     hideRefreshMessage();
     for (const button of refreshFeedbackTimers.keys()) clearRefreshFeedback(button);
@@ -183,8 +197,6 @@
   window.addEventListener("scroll", hideRefreshMessageOnMove, true);
   const compactClass = "codex-native-compact-usage";
   const compactContentClass = "codex-native-compact-usage-content";
-  const apiCardClass = "codex-api-compact-usage";
-  const apiHostId = "codex-api-usage-host";
   const officialHostId = "codex-official-usage-host";
   const styleId = "codex-native-compact-usage-style";
   const staleAfterMs = 5 * 60 * 1000;
@@ -205,15 +217,6 @@
         fiveHourUsedAria: "5小时已用",
         resetUnavailable: "重置时间不可用",
         officialUnavailable: "周用量不可用",
-        apiTitle: "API 剩余",
-        dailyKicker: "每日",
-        apiRemainingAria: "API 每日剩余",
-        plan: "套餐",
-        daily: "今日",
-        status: "状态",
-        unavailable: "API 用量不可用",
-        invalid: "API 用量响应无效",
-        noLimit: "未设置每日限额",
         loading: "正在读取…",
         stale: "更新失败，显示上次数据",
         stalePrefix: "更新失败，显示 ",
@@ -237,15 +240,6 @@
         fiveHourUsedAria: "5-hour used",
         resetUnavailable: "Reset unavailable",
         officialUnavailable: "Weekly usage unavailable",
-        apiTitle: "API remaining",
-        dailyKicker: "Daily",
-        apiRemainingAria: "API daily remaining",
-        plan: "Plan",
-        daily: "Daily",
-        status: "Status",
-        unavailable: "API usage unavailable",
-        invalid: "Invalid API usage response",
-        noLimit: "No daily limit",
         loading: "Loading…",
         stale: "Update failed; showing last result",
         stalePrefix: "Update failed; showing data from ",
@@ -256,7 +250,6 @@
         refreshing: "Refreshing…",
       };
 
-  const apiMode = () => globalThis.__codexQuotaMode === "api";
 
   const settingsKey = "codex-usage-card.settings.v2";
   const defaults = {compact: false, alerts: true, thresholds: "20,10", recovery: true, system: false, hour12: false, transparency: "blur"};
@@ -326,11 +319,11 @@
   const checkAlerts = async (kind, data) => {
     if ((!preferences.alerts && !preferences.recovery) || document.visibilityState !== "visible") return;
     const scope = globalThis.__codexQuotaSessionScope;
+    const generation = alertGeneration;
     if (!scope) return;
-    const windows = kind === "official" ? data.windows : data.total > 0
-      ? [{label: "API", usedPercent: data.used / data.total * 100, resetAt: null}] : [];
+    const windows = data.windows;
     const run = () => {
-      if (scope !== globalThis.__codexQuotaSessionScope || document.visibilityState !== "visible") return;
+      if (disposed || generation !== alertGeneration || scope !== globalThis.__codexQuotaSessionScope || document.visibilityState !== "visible") return;
       const key = "codex-usage-card.alerts.v2";
       let stored;
       try { stored = JSON.parse(localStorage.getItem(key) || "{}"); }
@@ -342,8 +335,8 @@
         const remaining = 100 - item.usedPercent;
         const previous = records[item.label];
         const replenished = previous && remaining > previous.remaining &&
-          (kind === "official" ? item.resetAt > previous.resetAt : remaining > previous.remaining);
-        const cycleChanged = previous && kind === "official" && item.resetAt > previous.resetAt;
+          item.resetAt > previous.resetAt;
+        const cycleChanged = previous && item.resetAt > previous.resetAt;
         const sent = cycleChanged || replenished ? [] : previous?.sent || [];
         if (preferences.recovery && replenished && previous.remaining <= Math.max(...thresholds(), 0)) {
           messages.push(`${item.label}: ${words("额度已恢复，剩余", "Quota replenished, remaining")} ${formatPercent(remaining)}%`);
@@ -381,19 +374,22 @@
 
   const openSettings = (opener) => {
     const existing = document.getElementById("cq-settings");
-    if (existing) { existing.querySelector("button")?.focus(); return; }
     const popup = document.getElementById("codex-quota-popover");
-    const host = opener.closest(`.${compactClass}, .${apiCardClass}`);
+    const host = opener.closest(`.${compactClass}`);
     if (!popup || !host) return;
-    const previousRect = settlePopoverMotion();
+    if (existing) { animatePane(host, existing, true); existing.querySelector("button").focus({preventScroll: true}); return; }
     const panel = document.createElement("div");
     panel.id = "cq-settings";
-    panel.innerHTML = `<form method="dialog"><header class="cq:flex cq:items-center cq:justify-between cq:gap-[8px]"><div class="cq-settings-heading cq:flex cq:flex-wrap cq:items-baseline cq:gap-x-[8px] cq:gap-y-[3px] cq:min-w-0"><h2 id="cq-settings-title"></h2><p class="cq-settings-feedback" role="status"></p></div><button value="close"></button></header>
-      <div class="cq-options cq:grid cq:gap-[8px]"><div class="cq-option-group cq-display-options" role="group"></div><div class="cq-option-group cq-alert-options" role="group"></div></div>
-      <div class="cq-tools cq:flex cq:flex-wrap cq:items-center cq:gap-[4px]"><button type="button" class="cq-doctor"></button><button type="button" class="cq-copy"></button><a target="_blank" rel="noopener noreferrer" href="https://github.com/DrFanghaiz/codex-usage-card/releases/latest"></a></div>
+    panel.innerHTML = `<form method="dialog"><header><h2 id="cq-settings-title"></h2><button value="close" formnovalidate></button></header>
+      <div class="cq-options"><div class="cq-option-group cq-display-options" role="group"><h3></h3></div><div class="cq-option-group cq-alert-options" role="group"><h3></h3></div></div>
+      <div class="cq-tools"><button type="button" class="cq-doctor"></button><button type="button" class="cq-copy"></button><a target="_blank" rel="noopener noreferrer" href="https://github.com/DrFanghaiz/codex-usage-card/releases/latest"></a></div>
+      <p class="cq-settings-feedback" role="status"></p>
       <pre id="cq-diagnosis" role="status"></pre></form>`;
-    panel.querySelector("h2").textContent = words("额度卡设置", "Usage card settings");
-    panel.querySelector("header button").textContent = words("返回", "Back");
+    panel.querySelector("h2").textContent = words("额度设置", "Usage settings");
+    const back = panel.querySelector("header button");
+    back.title = words("返回额度", "Back to quota");
+    back.setAttribute("aria-label", back.title);
+    back.append(toolIcon("back", "cq-back-icon"));
     const feedback = panel.querySelector(".cq-settings-feedback");
     if (!navigator.locks || !globalThis.__codexQuotaSessionScope) feedback.textContent = words("提醒等待兼容的 Helper 与浏览器连接。", "Alerts require a compatible helper and browser connection.");
     const save = () => {
@@ -405,7 +401,8 @@
     const alertOptions = panel.querySelector(".cq-alert-options");
     displayOptions.setAttribute("aria-label", words("显示", "Display"));
     alertOptions.setAttribute("aria-label", words("提醒", "Alerts"));
-    const rowClass = "cq:flex cq:items-center cq:justify-between cq:gap-[12px] cq:box-border cq:min-h-[35px] cq:px-[10px] cq:py-[5px] cq:cursor-pointer";
+    for (const group of [displayOptions, alertOptions]) group.querySelector("h3").textContent = group.getAttribute("aria-label");
+    const rowClass = "cq-setting-row";
     for (const [key, label] of [["compact", words("紧凑模式", "Compact mode")], ["alerts", words("低额度提醒", "Low quota alerts")],
       ["recovery", words("额度恢复提醒", "Quota recovery alerts")], ["system", words("系统通知", "System notifications")], ["hour12", words("12 小时制", "12-hour clock")]]) {
       if (key === "compact") continue;
@@ -417,10 +414,15 @@
       input.setAttribute("role", "switch");
       input.checked = preferences[key];
       input.name = key;
+      let changeSequence = 0;
       input.onchange = async () => {
+        const sequence = ++changeSequence;
         if (key === "system" && input.checked) {
-          try { input.checked = typeof Notification !== "undefined" && await Notification.requestPermission() === "granted"; }
-          catch { input.checked = false; }
+          let granted = false;
+          try { granted = typeof Notification !== "undefined" && await Notification.requestPermission() === "granted"; }
+          catch { /* Keep the switch off when the host rejects permission. */ }
+          if (disposed || !panel.isConnected || sequence !== changeSequence || !input.checked) return;
+          input.checked = granted;
         }
         preferences[key] = input.checked;
         save();
@@ -437,9 +439,11 @@
     }
     const thresholdRow = document.createElement("label");
     thresholdRow.className = rowClass;
-    thresholdRow.textContent = words("提醒阈值（%）", "Alert thresholds (%)");
+    thresholdRow.classList.add("cq-threshold-row");
+    thresholdRow.textContent = words("提醒阈值", "Thresholds");
     const input = document.createElement("input");
     input.name = "thresholds";
+    input.setAttribute("aria-label", words("提醒阈值，百分比，逗号分隔", "Alert thresholds, percent, comma-separated"));
     input.value = preferences.thresholds;
     input.placeholder = "20,10";
     input.onchange = () => {
@@ -449,7 +453,13 @@
       }
       input.setCustomValidity(""); preferences.thresholds = input.value; save();
     };
-    thresholdRow.append(input); alertOptions.firstElementChild.after(thresholdRow);
+    const field = document.createElement("span");
+    field.className = "cq-threshold-field";
+    const unit = document.createElement("span");
+    unit.textContent = "%";
+    unit.setAttribute("aria-hidden", "true");
+    field.append(input, unit);
+    thresholdRow.append(field); alertOptions.querySelector("label").after(thresholdRow);
     const doctor = panel.querySelector(".cq-doctor");
     doctor.textContent = words("运行自检", "Run diagnosis");
     doctor.onclick = () => {
@@ -469,16 +479,13 @@
     panel.querySelector("form").onsubmit = event => {
       event.preventDefault();
       clearTimeout(globalThis.__codexQuotaDiagnosisTimer);
-      const previousRect = settlePopoverMotion();
-      panel.remove();
-      host.hidden = false;
-      animatePane(previousRect, host);
-      opener.focus();
+      animatePane(host, panel, false);
+      opener.focus({preventScroll: true});
     };
+    panel.hidden = true;
     popup.append(panel);
-    host.hidden = true;
-    animatePane(previousRect, panel);
-    panel.querySelector("header button").focus();
+    animatePane(host, panel, true);
+    back.focus({preventScroll: true});
   };
 
   const adaptiveRefreshDelayMs = (now = Date.now()) => {
@@ -491,9 +498,7 @@
     return 30 * 60 * 1000;
   };
 
-  const quotaUsageFingerprint = (data) => Array.isArray(data?.windows)
-    ? JSON.stringify(data.windows.map((window) => [window.label, window.usedPercent]).sort(([a], [b]) => a.localeCompare(b)))
-    : JSON.stringify([data?.used, data?.remaining, data?.total]);
+  const quotaUsageFingerprint = (data) => JSON.stringify((data?.windows || []).map(window => [window.label, window.usedPercent]).sort(([a], [b]) => a.localeCompare(b)));
 
   const officialPresentation = (data) => {
     const planName = typeof data?.planName === "string" ? data.planName.trim().toLowerCase() : "";
@@ -572,14 +577,19 @@
       #codex-quota-trigger[aria-expanded="true"] .cq-trigger-chevron { transform: rotate(180deg); transition-duration: 240ms; }
       #codex-quota-trigger .cq-warning, #codex-quota-popover [data-cq-low] .cq-value-group { color: var(--cq-warning); }
       #codex-quota-trigger .cq-trigger-weekly-bar.cq-warning { --cq-fill: var(--cq-warning); }
-      #codex-quota-trigger[data-cq-collapsed] { width: 36px; height: 36px; flex: none; justify-content: center; padding: 8px; align-self: center; }
+      #codex-quota-trigger[data-cq-collapsed] { width: 36px; height: 36px; flex: none; justify-content: center; padding: 8px; align-self: center; border: 0; border-radius: var(--cq-rail-radius, 12px); background: transparent; box-shadow: none; backdrop-filter: none; color: var(--color-text-tertiary, var(--cq-muted)); }
+      #codex-quota-trigger[data-cq-collapsed]:is(:hover,[aria-expanded="true"]) { background: var(--cq-hover); color: var(--cq-ink); }
       #codex-quota-trigger[data-cq-collapsed] .cq-trigger-icon { display: block; width: 20px; height: 20px; }
+      #codex-quota-trigger .cq-gauge-needle { transform-origin: 10px 11px; transition: transform 240ms cubic-bezier(.2,.8,.2,1); }
+      #codex-quota-trigger .cq-gauge-needle[hidden] { display: none; }
+      #codex-quota-trigger[data-cq-instant] .cq-gauge-needle { transition: none; }
       #codex-quota-trigger[data-cq-collapsed] :is(.cq-trigger-plan,.cq-trigger-copy,.cq-trigger-graphics,.cq-trigger-chevron) { display: none; }
       #codex-quota-trigger[data-cq-low]::after { content: ""; flex: none; width: 4px; height: 4px; border-radius: 50%; background: currentColor; }
       #codex-quota-trigger[data-cq-collapsed][data-cq-low]::after { position: absolute; margin: 23px 0 0 22px; }
       #codex-quota-popover { position: fixed; inset: auto; margin: 0; padding: 8px 0 8px 8px; max-width: none; max-height: calc(100dvh - 24px); overflow: auto; overscroll-behavior: contain; scrollbar-width: none; border: .8px solid var(--cq-border); border-radius: var(--radius-sm, 6px); background: var(--cq-solid); box-shadow: 0 4px 12px #302c2212, 0 16px 32px #302c2207; opacity: 0; transition: display 700ms allow-discrete, overlay 700ms allow-discrete; }
       @supports (backdrop-filter: blur(1px)) { #codex-quota-popover { background: color-mix(in srgb, var(--cq-solid) 90%, transparent); backdrop-filter: blur(8px); border: 0; } }
       #codex-quota-popover:not([data-cq-inplace]) { transition-duration: 180ms; }
+      #codex-quota-popover[data-cq-rail-motion] { transition-duration: 700ms; }
       #codex-quota-popover:popover-open { opacity: 1; }
       #codex-quota-popover[data-cq-opening] { opacity: 0; }
       #codex-quota-popover:not(:popover-open) { pointer-events: none; }
@@ -603,7 +613,9 @@
       #codex-quota-popover .cq-actions button:active:not(:disabled) { background: color-mix(in srgb, var(--cq-ink) 12%, transparent); color: var(--cq-ink); transition-duration: 0s; }
       #codex-quota-popover .cq-collapse-button { position: absolute; z-index: 3; display: grid; place-items: center; width: 24px; height: 24px; padding: 6px; border-radius: 5px; color: var(--cq-muted); }
       #codex-quota-popover .cq-collapse-icon { width: 12px; height: 12px; transform: rotate(180deg); }
-      #codex-quota-popover[data-cq-inplace] #cq-settings { padding-bottom: 25px; }
+      #codex-quota-popover[data-cq-inplace] #cq-settings { padding-bottom: 24px; }
+      #codex-quota-popover[data-cq-pane] { overflow: clip; opacity: 1; transition-duration: 700ms; }
+      #codex-quota-popover[data-cq-pane] > .cq-collapse-button { opacity: 1; }
       #codex-quota-popover[data-cq-inplace] .cq-rows > :last-child { padding-bottom: 0; }
       #codex-quota-popover[data-cq-inplace] [data-cq-focal] .cq-rows > :last-child .cq-reset { grid-area: 3 / 1 / 4 / -1; padding-right: 24px; min-height: 16px; }
       #codex-quota-popover[data-cq-inplace] [data-cq-focal] .cq-rows > :last-child[data-cq-secondary] .cq-reset { grid-row: 2; }
@@ -612,7 +624,7 @@
       #codex-quota-popover[data-cq-morph] { background: transparent; border-color: transparent; box-shadow: none; backdrop-filter: none; overflow: visible; opacity: 1; pointer-events: auto; }
       #codex-quota-popover[data-cq-morph] > * { opacity: 1; }
       #codex-quota-popover .cq-shared-layer { position: absolute; inset: 0; z-index: 2; pointer-events: none; }
-      #codex-quota-popover[data-cq-morph] > :is(#codex-official-usage-host,#codex-api-usage-host,#cq-settings) { position: relative; z-index: 1; }
+      #codex-quota-popover[data-cq-morph] > :is(#codex-official-usage-host,#cq-settings) { position: relative; z-index: 1; }
       #codex-quota-popover .cq-shared-surface { position: absolute; z-index: 0; transform-origin: 0 0; pointer-events: none; }
       #codex-quota-popover .cq-shared-actor { position: absolute; left: 0; top: 0; transform-origin: 0 0; pointer-events: none; will-change: transform; }
       :is(#codex-quota-trigger,#codex-quota-popover) [data-cq-shared-hidden] { visibility: hidden !important; }
@@ -636,7 +648,7 @@
       #codex-quota-popover .cq-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
       #codex-quota-popover .cq-row-foot { display: flex; align-items: center; gap: 8px; margin-top: 8px; min-height: 16px; }
       #codex-quota-popover .cq-rule { position: relative; flex: 1; min-width: 3px; height: 2px; border-radius: 2px; background: var(--cq-track); }
-      :is(#codex-quota-popover,#codex-quota-trigger) .cq-progress-fill { display: block; height: 100%; min-width: 3px; max-width: 100%; border-radius: inherit; background: var(--cq-fill); }
+      :is(#codex-quota-popover,#codex-quota-trigger) .cq-progress-fill { display: block; height: 100%; min-width: 3px; max-width: 100%; border-radius: inherit; background: var(--cq-fill); transform-origin: 0 50%; }
       #codex-quota-popover .cq-reset { display: inline-flex; align-items: center; gap: 4px; color: var(--cq-muted); font-size: 11px; white-space: nowrap; }
       #codex-quota-popover .cq-rows { container: cq-rows / inline-size; }
       #codex-quota-popover [data-cq-focal] .cq-quota-row { display: grid; grid-template-columns: auto minmax(12px,1fr) auto; align-items: end; gap: 8px; padding: 8px 16px 4px 8px; }
@@ -671,17 +683,23 @@
       #codex-quota-popover .cq-low { font-size: 11px; white-space: nowrap; }
       #codex-quota-popover .cq-status { position: absolute; top: 0; left: 0; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
       #codex-quota-popover .cq-empty { padding: 8px 16px 8px 8px; color: var(--cq-muted); }
-      #cq-settings { padding-right: 8px; }
-      #cq-settings header { display: flex; align-items: center; gap: 8px; margin: 0 0 8px; padding: 0 8px; }
-      #cq-settings h2 { font-size: 13px; font-weight: 500; margin: 0; }
-      #cq-settings header button { flex: none; min-height: 28px; padding: 4px 6px; border-radius: 6px; }
-      #cq-settings .cq-settings-feedback { margin: 0; color: var(--cq-muted); font-size: 11px; overflow-wrap: anywhere; }
+      #cq-settings { padding: 0; }
+      #cq-settings header { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 24px; margin: 0 0 16px; padding: 0 var(--cq-control-right, 6px) 0 8px; }
+      #cq-settings h2 { font-size: 14px; line-height: 20px; font-weight: 600; letter-spacing: -.01em; margin: 0; }
+      #cq-settings header button { display: grid; place-items: center; flex: none; width: 24px; height: 24px; padding: 4px; border-radius: 6px; color: var(--cq-muted); }
+      #cq-settings header svg { width: 16px; height: 16px; }
+      #cq-settings :is(button,a):active { background: var(--cq-hover); color: var(--cq-ink); }
+      #cq-settings .cq-settings-feedback { margin: 8px 16px 0 8px; color: var(--cq-muted); font-size: 11px; line-height: 16px; overflow-wrap: anywhere; }
       #cq-settings .cq-settings-feedback:empty { display: none; }
-      #cq-settings .cq-option-group { overflow: hidden; }
-      #cq-settings .cq-option-group + .cq-option-group { border-top: 1px solid var(--cq-border); padding-top: 8px; }
-      #cq-settings label { padding: 8px; gap: 8px; }
+      #cq-settings .cq-options { padding: 0 16px 0 8px; }
+      #cq-settings .cq-option-group + .cq-option-group { margin-top: 8px; border-top: 1px solid var(--cq-border); padding-top: 16px; }
+      #cq-settings h3 { margin: 0 0 8px; font-size: 11px; line-height: 16px; font-weight: 500; color: var(--cq-muted); }
+      #cq-settings .cq-setting-row { display: flex; align-items: center; justify-content: space-between; box-sizing: border-box; min-height: 32px; padding: 8px 0; gap: 8px; font-size: 12px; line-height: 16px; cursor: pointer; }
+      #cq-settings .cq-threshold-row { color: var(--cq-muted); font-size: 11px; }
       #cq-settings :is(input,select) { min-width: 0; accent-color: var(--cq-ink); }
-      #cq-settings input:not([type=checkbox]) { width: 58px; padding: 3px; border: 1px solid var(--cq-border); border-radius: 4px; background: var(--cq-solid); }
+      #cq-settings .cq-threshold-field { position: relative; display: flex; align-items: center; flex: none; width: 72px; }
+      #cq-settings .cq-threshold-field > span { position: absolute; right: 8px; pointer-events: none; font-size: 11px; }
+      #cq-settings input:not([type=checkbox]) { width: 100%; height: 24px; padding: 0 20px 0 8px; border: 1px solid var(--cq-border); border-radius: 4px; background: color-mix(in srgb, var(--cq-ink) 3%, transparent); color: var(--cq-ink); font-size: 11px; font-variant-numeric: tabular-nums; }
       #cq-settings .cq-switch { position: relative; display: inline-flex; flex: none; width: 28px; height: 16px; }
       #cq-settings .cq-switch input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; }
       #cq-settings .cq-switch-track { width: 28px; height: 16px; border-radius: 99px; background: #cfc9ba; pointer-events: none; transition: background 130ms ease; }
@@ -689,15 +707,16 @@
       #cq-settings .cq-switch input:checked + .cq-switch-track { background: var(--cq-fill); }
       #cq-settings .cq-switch input:checked + .cq-switch-track::after { transform: translateX(12px); }
       #cq-settings .cq-switch input:focus-visible + .cq-switch-track { outline: 2px solid var(--cq-ink); outline-offset: 2px; }
-      #cq-settings .cq-tools { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--cq-border); font-size: 11px; color: var(--cq-muted); }
-      #cq-settings .cq-tools :is(button,a) { padding: 5px; border-radius: 6px; text-decoration: none; }
-      #cq-settings pre { white-space: pre-wrap; overflow-wrap: anywhere; font: 11px/1.5 var(--default-font-family, sans-serif); margin: 8px; user-select: text; }
+      #cq-settings .cq-tools { display: flex; flex-wrap: wrap; align-items: center; column-gap: 16px; row-gap: 0; margin: 8px 16px 0 8px; padding-top: 8px; border-top: 1px solid var(--cq-border); font-size: 11px; line-height: 16px; color: var(--cq-muted); }
+      #cq-settings .cq-tools :is(button,a) { display: inline-flex; align-items: center; min-height: 24px; padding: 0; border-radius: 4px; text-decoration: none; }
+      #cq-settings pre { white-space: pre-wrap; overflow-wrap: anywhere; font: 11px/1.5 var(--default-font-family, sans-serif); margin: 8px 16px 0 8px; user-select: text; }
       #cq-settings pre:empty { display: none; }
       #cq-notice { position: fixed; bottom: 20px; right: 20px; z-index: 2147483647; display: flex; align-items: center; gap: 16px; max-width: min(460px, calc(100vw - 40px)); padding: 12px 16px; border: 1px solid ButtonBorder; border-radius: 8px; background: Canvas; color: CanvasText; font: 13px/1.4 var(--default-font-family, sans-serif); }
       #cq-notice button { padding: 6px; color: inherit; background: transparent; border: 1px solid ButtonBorder; border-radius: 4px; }
       #cq-refresh-message { position: fixed; inset: auto; margin: 0; width: max-content; max-width: min(280px, calc(100vw - 24px)); box-sizing: border-box; padding: 8px 10px; border: 1px solid var(--cq-border, ButtonBorder); border-radius: 8px; background: var(--cq-solid, Canvas); color: var(--cq-ink, CanvasText); font: 12px/1.5 var(--default-font-family, sans-serif); pointer-events: none; overflow-wrap: anywhere; }
       @media (prefers-reduced-motion: reduce) { #codex-quota-popover, #codex-quota-popover:popover-open, #codex-quota-trigger { transition: none; transform: none; } }
       @media (prefers-reduced-motion: reduce) { #codex-quota-trigger .cq-trigger-plan, #codex-quota-trigger .cq-trigger-copy, #codex-quota-trigger .cq-trigger-graphics, #codex-quota-trigger .cq-trigger-graphics > *, #codex-quota-trigger .cq-trigger-chevron { transition: none !important; } }
+      @media (prefers-reduced-motion: reduce) { #codex-quota-trigger .cq-gauge-needle { transition: none; } }
       #codex-quota-popover[data-cq-instant], #codex-quota-trigger[data-cq-instant], #codex-quota-trigger[data-cq-instant] .cq-trigger-plan, #codex-quota-trigger[data-cq-instant] .cq-trigger-copy, #codex-quota-trigger[data-cq-instant] .cq-trigger-graphics, #codex-quota-trigger[data-cq-instant] .cq-trigger-graphics > *, #codex-quota-trigger[data-cq-instant] .cq-trigger-chevron { transition: none !important; }
       @media (prefers-reduced-motion: reduce) { #cq-settings .cq-switch-track, #cq-settings .cq-switch-track::after { transition: none; } }
       @media (prefers-contrast: more) { #codex-quota-trigger, #codex-quota-popover { --cq-muted: var(--cq-ink); --cq-border: var(--cq-ink); } }
@@ -749,31 +768,20 @@
     return text.replace(/^resets?(?:\s+at)?\s*/i, "").replace(/\s+resets?$/i, "");
   };
 
-  const quotaErrorCode = (kind) => kind === "api"
-    ? globalThis.__codexQuotaApiErrorCode || (globalThis.__codexQuotaApiError ? "UNAVAILABLE" : null)
-    : globalThis.__codexQuotaOfficialErrorCode || (globalThis.__codexQuotaOfficialError ? "UNAVAILABLE" : null);
+  const quotaErrorCode = () => globalThis.__codexQuotaOfficialErrorCode || (globalThis.__codexQuotaOfficialError ? "UNAVAILABLE" : null);
 
-  const quotaTiming = (isApi = apiMode()) => ({
-    lastSuccessAt: Number(isApi
-      ? globalThis.__codexQuotaApiLastSuccessAt || 0
-      : globalThis.__codexQuotaOfficialLastSuccessAt || 0),
-    nextAttemptAt: Number(isApi
-      ? globalThis.__codexQuotaApiNextAutoAttemptAt || 0
-      : globalThis.__codexQuotaOfficialNextAutoAttemptAt || 0),
-    cooldownUntil: Number(isApi
-      ? globalThis.__codexQuotaApiCooldownUntil || 0
-      : globalThis.__codexQuotaOfficialCooldownUntil || 0),
+  const quotaTiming = () => ({
+    lastSuccessAt: Number(globalThis.__codexQuotaOfficialLastSuccessAt || 0),
+    nextAttemptAt: Number(globalThis.__codexQuotaOfficialNextAutoAttemptAt || 0),
+    cooldownUntil: Number(globalThis.__codexQuotaOfficialCooldownUntil || 0),
   });
 
-  const recordQuotaInteraction = (kind) => {
+  const recordQuotaInteraction = () => {
     const now = Date.now();
     globalThis.__codexQuotaLastInteractionAt = now;
-    const isApi = kind === "api";
-    const {lastSuccessAt} = quotaTiming(isApi);
-    if (!lastSuccessAt || quotaErrorCode(kind)) return;
-    const nextAt = lastSuccessAt + adaptiveRefreshDelayMs(now);
-    if (isApi) globalThis.__codexQuotaApiNextAutoAttemptAt = nextAt;
-    else globalThis.__codexQuotaOfficialNextAutoAttemptAt = nextAt;
+    const {lastSuccessAt} = quotaTiming();
+    if (!lastSuccessAt || quotaErrorCode()) return;
+    globalThis.__codexQuotaOfficialNextAutoAttemptAt = lastSuccessAt + adaptiveRefreshDelayMs(now);
   };
 
   const formatStatusTime = (value) => {
@@ -788,14 +796,9 @@
   };
 
   const quotaState = (kind, data, errorCode = quotaErrorCode(kind)) => {
-    const isApi = kind === "api";
-    const needsData = isApi
-      ? globalThis.__codexQuotaApiNeedsData === true
-      : globalThis.__codexQuotaOfficialNeedsData === true;
-    const loaded = isApi
-      ? globalThis.__codexQuotaApiLoaded === true
-      : globalThis.__codexQuotaOfficialLoaded === true;
-    const {lastSuccessAt, cooldownUntil} = quotaTiming(isApi);
+    const needsData = globalThis.__codexQuotaOfficialNeedsData === true;
+    const loaded = globalThis.__codexQuotaOfficialLoaded === true;
+    const {lastSuccessAt, cooldownUntil} = quotaTiming();
     if (globalThis.__codexQuotaAwaitingFreshSession && !data) return {busy: false, text: words("暂不可用，等待账户连接", "Unavailable; awaiting account connection")};
     if (needsData) return {busy: true, text: copy.refreshing};
     if (errorCode) {
@@ -814,7 +817,7 @@
         busy: false,
         text: retryAt
           ? `${copy.cooldownPrefix}${retryAt}${copy.cooldownSuffix}`
-          : isApi ? copy.unavailable : copy.officialUnavailable,
+          : copy.officialUnavailable,
       };
     }
     return {busy: false, text: null};
@@ -823,7 +826,7 @@
   const setRefreshButtonState = (button, busy) => {
     const showingMessage = document.getElementById("cq-refresh-message")?.cqOwner === button;
     const kind = button.dataset.cqKind;
-    const data = kind === "api" ? globalThis.__codexQuotaApiPayload : globalThis.__codexQuotaOfficialPayload;
+    const data = globalThis.__codexQuotaOfficialPayload;
     const error = !busy && quotaErrorCode(kind);
     const completed = !busy && manualRefresh?.kind === kind;
     if (busy || error) clearRefreshFeedback(button);
@@ -851,9 +854,7 @@
 
   const createRefreshButton = (kind) => {
     const button = document.createElement("button");
-    const busy = kind === "api"
-      ? globalThis.__codexQuotaApiNeedsData === true
-      : globalThis.__codexQuotaOfficialNeedsData === true;
+    const busy = globalThis.__codexQuotaOfficialNeedsData === true;
     button.type = "button";
     button.className = "cq-refresh";
     button.dataset.cqKind = kind;
@@ -872,8 +873,7 @@
     button.addEventListener("keydown", event => { if (event.key === "Escape") hideRefreshMessage(button); });
     button.addEventListener("click", () => {
       recordQuotaInteraction(kind);
-      if (kind === "api") requestApiData(true);
-      else requestOfficialData(true);
+      requestOfficialData(true);
     });
     const actions = document.createElement("span");
     actions.className = "cq-actions";
@@ -894,7 +894,7 @@
     card.removeAttribute("aria-live");
     card.removeAttribute("aria-atomic");
     card.setAttribute("aria-busy", String(busy));
-    const error = quotaErrorCode(apiMode() ? "api" : "official");
+    const error = quotaErrorCode("official");
     const {lastSuccessAt} = quotaTiming();
     card.dataset.cqState = busy ? "refreshing" : error === "AUTH_REQUIRED" ? "auth-required"
       : error === "RATE_LIMITED" ? "cooldown" : error === "REQUEST_TIMEOUT" ? "timeout" : error ? "stale" : lastSuccessAt ? "ready" : "loading";
@@ -920,7 +920,7 @@
     if (!status) {
       status = document.createElement("div");
       status.className = "cq-status";
-      status.id = `cq-status-${apiMode() ? "api" : "official"}`;
+      status.id = `cq-status-${"official"}`;
       status.setAttribute("role", "status");
       status.setAttribute("aria-live", "polite");
       status.setAttribute("aria-atomic", "true");
@@ -935,13 +935,11 @@
   };
 
   const showCooldown = (kind, cooldownUntil) => {
-    const card = kind === "api"
-      ? document.getElementById(apiHostId)
-      : document.getElementById(officialHostId);
+    const card = document.getElementById(officialHostId);
     const content = card?.querySelector(`.${compactContentClass}`);
     const retryAt = formatStatusTime(cooldownUntil);
     if (!card || !content || !retryAt) return;
-    const data = kind === "api" ? globalThis.__codexQuotaApiPayload : globalThis.__codexQuotaOfficialPayload || nativeSnapshot;
+    const data = globalThis.__codexQuotaOfficialPayload || nativeSnapshot;
     setCardAccessibility(card, false);
     const button = content.querySelector(".cq-refresh");
     setRefreshButtonState(button, false);
@@ -967,7 +965,6 @@
     row.title = `${copy.resetAtPrefix}: ${known ? new Date(resetAt * 1000).toLocaleString(navigator.language, {hour12: preferences.hour12}) : date}`;
   };
 
-  const format = (value) => Number(value).toFixed(2);
   const formatOfficialReset = (value) => {
     const date = new Date(Number(value) * 1000);
     if (!Number.isFinite(date.getTime())) return copy.resetUnavailable;
@@ -989,8 +986,6 @@
 
   const windowName = (label) => label === "Weekly" ? copy.weeklySummaryTitle : label;
   const windowSeconds = (label) => label === "5h" ? 18000 : label === "Weekly" ? 604800 : null;
-  const validApiPayload = (data) => data && [data.used, data.remaining].every(Number.isFinite) && typeof data.unit === "string";
-  const amount = (data) => data.unit === "USD" ? `$${format(data.remaining)}` : `${format(data.remaining)} ${data.unit}`;
   const timeRingMarkup = '<svg class="cq-time-ring" viewBox="0 0 18 18" role="img" focusable="false"><circle class="cq-ring-track" cx="9" cy="9" r="7"/><circle class="cq-ring-fill" cx="9" cy="9" r="7" pathLength="100"/></svg>';
 
   const setPlanBadge = (badge, label, tier = "") => {
@@ -1001,9 +996,29 @@
     else delete badge.dataset.cqTier;
   };
 
+  const renderGauge = (trigger, data) => {
+    const needle = trigger.querySelector(".cq-gauge-needle");
+    const windows = data?.windows || [];
+    const limiting = windows.length && windows.every(item => Number.isFinite(item.usedPercent) && item.usedPercent >= 0 && item.usedPercent <= 100)
+      ? windows.reduce((a, b) => a.usedPercent >= b.usedPercent ? a : b) : null;
+    if (!limiting) {
+      needle.setAttribute("hidden", "");
+      needle.style.removeProperty("transform");
+      delete needle.dataset.remaining;
+      return "";
+    }
+    const remaining = 100 - limiting.usedPercent;
+    // Left = empty, upright = half, right = full. The data is remaining quota,
+    // independent of the elapsed-time rings in the expanded quota view.
+    needle.style.transform = `rotate(${remaining * 1.8 - 90}deg)`;
+    needle.dataset.remaining = String(remaining);
+    needle.removeAttribute("hidden");
+    return `${windowName(limiting.label)} ${copy.remainingAvailable} ${formatPercent(remaining)}%`;
+  };
+
   const renderTrigger = (trigger, kind, data, summary) => {
     trigger.querySelector(".cq-trigger-copy").textContent = summary;
-    const presentation = kind === "official" ? officialPresentation(data) : null;
+    const presentation = officialPresentation(data);
     const badge = trigger.querySelector(".cq-trigger-plan");
     const tier = ["pro", "plus"].includes(presentation?.planName) ? presentation.planName : "";
     const planLabel = tier === "pro" ? "Pro" : tier === "plus" ? "Plus" : "";
@@ -1116,7 +1131,10 @@
       trigger.toggleAttribute("data-cq-low", low);
       trigger.dataset.cqKind = kind;
       const planLabel = renderTrigger(trigger, kind, data, summary);
-      const description = planLabel ? `${planLabel} · ${summary}` : summary;
+      const gaugeLabel = renderGauge(trigger, data);
+      let description = planLabel ? `${planLabel} · ${summary}` : summary;
+      if (trigger.hasAttribute("data-cq-collapsed") && gaugeLabel) description += ` · ${words("指针", "Needle")}: ${gaugeLabel}`;
+      if (state.text) description += ` · ${state.text}`;
       trigger.setAttribute("aria-label", description + (low ? words("，额度偏低", ", low quota") : ""));
       trigger.title = description;
     }
@@ -1162,30 +1180,10 @@
     finishRender(card, content, "official", windows.length ? data : null, errorCode, summary, low);
   };
 
-  const renderApi = (card, data, errorCode = null) => {
-    if (sharedPopover && sharedPopover.signature !== JSON.stringify(data || null)) finishSharedPopover();
-    const valid = validApiPayload(data);
-    const hasTotal = valid && Number.isFinite(data.total) && data.total > 0;
-    const remainingPercent = hasTotal ? Math.max(0, Math.min(100, data.remaining / data.total * 100)) : null;
-    const content = quotaContent(card, "api", valid ? [copy.apiTitle] : []);
-    setPlanBadge(content.querySelector(".cq-plan"), valid && typeof data.planName === "string" ? data.planName.trim() : "");
-    const row = content.querySelector(".cq-quota-row");
-    if (row) {
-      row.querySelector(".cq-value-number").textContent = amount(data);
-      setUsage(row, remainingPercent, copy.apiRemainingAria);
-      row.querySelector(".cq-reset").textContent = hasTotal ? `${copy.remainingAvailable} ${formatPercent(remainingPercent)}%` : "";
-      row.querySelector(".cq-row-foot").hidden = !hasTotal;
-      row.toggleAttribute("data-cq-low", hasTotal && remainingPercent <= Math.max(...thresholds(), 0));
-    }
-    const summary = valid ? `${copy.apiTitle}  ${amount(data)}` : words("额度  暂不可用", "Quota  Unavailable");
-    finishRender(card, content, "api", valid ? data : null, errorCode, summary, hasTotal && remainingPercent <= Math.max(...thresholds(), 0));
-  };
-
-
   const clearQuotaRequest = (kind) => {
     clearTimeout(requestTimers.get(kind));
     requestTimers.delete(kind);
-    const prefix = kind === "api" ? "__codexQuotaApi" : "__codexQuotaOfficial";
+    const prefix = "__codexQuotaOfficial";
     delete globalThis[prefix + "RequestId"];
     delete globalThis[prefix + "RequestDeadline"];
   };
@@ -1193,13 +1191,13 @@
   const armRequestTimeout = (kind) => {
     clearTimeout(requestTimers.get(kind));
     requestTimers.delete(kind);
-    const prefix = kind === "api" ? "__codexQuotaApi" : "__codexQuotaOfficial";
+    const prefix = "__codexQuotaOfficial";
     const requestId = globalThis[prefix + "RequestId"];
     if (!requestId || disposed) return;
     const remaining = Number(globalThis[prefix + "RequestDeadline"] || 0) - Date.now();
     if (remaining <= 0) {
       clearQuotaRequest(kind);
-      const receive = kind === "api" ? globalThis.__codexQuotaUpdateApi : globalThis.__codexQuotaUpdateOfficial;
+      const receive = globalThis.__codexQuotaUpdateOfficial;
       receive({errorCode: "REQUEST_TIMEOUT"});
       return;
     }
@@ -1207,7 +1205,7 @@
   };
 
   const beginQuotaRequest = (kind, manual) => {
-    const prefix = kind === "api" ? "__codexQuotaApi" : "__codexQuotaOfficial";
+    const prefix = "__codexQuotaOfficial";
     const data = globalThis[prefix + "Payload"];
     manualRefresh = manual ? {kind, fingerprint: data ? quotaUsageFingerprint(data) : null} : null;
     const requestId = `${requestEpoch}-${++requestSequence}`;
@@ -1219,27 +1217,12 @@
   };
 
   const acceptQuotaResponse = (kind, requestId) => {
-    const pendingId = kind === "api" ? globalThis.__codexQuotaApiRequestId : globalThis.__codexQuotaOfficialRequestId;
+    const pendingId = globalThis.__codexQuotaOfficialRequestId;
     if ((pendingId || requestId != null) && requestId !== pendingId) return false;
-    const deadline = kind === "api" ? globalThis.__codexQuotaApiRequestDeadline : globalThis.__codexQuotaOfficialRequestDeadline;
+    const deadline = globalThis.__codexQuotaOfficialRequestDeadline;
     if (pendingId && Date.now() >= deadline) { armRequestTimeout(kind); return false; }
     clearQuotaRequest(kind);
     return true;
-  };
-
-  const requestApiData = (manual = false) => {
-    if (globalThis.__codexQuotaApiNeedsData === true) return;
-    const now = Date.now();
-    const cooldownUntil = Number(globalThis.__codexQuotaApiCooldownUntil || 0);
-    if (now < cooldownUntil) {
-      showCooldown("api", cooldownUntil);
-      return;
-    }
-    if (!manual && now < Number(globalThis.__codexQuotaApiNextAutoAttemptAt || 0)) return;
-    const requestId = beginQuotaRequest("api", manual);
-    const card = document.getElementById(apiHostId);
-    if (card) renderApi(card, globalThis.__codexQuotaApiPayload || null, quotaErrorCode("api"));
-    console.info("__codexQuotaApiRequest__", requestId);
   };
 
   const requestOfficialData = (manual = false) => {
@@ -1258,12 +1241,10 @@
   };
 
   const refreshStaleData = () => {
-    const isApi = apiMode();
-    const {nextAttemptAt, cooldownUntil} = quotaTiming(isApi);
+    const {nextAttemptAt, cooldownUntil} = quotaTiming();
     const nextAt = Math.max(nextAttemptAt, cooldownUntil);
     if (nextAt > 0 && Date.now() >= nextAt) {
-      if (isApi) requestApiData(false);
-      else requestOfficialData();
+      requestOfficialData();
       return;
     }
     scheduleAutoRefresh();
@@ -1273,30 +1254,23 @@
     clearTimeout(globalThis.__codexQuotaAutoRefreshTimer);
     globalThis.__codexQuotaAutoRefreshTimer = null;
     if (document.visibilityState !== "visible") return;
-    const isApi = apiMode();
-    const loaded = isApi
-      ? globalThis.__codexQuotaApiLoaded === true
-      : globalThis.__codexQuotaOfficialLoaded === true;
+    const loaded = globalThis.__codexQuotaOfficialLoaded === true;
     if (!loaded) return;
-    const {lastSuccessAt, nextAttemptAt, cooldownUntil} = quotaTiming(isApi);
+    const {lastSuccessAt, nextAttemptAt, cooldownUntil} = quotaTiming();
     const fallbackNextAt = lastSuccessAt ? lastSuccessAt + adaptiveRefreshDelayMs() : 0;
     const networkNextAt = Math.max(nextAttemptAt || fallbackNextAt, cooldownUntil);
     const now = Date.now();
-    const timedCard = !isApi
-      ? document.querySelector(`.${compactContentClass}[data-cq-layout="sidebar-v3"]`)
-      : null;
+    const timedCard = document.querySelector(`.${compactContentClass}[data-cq-layout="sidebar-v3"]`);
     const ringNextAt = timedCard ? now + (60000 - (now % 60000)) : Infinity;
     const nextAt = Math.min(networkNextAt || Infinity, ringNextAt);
     if (!Number.isFinite(nextAt)) return;
     globalThis.__codexQuotaAutoRefreshTimer = setTimeout(() => {
       globalThis.__codexQuotaAutoRefreshTimer = null;
       if (document.visibilityState !== "visible") return;
-      if (!apiMode()) {
-        const card = document.getElementById(officialHostId);
-        if (card) applyOfficialTime(card, globalThis.__codexQuotaOfficialPayload || nativeSnapshot);
-      }
+      const card = document.getElementById(officialHostId);
+      if (card) applyOfficialTime(card, globalThis.__codexQuotaOfficialPayload || nativeSnapshot);
       refreshStaleData();
-    }, Math.max(1000, nextAt - Date.now()));
+    }, Math.min(2147483647, Math.max(1000, nextAt - Date.now())));
   };
 
   const installAutoRefresh = () => {
@@ -1311,19 +1285,17 @@
         globalThis.__codexQuotaAutoRefreshTimer = null;
         return;
       }
-      for (const kind of ["api", "official"]) armRequestTimeout(kind);
-      if (!apiMode()) {
-        const card = document.getElementById(officialHostId);
-        if (card) applyOfficialTime(card, globalThis.__codexQuotaOfficialPayload || nativeSnapshot);
-      }
-      recordQuotaInteraction(apiMode() ? "api" : "official");
+      armRequestTimeout("official");
+      const card = document.getElementById(officialHostId);
+      if (card) applyOfficialTime(card, globalThis.__codexQuotaOfficialPayload || nativeSnapshot);
+      recordQuotaInteraction("official");
       refreshStaleData();
     };
     globalThis.__codexQuotaAutoRefreshHandler = handler;
     window.addEventListener("focus", handler);
     document.addEventListener("visibilitychange", handler);
-    for (const kind of ["api", "official"]) armRequestTimeout(kind);
-    if (document.visibilityState === "visible") recordQuotaInteraction(apiMode() ? "api" : "official");
+    armRequestTimeout("official");
+    if (document.visibilityState === "visible") recordQuotaInteraction("official");
     scheduleAutoRefresh();
   };
 
@@ -1369,53 +1341,10 @@
         globalThis.__codexQuotaOfficialCooldownUntil = now + retryMs;
       }
     }
-    if (!apiMode()) {
-      const card = document.getElementById(officialHostId);
-      if (card) renderOfficial(card, globalThis.__codexQuotaOfficialPayload || nativeSnapshot, quotaErrorCode("official"));
-    }
+    const card = document.getElementById(officialHostId);
+    if (card) renderOfficial(card, globalThis.__codexQuotaOfficialPayload || nativeSnapshot, quotaErrorCode("official"));
     if (awaitingSession && !globalThis.__codexQuotaAwaitingFreshSession) installLayout();
-    if (!apiMode()) scheduleAutoRefresh();
-  };
-
-  globalThis.__codexQuotaUpdateApi = (data, requestId) => {
-    if (!acceptQuotaResponse("api", requestId)) return;
-    const awaitingSession = globalThis.__codexQuotaAwaitingFreshSession;
-    globalThis.__codexQuotaApiNeedsData = false;
-    globalThis.__codexQuotaApiLoaded = true;
-    const now = Date.now();
-    if (data && !data.errorCode && !data.error && validApiPayload(data)) {
-      globalThis.__codexQuotaAwaitingFreshSession = false;
-      void checkAlerts("api", data);
-      const fingerprint = quotaUsageFingerprint(data);
-      const previousFingerprint = globalThis.__codexQuotaApiUsageFingerprint;
-      if (previousFingerprint && previousFingerprint !== fingerprint) {
-        globalThis.__codexQuotaLastUsageActivityAt = now;
-      }
-      globalThis.__codexQuotaApiUsageFingerprint = fingerprint;
-      globalThis.__codexQuotaApiPayload = data;
-      globalThis.__codexQuotaApiErrorCode = null;
-      globalThis.__codexQuotaApiError = null;
-      globalThis.__codexQuotaApiLastSuccessAt = now;
-      globalThis.__codexQuotaApiNextAutoAttemptAt = now + adaptiveRefreshDelayMs(now);
-      globalThis.__codexQuotaApiCooldownUntil = 0;
-    } else {
-      globalThis.__codexQuotaApiErrorCode = data?.errorCode || "UNAVAILABLE";
-      globalThis.__codexQuotaApiError = null;
-      const retrySeconds = Number(data?.retryAfterSeconds);
-      const retryMs = Number.isFinite(retrySeconds) && retrySeconds > 0
-        ? Math.max(failureRetryMs, retrySeconds * 1000)
-        : failureRetryMs;
-      globalThis.__codexQuotaApiNextAutoAttemptAt = now + retryMs;
-      if (Number.isFinite(retrySeconds) && retrySeconds > 0) {
-        globalThis.__codexQuotaApiCooldownUntil = now + retryMs;
-      }
-    }
-    if (apiMode()) {
-      const card = document.getElementById(apiHostId);
-      if (card) renderApi(card, globalThis.__codexQuotaApiPayload || null, quotaErrorCode("api"));
-    }
-    if (awaitingSession && !globalThis.__codexQuotaAwaitingFreshSession) installLayout();
-    if (apiMode()) scheduleAutoRefresh();
+    scheduleAutoRefresh();
   };
 
   // These anchors are from the installed host shell, not the offline prototype.
@@ -1451,7 +1380,7 @@
   const positionPopover = () => {
     const popup = document.getElementById("codex-quota-popover");
     const trigger = document.getElementById("codex-quota-trigger");
-    if (sharedPopover || !popup?.matches(":popover-open") || !visible(trigger)) return;
+    if (sharedPopover || paneMotion || !popup?.matches(":popover-open") || !visible(trigger)) return;
     const rect = trigger.getBoundingClientRect();
     const column = anchors?.column && visible(anchors.column) ? anchors.column.getBoundingClientRect() : null;
     const leftEdge = column ? Math.max(12, column.left + 8) : 12;
@@ -1471,7 +1400,7 @@
     const controlLeft = column ? arrow.left + arrow.width / 2 - box.left - popup.clientLeft - 12 : popup.clientWidth - 30;
     collapse.style.left = controlLeft + "px";
     // Both right-hand tools share the measured entry arrow axis.
-    const heading = popup.querySelector(".cq-heading");
+    const heading = popup.querySelector("#cq-settings:not([hidden]) header") || popup.querySelector(".cq-heading");
     if (heading?.getClientRects().length) popup.style.setProperty("--cq-control-right",
       (heading.getBoundingClientRect().right - box.left - popup.clientLeft - controlLeft - 24) + "px");
     collapse.style.top = (column ? arrow.top + arrow.height / 2 - box.top - popup.clientTop + popup.scrollTop - 12 : popup.scrollTop + popup.clientHeight - 30) + "px";
@@ -1481,8 +1410,8 @@
     if (!state) return;
     sharedPopover = null;
     for (const animation of state.animations || []) { animation.onfinish = null; animation.cancel(); }
-    state.layer.remove();
-    state.surface.remove();
+    state.layer?.remove();
+    state.surface?.remove();
     for (const {from, to} of state.actors) {
       from.removeAttribute("data-cq-shared-hidden");
       to.removeAttribute("data-cq-shared-hidden");
@@ -1490,6 +1419,7 @@
     for (const name of ["opacity", "clip-path"]) state.content.style.removeProperty(name);
     const {popup, trigger, collapse} = quotaShell;
     popup.removeAttribute("data-cq-morph");
+    popup.removeAttribute("data-cq-rail-motion");
     collapse.firstElementChild.style.removeProperty("transform");
     const open = popup.matches(":popover-open");
     trigger.toggleAttribute("data-cq-replaced", open && !trigger.hasAttribute("data-cq-collapsed"));
@@ -1504,6 +1434,24 @@
     if (reducedMotion.matches || document.visibilityState !== "visible" || !visible(trigger)) {
       finishSharedPopover();
       return false;
+    }
+    if (!sharedPopover && trigger.hasAttribute("data-cq-collapsed")) {
+      settlePopoverMotion();
+      const content = [...popup.children].find(node => !node.hidden && node !== collapse);
+      if (!content) return false;
+      const rect = popup.getBoundingClientRect(), origin = trigger.getBoundingClientRect();
+      const dx = Math.max(12 - rect.left, Math.min(innerWidth - 12 - rect.right, Math.max(-6, Math.min(6, origin.left - rect.left))));
+      const dy = Math.max(12 - rect.top, Math.min(innerHeight - 12 - rect.bottom, Math.max(-6, Math.min(6, origin.bottom - rect.bottom))));
+      // A transparent navigation icon has no material to receive a shrinking card.
+      // Fade the intact panel and its contents together; retain the icon throughout.
+      sharedPopover = {initial: open ? 0 : 1, rail: true, actors: [], content, column: anchors.column,
+        signature: JSON.stringify((globalThis.__codexQuotaOfficialPayload || nativeSnapshot) || null),
+        framesAt: value => {
+          const p = Math.max(0, Math.min(1, value));
+          return [[popup, {opacity: p, transform: `translate(${dx * (1 - p)}px, ${dy * (1 - p)}px)`}],
+            [content, {opacity: 1}], [collapse, {opacity: 1}]];
+        }};
+      popup.setAttribute("data-cq-rail-motion", "");
     }
     if (!sharedPopover) {
       settlePopoverMotion();
@@ -1548,7 +1496,7 @@
         if (fill) { fill.style.width = fillWidth + "px"; fill.style.minWidth = "0"; fill.style.transformOrigin = "0 0"; }
         actors.push({key, node, clone, from, to, a, b, fill, fillWidth, minFill, fillColor: fill ? getComputedStyle(from.firstElementChild).backgroundColor : "", endFillColor: fill ? getComputedStyle(to.firstElementChild).backgroundColor : "", usedPercent: fill ? Number(to.getAttribute("aria-valuenow")) : 0, color: css.color, endColor: getComputedStyle(to).color});
       };
-      // Only actual corresponding data is shared. API/text/rail modes never invent actors.
+      // Only actual corresponding data is shared. text/rail modes never invent actors.
       if (trigger.hasAttribute("data-cq-graphical") && content.querySelector("[data-cq-focal]")) {
         pair("plan", trigger.querySelector(".cq-trigger-plan"), content.querySelector(".cq-plan"));
         for (const [label, key] of [["Weekly", "weekly"], ["5h", "5h"]]) {
@@ -1565,7 +1513,7 @@
         }
       }
       const state = {initial: open ? 0 : 1, actors, layer, surface, content, column: anchors.column,
-        signature: JSON.stringify((apiMode() ? globalThis.__codexQuotaApiPayload : globalThis.__codexQuotaOfficialPayload || nativeSnapshot) || null)};
+        signature: JSON.stringify((globalThis.__codexQuotaOfficialPayload || nativeSnapshot) || null)};
       const offsetX = rect.left + popup.clientLeft, offsetY = rect.top + popup.clientTop;
       const startRadius = parseFloat(triggerStyle.borderTopLeftRadius) * origin.height / trigger.offsetHeight;
       const endRadius = parseFloat(surfaceStyle.borderTopLeftRadius);
@@ -1608,19 +1556,23 @@
     }
     const state = sharedPopover;
     state.target = Number(open);
-    trigger.setAttribute("data-cq-replaced", "");
+    trigger.toggleAttribute("data-cq-replaced", !state.rail);
     // Native closed popovers leave hit testing before their visual exit finishes.
     // The invisible original entry must accept the next click/key during that exit.
-    trigger.tabIndex = open ? -1 : 0;
+    trigger.tabIndex = open && !state.rail ? -1 : 0;
     collapse.setAttribute("aria-label", open ? words("收起额度", "Collapse quota") : words("展开额度", "Expand quota"));
     collapse.title = collapse.getAttribute("aria-label");
-    // Native keyframes do not write inline styles every frame. This avoids waking
-    // the host's document observers and keeps transforms running on its animation clock.
+    playSpring(state, Number(open), () => { if (sharedPopover === state) finishSharedPopover(); });
+    return true;
+  };
+
+  // Both navigation paths share one sampled spring and the browser's animation clock.
+  const playSpring = (state, target, complete) => {
     const elapsed = Number(state.animations?.[0]?.currentTime || 0);
     const current = state.generator ? state.generator.next(elapsed).value : state.initial;
-    const velocity = state.generator ? state.generator.velocity(elapsed) : 0;
+    const velocity = state.generator ? state.generator.velocity(elapsed) : state.velocity || 0;
     for (const animation of state.animations || []) { animation.onfinish = null; animation.cancel(); }
-    const generator = spring({keyframes: [current, Number(open)], velocity,
+    const generator = spring({keyframes: [current, target], velocity,
       stiffness: 420, damping: 42, mass: 1, restDelta: .001, restSpeed: .01});
     const samples = [];
     for (let time = 0; ; time += 1000 / 120) {
@@ -1646,13 +1598,13 @@
         return animation;
       }));
     const clock = state.animations[0];
-    clock.onfinish = () => { if (sharedPopover === state && state.animations[0] === clock) finishSharedPopover(); };
-    return true;
+    clock.onfinish = () => { if (state.animations[0] === clock) complete(); };
   };
 
   const settlePopoverMotion = () => {
     if (!quotaShell) return null;
     const {popup} = quotaShell;
+    finishPaneMotion();
     finishSharedPopover();
     stopMotion(popup);
     for (const child of popup.children) stopMotion(child);
@@ -1661,7 +1613,8 @@
   };
   const animatePopover = (open) => {
     const {popup, trigger} = quotaShell;
-    if (!trigger.hasAttribute("data-cq-collapsed") && animateSharedPopover(open)) return;
+    if (paneMotion) { animatePane(paneMotion.host, paneMotion.panel, paneMotion.settings, open); return; }
+    if (animateSharedPopover(open)) return;
     const rect = settlePopoverMotion();
     if (reducedMotion.matches || document.visibilityState !== "visible" || !visible(trigger)) return;
     const origin = trigger.getBoundingClientRect();
@@ -1673,7 +1626,7 @@
     const full = `inset(0px 0px 0px 0px round ${endRadius})`;
     // The clipped slice, not the full panel, must start at the measured trigger.
     const offset = `translate(${origin.left - rect.left}px, ${origin.top - rect.top - top}px)`;
-    const content = [...popup.children].find(child => !child.hidden);
+    const content = [...popup.children].find(child => !child.hidden && child !== quotaShell.collapse);
     if (content) move(content, {opacity: open ? [0, 1] : [1, 0], transform: open ? ["translateY(4px)", "translateY(0px)"] : ["translateY(0px)", "translateY(4px)"]},
       {duration: open ? .16 : .08, delay: open ? .08 : 0, ease: [.2, .8, .2, 1]}, () => {
         content.style.removeProperty("opacity"); content.style.removeProperty("transform");
@@ -1683,26 +1636,86 @@
         for (const name of ["transform", "clip-path", "opacity"]) popup.style.removeProperty(name);
       });
   };
-  const animatePane = (previous, content) => {
-    const {popup} = quotaShell;
+  const finishPaneMotion = () => {
+    const state = paneMotion;
+    if (!state) return;
+    paneMotion = null;
+    for (const animation of state.animations || []) { animation.onfinish = null; animation.cancel(); }
+    const {popup, trigger, collapse} = quotaShell;
+    popup.removeAttribute("data-cq-pane");
+    popup.style.removeProperty("height");
+    for (const node of [state.host, state.panel]) {
+      for (const name of ["position", "left", "top", "width"]) node.style.removeProperty(name);
+      node.inert = false;
+      node.removeAttribute("aria-hidden");
+    }
+    state.host.hidden = state.open && state.settings;
+    if (!state.host.hidden) state.panel.remove();
+    trigger.toggleAttribute("data-cq-replaced", state.open && !trigger.hasAttribute("data-cq-collapsed"));
+    trigger.tabIndex = state.open && trigger.hasAttribute("data-cq-replaced") ? -1 : 0;
+    collapse.firstElementChild.style.removeProperty("transform");
+    state.host.querySelectorAll(".cq-refresh").forEach(refreshMotion);
     positionPopover();
-    if (!previous || !popup.matches(":popover-open") || reducedMotion.matches || document.visibilityState !== "visible") return;
-    const next = popup.getBoundingClientRect();
-    // Reserve both endpoints once; only the mask and content translation animate.
-    popup.style.height = Math.max(previous.height, next.height) + "px";
-    positionPopover();
-    const box = popup.getBoundingClientRect();
-    const radius = getComputedStyle(popup).borderTopLeftRadius;
-    content.style.transform = `translateY(${box.height - next.height}px)`;
-    move(content, {opacity: [0, 1]}, {duration: .16, ease: [.2, .8, .2, 1]}, () => content.style.removeProperty("opacity"));
-    move(popup, {
-      transform: [`translate(${previous.left - box.left}px, ${previous.bottom - box.bottom}px)`, `translate(${next.left - box.left}px, ${next.bottom - box.bottom}px)`],
-      clipPath: [`inset(${Math.max(0, box.height - previous.height)}px 0px 0px 0px round ${radius})`, `inset(${Math.max(0, box.height - next.height)}px 0px 0px 0px round ${radius})`],
-    }, {duration: .16, ease: [.2, .8, .2, 1]}, () => {
-      for (const name of ["height", "transform", "clip-path"]) popup.style.removeProperty(name);
-      content.style.removeProperty("transform");
+  };
+  const animatePane = (host, panel, settings, open = quotaShell.popup.matches(":popover-open")) => {
+    const {popup, trigger, collapse} = quotaShell;
+    if (!paneMotion) {
+      const material = sharedPopover?.rail ? getComputedStyle(popup) : null;
+      const matrix = material && new DOMMatrixReadOnly(material.transform);
+      const presentation = material ? {opacity: Number(material.opacity), x: matrix.m41, y: matrix.m42} : {};
+      settlePopoverMotion();
+      const initial = Number(host.hidden);
+      const rects = [false, true].map(value => {
+        host.hidden = value; panel.hidden = !value;
+        positionPopover();
+        return {box: popup.getBoundingClientRect(), content: (value ? panel : host).getBoundingClientRect()};
+      });
+      popup.style.height = Math.max(...rects.map(rect => rect.box.height)) + "px";
       positionPopover();
-    });
+      const box = popup.getBoundingClientRect(), css = getComputedStyle(popup);
+      for (const [index, node] of [host, panel].entries()) {
+        node.hidden = false;
+        Object.assign(node.style, {position: "absolute", left: css.paddingLeft, top: css.paddingTop, width: rects[index].content.width + "px"});
+      }
+      const endpoint = value => ({height: rects[Number(value)].box.height, quota: Number(!value), settings: Number(value), shift: Number(value), arrow: 180, opacity: 1, x: 0, y: 0});
+      paneMotion = {host, panel, box, radius: css.borderTopLeftRadius, endpoint, current: {...endpoint(Boolean(initial)), ...presentation}, initial: 0,
+        settings, open, column: anchors?.column};
+      popup.setAttribute("data-cq-pane", "");
+    }
+    const state = paneMotion;
+    const elapsed = Number(state.animations?.[0]?.currentTime || 0);
+    const from = state.frameAt ? state.frameAt(state.generator.next(elapsed).value) : state.current;
+    const rail = trigger.hasAttribute("data-cq-collapsed");
+    const to = open ? state.endpoint(settings) : rail
+      ? {...from, opacity: 0, x: Math.max(12 - state.box.left, -6)}
+      : {...from, height: trigger.getBoundingClientRect().height, quota: 0, settings: 0, arrow: 0};
+    // Carry the visible edge's velocity when retargeting, including mid-pane close/reopen.
+    const distance = to.height - from.height;
+    state.velocity = state.generator ? state.generator.velocity(elapsed) * (distance ? state.heightDelta / distance
+      : to.opacity !== from.opacity ? (state.opacityDelta || 0) / (to.opacity - from.opacity) : 0) : 0;
+    state.generator = null;
+    state.initial = 0;
+    state.heightDelta = distance;
+    state.opacityDelta = to.opacity - from.opacity;
+    state.settings = settings;
+    state.open = open;
+    state.frameAt = progress => Object.fromEntries(Object.keys(from).map(key => [key, from[key] + (to[key] - from[key]) * progress]));
+    state.framesAt = progress => {
+      const frame = state.frameAt(progress), y = state.box.height - frame.height;
+      return [[popup, {clipPath: `inset(${Math.max(0, y)}px 0px 0px 0px round ${state.radius})`, opacity: Math.max(0, Math.min(1, frame.opacity)), transform: `translate(${frame.x}px, ${frame.y}px)`}],
+        [host, {transform: `translate(${-8 * frame.shift}px, ${y}px)`, opacity: Math.max(0, frame.quota)}],
+        [panel, {transform: `translate(${8 * (1 - frame.shift)}px, ${y}px)`, opacity: Math.max(0, frame.settings)}],
+        [collapse.firstElementChild, {transform: `rotate(${frame.arrow}deg)`}]];
+    };
+    for (const [node, active] of [[host, !settings && open], [panel, settings && open]]) {
+      node.inert = !active;
+      if (active) node.removeAttribute("aria-hidden"); else node.setAttribute("aria-hidden", "true");
+    }
+    host.querySelectorAll(".cq-refresh-icon").forEach(stopMotion);
+    trigger.toggleAttribute("data-cq-replaced", !trigger.hasAttribute("data-cq-collapsed"));
+    trigger.tabIndex = open ? -1 : 0;
+    if (reducedMotion.matches || document.visibilityState !== "visible" || !visible(trigger)) { finishPaneMotion(); return; }
+    playSpring(state, 1, () => { if (paneMotion === state) finishPaneMotion(); });
   };
   const syncSurface = () => {
     const railStyle = getComputedStyle(anchors.rail);
@@ -1712,11 +1725,13 @@
       node.toggleAttribute("data-cq-dark", dark);
       node.style.colorScheme = dark ? "dark" : "light";
       // Scoped theme variables may live on the shell rather than :root.
-      for (const name of ["--color-surface-elevated-secondary", "--color-token-main-surface-primary", "--color-text", "--color-token-text-primary", "--color-text-secondary", "--color-token-text-secondary", "--color-text-warning-surface", "--color-border", "--color-border-strong", "--color-background-primary-ghost-hover", "--radius-sm", "--default-font-family"]) {
+      for (const name of ["--color-surface-elevated-secondary", "--color-token-main-surface-primary", "--color-text", "--color-token-text-primary", "--color-text-secondary", "--color-token-text-secondary", "--color-text-tertiary", "--color-text-warning-surface", "--color-border", "--color-border-strong", "--color-background-primary-ghost-hover", "--radius-sm", "--default-font-family"]) {
         const value = railStyle.getPropertyValue(name);
         if (value) node.style.setProperty(name, value);
         else node.style.removeProperty(name);
       }
+      const navigationButton = anchors.rail.querySelector('button[aria-current], button:not(#codex-quota-trigger)');
+      if (navigationButton) node.style.setProperty("--cq-rail-radius", getComputedStyle(navigationButton).borderRadius);
     }
   };
   const ensureShell = () => {
@@ -1735,7 +1750,13 @@
     badge.className = "cq-trigger-plan cq-plan-badge";
     badge.hidden = true;
     badge.setAttribute("aria-hidden", "true");
-    trigger.append(icon(Gauge, "cq-trigger-icon"), badge, Object.assign(document.createElement("span"), {className: "cq-trigger-copy"}));
+    const gauge = createElement([
+      ["path", {d: "M3.5 15.25a8 8 0 1 1 13 0"}],
+      ["path", {d: "M3.75 11h.75M10 4.5v.75M15.5 11h.75"}],
+      ["path", {class: "cq-gauge-needle", hidden: "", d: "M10 11V7"}],
+      ["circle", {cx: "10", cy: "11", r: "1", fill: "currentColor", stroke: "none"}],
+    ], {class: "cq-trigger-icon", viewBox: "0 0 20 20", width: "20", height: "20", "stroke-width": "1.33", "aria-hidden": "true", focusable: "false"});
+    trigger.append(gauge, badge, Object.assign(document.createElement("span"), {className: "cq-trigger-copy"}));
     const graphics = document.createElement("span");
     graphics.className = "cq-trigger-graphics";
     graphics.setAttribute("aria-hidden", "true");
@@ -1766,7 +1787,7 @@
       openingPending = false;
       popup.removeAttribute("data-cq-opening");
       animatePopover(true);
-      if (focusFromTrigger) [...popup.querySelectorAll("button:not(:disabled)")].find(button => button.getClientRects().length)?.focus({preventScroll: true});
+      if (focusFromTrigger) [...popup.querySelectorAll("button:not(:disabled)")].find(button => button.getClientRects().length && !button.closest("[inert]"))?.focus({preventScroll: true});
       focusFromTrigger = false;
     };
     const escape = (event) => {
@@ -1787,17 +1808,17 @@
       trigger.setAttribute("aria-expanded", String(open));
       collapse.setAttribute("aria-label", open ? words("收起额度", "Collapse quota") : words("展开额度", "Expand quota"));
       collapse.title = collapse.getAttribute("aria-label");
-      trigger.toggleAttribute("data-cq-replaced", (open || Boolean(sharedPopover)) && !trigger.hasAttribute("data-cq-collapsed"));
+      trigger.toggleAttribute("data-cq-replaced", (open || Boolean(sharedPopover || paneMotion)) && !trigger.hasAttribute("data-cq-collapsed"));
       trigger.tabIndex = trigger.getAttribute("aria-expanded") === "true" && trigger.hasAttribute("data-cq-replaced") ? -1 : 0;
       if (open) {
-        if (!sharedPopover) settlePopoverMotion();
+        if (!sharedPopover && !paneMotion) settlePopoverMotion();
         openingPending = true;
-        popup.toggleAttribute("data-cq-opening", !sharedPopover && !reducedMotion.matches && document.visibilityState === "visible");
+        popup.toggleAttribute("data-cq-opening", !sharedPopover && !paneMotion && !reducedMotion.matches && document.visibilityState === "visible");
         // A mid-close reversal returns to the same pane and measured geometry.
         // Only a fresh opening returns from settings to the quota view.
-        if (!sharedPopover) {
+        if (!sharedPopover && !paneMotion) {
           document.getElementById("cq-settings")?.remove();
-          const host = popup.querySelector(`#${officialHostId}, #${apiHostId}`);
+          const host = popup.querySelector(`#${officialHostId}`);
           if (host) host.hidden = false;
         }
         queueMicrotask(startOpen);
@@ -1833,10 +1854,11 @@
     footer.hidden = !anchors?.column;
     if (!anchors) { if (popup.matches(":popover-open")) popup.hidePopover(); return false; }
     const {column, avatar, rail, stack} = anchors;
-    if (sharedPopover && (sharedPopover.column !== column || !column)) finishSharedPopover();
+    if (sharedPopover && sharedPopover.column !== column) finishSharedPopover();
+    if (paneMotion && paneMotion.column !== column) finishPaneMotion();
     trigger.toggleAttribute("data-cq-collapsed", !column);
     popup.toggleAttribute("data-cq-inplace", Boolean(column));
-    trigger.toggleAttribute("data-cq-replaced", Boolean(column && (popup.matches(":popover-open") || sharedPopover)));
+    trigger.toggleAttribute("data-cq-replaced", Boolean(column && (popup.matches(":popover-open") || sharedPopover || paneMotion)));
     trigger.tabIndex = trigger.getAttribute("aria-expanded") === "true" && trigger.hasAttribute("data-cq-replaced") ? -1 : 0;
     if (column) {
       if (footer.parentElement !== column) column.append(footer);
@@ -1862,19 +1884,18 @@
     positionPopover();
     return true;
   };
-  const quotaHost = (kind) => {
-    const id = kind === "api" ? apiHostId : officialHostId;
+  const quotaHost = () => {
+    const id = officialHostId;
     let host = document.getElementById(id);
     if (!host) {
       host = document.createElement("div");
       host.id = id;
-      host.className = kind === "api" ? apiCardClass : compactClass;
+      host.className = compactClass;
       document.getElementById("codex-quota-popover").prepend(host);
     }
     return host;
   };
   const removeOfficialCard = () => { const card = document.getElementById(officialHostId); stopCardMotion(card); card?.remove(); };
-  const removeApiCard = () => { const card = document.getElementById(apiHostId); stopCardMotion(card); card?.remove(); };
   const readNativeQuota = () => {
     if (globalThis.__codexQuotaAwaitingFreshSession) return null;
     const card = nativeQuotaCard();
@@ -1891,17 +1912,10 @@
     ensureStyle();
     mountShell();
     const native = nativeQuotaCard();
-    const data = apiMode() ? globalThis.__codexQuotaApiPayload : globalThis.__codexQuotaOfficialPayload || readNativeQuota();
+    const data = globalThis.__codexQuotaOfficialPayload || readNativeQuota();
     if (native) native.setAttribute("data-codex-quota-source", "");
-    if (apiMode()) {
-      removeOfficialCard();
-      renderApi(quotaHost("api"), data || null, quotaErrorCode("api"));
-      if (!globalThis.__codexQuotaApiLoaded) requestApiData();
-    } else {
-      removeApiCard();
-      renderOfficial(quotaHost("official"), data || null, quotaErrorCode("official"));
-      if (!globalThis.__codexQuotaOfficialLoaded) requestOfficialData();
-    }
+    renderOfficial(quotaHost(), data || null, quotaErrorCode());
+    if (!globalThis.__codexQuotaOfficialLoaded) requestOfficialData();
   };
   const installLayout = () => {
     for (const element of [...motions.keys()]) if (!element.isConnected) stopMotion(element);
@@ -1911,19 +1925,20 @@
 
 
   globalThis.__codexQuotaResetSession = () => {
+    alertGeneration++;
     finishMotion();
     manualRefresh = null;
-    for (const kind of ["api", "official"]) clearQuotaRequest(kind);
+    clearQuotaRequest("official");
     for (const button of refreshFeedbackTimers.keys()) clearRefreshFeedback(button);
     clearTimeout(globalThis.__codexQuotaAutoRefreshTimer);
-    for (const kind of ["Api", "Official"]) {
+    for (const kind of ["Official"]) {
       for (const suffix of ["Payload", "ErrorCode", "Error", "UsageFingerprint", "LastSuccessAt", "NextAutoAttemptAt", "CooldownUntil", "NeedsData", "Loaded"]) {
         delete globalThis[`__codexQuota${kind}${suffix}`];
       }
     }
     document.getElementById("cq-notice")?.remove();
     nativeSnapshot = null;
-    removeOfficialCard(); removeApiCard();
+    removeOfficialCard();
     const popup = document.getElementById("codex-quota-popover");
     if (popup?.matches(":popover-open")) popup.hidePopover();
     document.getElementById("cq-settings")?.remove();
@@ -1939,8 +1954,7 @@
     if (native) native.setAttribute("data-codex-quota-source", "");
     globalThis.__codexQuotaAwaitingFreshSession = true;
     if (document.getElementById("codex-quota-popover")) {
-      if (apiMode()) renderApi(quotaHost("api"), null);
-      else renderOfficial(quotaHost("official"), null);
+      renderOfficial(quotaHost(), null);
     }
   };
   globalThis.__codexQuotaSettingsCleanup?.();
@@ -1961,7 +1975,7 @@
     globalThis.__codexQuotaGeometryCleanup?.();
     globalThis.__codexQuotaThemeCleanup?.();
     let scheduled = false;
-    const observed = new Set();
+    const observed = new Map();
     const owned = '#codex-quota-footer, #codex-quota-trigger, #codex-quota-popover, #cq-refresh-message, #cq-notice';
     const hostSelector = `${railSelector}, ${columnSelector}, [role='status'].rounded-2xl`;
     const schedule = () => {
@@ -1971,10 +1985,17 @@
         scheduled = false;
         if (disposed || globalThis.__codexQuotaOfficialCardObserver !== observer) return;
         installLayout();
-        const current = new Set(anchors ? [anchors.rail, anchors.stack, anchors.avatar, anchors.column].filter(Boolean) : []);
-        for (const node of observed) if (!current.has(node)) { resize.unobserve(node); observed.delete(node); }
-        for (const node of current) if (!observed.has(node)) { resize.observe(node); observed.add(node); }
+        observeAnchors();
       });
+    };
+    const observeAnchors = () => {
+      const current = new Set(anchors ? [anchors.rail, anchors.stack, anchors.avatar, anchors.column].filter(Boolean) : []);
+      for (const node of observed.keys()) if (!current.has(node)) { resize.unobserve(node); observed.delete(node); }
+      for (const node of current) {
+        const added = !observed.has(node);
+        observed.set(node, node.getBoundingClientRect());
+        if (added) resize.observe(node);
+      }
     };
     const observer = new MutationObserver(records => {
       if (records.some(record => {
@@ -2003,7 +2024,14 @@
     observer.observe(document.head, {childList: true, subtree: true, characterData: true, characterDataOldValue: true,
       attributes: true, attributeOldValue: true, attributeFilter: ["href", "media", "rel", "disabled"]});
     const onGeometryChange = () => { settlePopoverMotion(); schedule(); };
-    const resize = new ResizeObserver(onGeometryChange);
+    const resize = new ResizeObserver(entries => {
+      // Initial ResizeObserver delivery is not a resize; don't repaint or end a
+      // just-started morph unless an anchor actually differs from our last layout.
+      if (entries.some(({target}) => {
+        const previous = observed.get(target), current = target.getBoundingClientRect();
+        return previous && ["x", "y", "width", "height"].some(key => previous[key] !== current[key]);
+      })) onGeometryChange();
+    });
     const popupResize = new ResizeObserver(positionPopover);
     const media = matchMedia("(prefers-color-scheme: dark)");
     const onStylesheetLoad = event => { if (event.target instanceof HTMLLinkElement && event.target.relList.contains("stylesheet")) schedule(); };
@@ -2018,19 +2046,13 @@
       document.removeEventListener("load", onStylesheetLoad, true);
     };
     globalThis.__codexQuotaOfficialCardObserver = observer;
-    schedule();
+    observeAnchors();
     requestAnimationFrame(() => { const popup = document.getElementById("codex-quota-popover"); if (!disposed && popup) popupResize.observe(popup); });
   };
 
 
   const install = () => {
     try {
-      if (apiMode()) {
-        observeOfficialCards();
-        installLayout();
-        installAutoRefresh();
-        return true;
-      }
       const client = globalThis.__STATSIG__?.instance?.();
       if (client && typeof client.getLayer === "function" && !client.__codexNativeQuotaPatched) {
         const layerKeys = new Set(["3605558075", "1385051397", "2673725514"]);
@@ -2047,8 +2069,8 @@
         };
         client.__codexNativeQuotaPatched = true;
       }
-      observeOfficialCards();
       installLayout();
+      observeOfficialCards();
       installAutoRefresh();
       return true;
     } catch (error) { console.error("Codex quota UI installation failed", error); return false; }
@@ -2058,8 +2080,8 @@
     return true;
   }
   let attempts = 0;
-  const timer = setInterval(() => {
-    if (install() || ++attempts >= 120) clearInterval(timer);
+  installRetryTimer = setInterval(() => {
+    if (disposed || install() || ++attempts >= 120) clearInterval(installRetryTimer);
   }, 250);
   return false;
 })()

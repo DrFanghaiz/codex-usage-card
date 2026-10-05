@@ -16,40 +16,38 @@ nav[data-app-navigation-rail]{width:51px;display:flex;flex-direction:column;alig
 #native-menu{position:fixed;inset:auto;left:60px;top:100px;margin:0;padding:16px;background:var(--color-surface-elevated-secondary);color:var(--color-text)}
 [hidden]{display:none!important}@media(max-width:400px){.sidebar-navigation{width:220px}}
 </style></head><body><nav data-app-navigation-rail="true"><div class="rail-top"><button id="collapse">折叠</button><button id="menu-trigger" popovertarget="native-menu">菜单</button></div><div class="relative shrink-0 w-9"><div class="flex items-center flex-col rail-stack"><div class="flex items-center flex-col"><button id="help">?</button></div><div class="flex profile"><div class="sidebar-item"><div><button id="profile"><span><span id="avatar" class="rounded-full"></span></span></button></div></div></div></div></div></nav><div class="sidebar-navigation"><div class="contents"><nav role="navigation"><div>项目</div><div data-app-action-sidebar-scroll>${Array.from({length:80},(_,i)=>`<div class="list-item">项目 ${i}</div>`).join('')}</div></nav><div class="absolute inset-x-0 bottom-0 z-20"></div></div></div><main id="chat"><button id="outside">正文</button></main><div id="native-menu" popover="auto">原生菜单</div><script>document.getElementById('collapse').onclick=()=>document.querySelector('.sidebar-navigation').hidden=!document.querySelector('.sidebar-navigation').hidden;</script></body></html>`;
-const apiPayload = {used:25,remaining:75,total:100,unit:'USD'};
 const officialPayload = () => ({planName:'plus',windows:[{label:'5h',usedPercent:28,resetAt:Date.now()/1000+9000},{label:'Weekly',usedPercent:63,resetAt:Date.now()/1000+302400}]});
 let browser;
 before(async()=>{browser=await chromium.launch({headless:true,channel:'msedge'});});
 after(async()=>{await browser?.close();});
-async function setup(page,mode='account',data=mode==='api'?apiPayload:officialPayload()) {
-  await page.evaluate(({mode,data})=>{
-    __codexQuotaMode=mode;__codexQuotaSessionScope='synthetic-session';
-    const prefix=mode==='api'?'Api':'Official';
-    globalThis[`__codexQuota${prefix}Loaded`]=true;
-    globalThis[`__codexQuota${prefix}LastSuccessAt`]=Date.now();
-    if(data)globalThis[`__codexQuota${prefix}Payload`]=data;
+async function setup(page,data=officialPayload()) {
+  await page.evaluate(data=>{
+    __codexQuotaMode='account';__codexQuotaSessionScope='synthetic-session';
+    __codexQuotaOfficialLoaded=true;
+    __codexQuotaOfficialLastSuccessAt=Date.now();
+    if(data)__codexQuotaOfficialPayload=data;
     globalThis.layoutScans=0;
     const all=document.querySelectorAll.bind(document);
     document.querySelectorAll=selector=>{if(selector==='nav[data-app-navigation-rail="true"]')layoutScans++;return all(selector)};
-  },{mode,data});
+  },data);
   await page.evaluate(source);await settle(page);
 }
-async function pageFor(mode='account',data=mode==='api'?apiPayload:officialPayload(),viewport={width:1024,height:720},options={}) {
+async function pageFor(data=officialPayload(),viewport={width:1024,height:720},options={}) {
   const page=await browser.newPage({reducedMotion:'reduce',locale:'zh-CN',viewport,...options});
   const errors=[];page.on('pageerror',e=>errors.push(e.message));page.errors=errors;
-  await page.setContent(shell);await setup(page,mode,data);return page;
+  await page.setContent(shell);await setup(page,data);return page;
 }
 async function sharedPages(count=1) {
   const context=await browser.newContext({reducedMotion:'reduce',locale:'zh-CN'});
   await context.route('https://quota.test/**',route=>route.fulfill({contentType:'text/html',body:shell}));
   const pages=[];
-  for(let i=0;i<count;i++){const page=await context.newPage();await page.goto('https://quota.test/');await setup(page,'account',null);pages.push(page);}
+  for(let i=0;i<count;i++){const page=await context.newPage();await page.goto('https://quota.test/');await setup(page,null);pages.push(page);}
   return {context,pages};
 }
 async function settle(page){await page.evaluate(()=>new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r))));await page.waitForTimeout(70);}
 async function open(page){await page.locator('#codex-quota-trigger').click();await settle(page);}
 async function collapse(page){await page.locator('.cq-collapse-button').click();await settle(page);}
-async function update(page,data,kind='Official'){await page.evaluate(({data,kind})=>globalThis[`__codexQuotaUpdate${kind}`](data,globalThis[`__codexQuota${kind}RequestId`]),{data,kind});}
+async function update(page,data){await page.evaluate(data=>__codexQuotaUpdateOfficial(data,globalThis.__codexQuotaOfficialRequestId),data);}
 async function close(page){assert.deepEqual(page.errors||[],[]);await page.close();}
 async function geometry(page){return page.evaluate(()=>{const rect=id=>{const r=document.querySelector(id).getBoundingClientRect();return {top:r.top,bottom:r.bottom,left:r.left,right:r.right,width:r.width,height:r.height}};return {trigger:rect('#codex-quota-trigger'),avatar:rect('#avatar'),column:rect('.sidebar-navigation'),popup:rect('#codex-quota-popover'),rail:rect('[data-app-navigation-rail]'),help:rect('#help'),overflow:document.documentElement.scrollWidth>innerWidth}});}
 async function motionSnapshot(page,selector){return page.evaluate(async selector=>{
@@ -93,7 +91,7 @@ async function assertMotionClean(page){assert.deepEqual(await page.locator('#cod
 
 test('17 acceptance checks at 1716/1024/390/320px use measured geometry',async()=>{
   for(const width of [1716,1024,390,320]){
-    const page=await pageFor('account',officialPayload(),{width,height:870});
+    const page=await pageFor(officialPayload(),{width,height:870});
     try{
       const trigger=page.locator('#codex-quota-trigger');const popup=page.locator('#codex-quota-popover');
       assert.equal(await popup.isVisible(),false,'production default is collapsed');
@@ -110,8 +108,8 @@ test('17 acceptance checks at 1716/1024/390/320px use measured geometry',async()
       await page.locator('.cq-settings-button').click();assert.equal(await page.locator('#codex-official-usage-host').isVisible(),false);assert.equal(await page.locator('#cq-settings').isVisible(),true);const settingsGeometry=await geometry(page);assert.ok(Math.abs(settingsGeometry.popup.bottom-settingsGeometry.trigger.bottom)<1);await page.locator('#cq-settings header button').click(); // 7
       await collapse(page);assert.equal(await popup.isVisible(),false); // 8
       await update(page,{planName:'pro',windows:[{label:'Weekly',usedPercent:63,resetAt:1900600000}]});await open(page);assert.equal(await page.locator('.cq-quota-row').count(),1);assert.doesNotMatch(await trigger.innerText(),/5h/);assert.ok((await geometry(page)).popup.height<g.popup.height); // 9
-      await page.evaluate(()=>{__codexQuotaResetSession();__codexQuotaMode='api'});await update(page,apiPayload,'Api');await page.evaluate(source);await open(page);identity=await trigger.elementHandle();assert.match(await trigger.innerText(),/API 剩余/); // 10
-      await update(page,{errorCode:'UNAVAILABLE'},'Api');assert.match(await popup.innerText(),/75.00/);assert.match(await popup.innerText(),/更新失败.*上次成功/s); // 11
+      await page.evaluate(()=>__codexQuotaResetSession());assert.match(await trigger.innerText(),/暂不可用/);await update(page,officialPayload());await page.evaluate(source);await open(page);identity=await trigger.elementHandle();assert.equal(await trigger.getAttribute('data-cq-kind'),'official'); // 10
+      await update(page,{errorCode:'UNAVAILABLE'});assert.match(await popup.innerText(),/63%/);assert.match(await popup.innerText(),/更新失败.*上次成功/s); // 11
       assert.equal((await geometry(page)).overflow,false); // 12
       await page.locator('#collapse').click();await settle(page);assert.equal(await identity.evaluate(el=>el.parentElement.classList.contains('rail-stack')),true); // 13
       g=await geometry(page);assert.ok(g.trigger.bottom<=g.help.top); // 14
@@ -180,11 +178,12 @@ test('M opening grows in place from the measured entry without a spare surface; 
       else first=await sharedSnapshot(page,'#codex-quota-trigger');
       if(collapsed){
         assertCompositorMotion(first);
-        const shape=first.animations.find(a=>a.target==='codex-quota-popover'&&a.frames.some(f=>f.clipPath));
-        assert.ok(shape,'rail opening must animate its measured clip');
+        const material=first.animations.find(a=>a.target==='codex-quota-popover'&&a.frames.some(f=>f.opacity!==undefined));
+        assert.ok(material,'rail opening fades a complete floating panel');
+        assert.equal(Number(material.frames[0].opacity),0);
+        assert.equal(first.clip,'none','a transparent icon must not create a tiny material tile');
       }else assert.ok(first.actors['weekly-digits'],'column opening must carry the existing weekly number');
-      const expected=collapsed?{...first.trigger,right:first.trigger.left+Math.min(first.box.width,first.trigger.width),bottom:first.trigger.top+Math.min(first.box.height,first.trigger.height)}:first.trigger;
-      for(const edge of ['left','right','top','bottom'])assert.ok(Math.abs(first.visible[edge]-expected[edge])<1.5,`${collapsed?'rail':'column'} ${columnWidth}px ${edge}: ${first.visible[edge]} vs ${expected[edge]}`);
+      if(!collapsed)for(const edge of ['left','right','top','bottom'])assert.ok(Math.abs(first.visible[edge]-first.trigger[edge])<1.5,`column ${columnWidth}px ${edge}: ${first.visible[edge]} vs ${first.trigger[edge]}`);
       await finishAnimations(page);await assertMotionClean(page);
       assert.equal(await page.locator('#codex-quota-trigger').isVisible(),true,'doctor must still see the entry');
       assert.equal(await page.locator('#codex-quota-trigger').evaluate(el=>getComputedStyle(el).opacity),'1');
@@ -197,7 +196,8 @@ test('M opening grows in place from the measured entry without a spare surface; 
       }
       if(collapsed){
         const closing=await motionSnapshot(page,'#codex-quota-trigger');assertCompositorMotion(closing);
-        assert.ok(closing.animations.some(a=>a.target==='codex-quota-popover'&&a.frames.some(f=>f.clipPath)));
+        const material=closing.animations.find(a=>a.target==='codex-quota-popover'&&a.frames.some(f=>f.opacity!==undefined));
+        assert.equal(Number(material.frames.at(-1).opacity),0);
       }else{
         const closing=await sharedSnapshot(page,'.cq-collapse-button');
         assert.ok(closing.actors['weekly-digits'],'closing carries the weekly number back to the entry');
@@ -208,10 +208,60 @@ test('M opening grows in place from the measured entry without a spare surface; 
   }
 });
 
+test('every sampled rail exit frame fades intact material with its content and supports reversal',async()=>{
+  for(const dark of [false,true])for(const pane of ['quota','settings','mid-settings','opening-settings']){
+    const page=await pageFor();try{
+      if(dark){await page.addStyleTag({content:':root{color-scheme:dark;--color-surface-elevated-secondary:#272a23;--color-text:#f1f3e8;--color-text-secondary:#c7cbbb;--color-border:#42473a}'});await settle(page);}
+      await page.locator('#collapse').click();await settle(page);await open(page);
+      if(pane==='settings')await page.locator('.cq-settings-button').click();
+      if(pane==='opening-settings'){await page.locator('#codex-quota-trigger').click();await settle(page);}
+      await page.emulateMedia({reducedMotion:'no-preference'});await settle(page);
+      if(pane==='mid-settings'){await page.locator('.cq-settings-button').click();await page.waitForTimeout(50);}
+      if(pane==='opening-settings'){
+        await page.locator('#codex-quota-trigger').evaluate(el=>el.click());await page.waitForTimeout(80);
+        const handoff=await page.evaluate(()=>{
+          const popup=document.getElementById('codex-quota-popover');
+          const pose=()=>{const s=getComputedStyle(popup),m=new DOMMatrixReadOnly(s.transform),r=popup.getBoundingClientRect();return {alpha:Number(s.opacity),x:m.m41,y:m.m42,bottom:r.bottom}};
+          const before=pose();document.querySelector('.cq-settings-button').click();return {before,after:pose()};
+        });
+        assert.ok(handoff.before.alpha>0&&handoff.before.alpha<.95,'navigation interrupts a real partial entrance');
+        for(const key of ['alpha','x','y','bottom'])assert.ok(Math.abs(handoff.before[key]-handoff.after[key])<.015,`settings retains current material ${key}`);
+        await finishAnimations(page);
+      }
+      const result=await page.evaluate(async pane=>{
+        const popup=document.getElementById('codex-quota-popover'),content=document.getElementById(pane==='quota'?'codex-official-usage-host':'cq-settings');
+        const pose=()=>{const s=getComputedStyle(popup),r=popup.getBoundingClientRect();return {alpha:Number(s.opacity),width:r.width,height:r.height,clip:s.clipPath,contentAlpha:Number(getComputedStyle(content).opacity),x:r.x,y:r.y}};
+        popup.hidePopover();const tracks=popup.getAnimations({subtree:true});for(const a of tracks){a.pause();a.currentTime=0;}
+        const duration=Math.max(...tracks.filter(a=>a.constructor.name!=='CSSTransition').map(a=>a.effect.getTiming().duration));
+        const frames=[];
+        for(let time=0;time<duration;time+=1000/60){for(const a of tracks)a.currentTime=Math.min(time,a.effect.getTiming().duration*.999);frames.push(pose());}
+        for(const a of tracks)a.currentTime=duration*.28;
+        const before=pose();popup.showPopover();await Promise.resolve();const after=pose();
+        return {frames,before,after};
+      },pane);
+      const first=result.frames[0];assert.ok(first.alpha>.99&&first.contentAlpha>0,'exit starts with its actual visible content');
+      for(let i=1;i<result.frames.length;i++){
+        const frame=result.frames[i],previous=result.frames[i-1];
+        assert.ok(frame.alpha<=previous.alpha+.0001,'material opacity decreases every frame');
+        assert.ok(Math.abs(frame.width-first.width)<.1&&Math.abs(frame.height-first.height)<.1,'no material shrinks into a white tile or strip');
+        assert.equal(frame.clip,first.clip);assert.ok(Math.abs(frame.contentAlpha-first.contentAlpha)<.001,'content and material leave together');
+        assert.ok(Math.abs(frame.x-first.x)<=6.01&&Math.abs(frame.y-first.y)<=6.01,'only a restrained drift toward the icon');
+      }
+      assert.ok(result.frames.at(-1).alpha<.002,'material disappears before native cleanup');
+      assert.ok(Math.abs(result.before.alpha-result.after.alpha)<.015,'reversal keeps current alpha');
+      assert.ok(Math.abs(result.before.x-result.after.x)<.15&&Math.abs(result.before.y-result.after.y)<.15,'reversal keeps current position');
+      assert.equal(await page.locator('.cq-trigger-icon').evaluate(el=>getComputedStyle(el).opacity),'1');
+      await finishAnimations(page);await page.locator('#codex-quota-trigger').click();await finishAnimations(page);
+      await assertMotionClean(page);
+      assert.equal(await page.locator('#codex-quota-popover').evaluate(el=>!el.hasAttribute('data-cq-rail-motion')&&!el.hasAttribute('data-cq-pane')&&getComputedStyle(el).opacity==='0'),true);
+    }finally{await close(page);}
+  }
+});
+
 test('shared Pro and Plus elements move and scale continuously while the toggle stays fixed at DPR 1.25',async()=>{
   for(const planName of ['pro','plus']){
     const data=officialPayload();data.planName=planName;data.windows[1].usedPercent=11;if(planName==='pro')data.windows.shift();
-    const page=await pageFor('account',data,{width:1024,height:720},{deviceScaleFactor:1.25});try{
+    const page=await pageFor(data,{width:1024,height:720},{deviceScaleFactor:1.25});try{
       await page.emulateMedia({reducedMotion:'no-preference'});await settle(page);
       const first=await sharedSnapshot(page,'#codex-quota-trigger');
       for(const key of ['plan','weekly-digits','weekly-percent','weekly-track','weekly-ring'])assert.ok(first.actors[key],`${planName} shares ${key}`);
@@ -244,7 +294,7 @@ test('shared Pro and Plus elements move and scale continuously while the toggle 
 });
 
 test('shared motion reverses from the current geometry and repeated clicks use one stationary control',async()=>{
-  const page=await pageFor('account',{planName:'pro',windows:[{label:'Weekly',usedPercent:11,resetAt:Date.now()/1000+302400}]});try{
+  const page=await pageFor({planName:'pro',windows:[{label:'Weekly',usedPercent:11,resetAt:Date.now()/1000+302400}]});try{
     await page.emulateMedia({reducedMotion:'no-preference'});await settle(page);
     const initial=await sharedSnapshot(page,'#codex-quota-trigger');await page.waitForTimeout(90);
     const reversal=await page.evaluate(()=>{
@@ -333,11 +383,11 @@ test('shared visual state is discarded on session, data, motion preference and l
     assert.equal(await settingsPage.locator('#cq-settings').count(),0,'a fresh opening after complete close returns to quota');
     assert.equal(await settingsPage.locator('.cq-settings-button').isVisible(),true);await assertMotionClean(settingsPage);
   }finally{await close(settingsPage);}
-  for(const [mode,data,width] of [['api',apiPayload,238],['account',officialPayload(),140]]){
-    const page=await pageFor(mode,data);try{
-      await page.locator('.sidebar-navigation').evaluate((el,width)=>el.style.width=width+'px',width);await settle(page);
+  {
+    const page=await pageFor();try{
+      await page.locator('.sidebar-navigation').evaluate(el=>el.style.width='140px');await settle(page);
       await page.emulateMedia({reducedMotion:'no-preference'});await sharedSnapshot(page,'#codex-quota-trigger');
-      assert.equal(await page.locator('.cq-shared-layer [data-cq-shared-key="weekly-digits"]').count(),0,'text/API fallback must not invent a shared number');
+      assert.equal(await page.locator('.cq-shared-layer [data-cq-shared-key="weekly-digits"]').count(),0,'text fallback must not invent a shared number');
       await finishAnimations(page);await assertMotionClean(page);
       assert.equal(await page.locator('#codex-quota-popover').evaluate(el=>el.matches(':popover-open')),true);
     }finally{await close(page);}
@@ -350,7 +400,7 @@ test('M settings transitions use fixed measured bounds and interruptions restore
     let oldHeight=(await geometry(page)).popup.height;
     for(const selector of ['.cq-settings-button','#cq-settings header button']){
       const transition=await motionSnapshot(page,selector);assertCompositorMotion(transition);
-      assert.ok(transition.animations.some(a=>a.target==='codex-quota-popover'&&a.duration===160&&a.frames.some(f=>f.clipPath)));
+      assert.ok(transition.animations.some(a=>a.target==='codex-quota-popover'&&a.duration>240&&a.frames.some(f=>f.clipPath)));
       await finishAnimations(page);const g=await geometry(page),newHeight=g.popup.height;assert.ok(Math.abs(g.popup.bottom-g.trigger.bottom)<1,'settings and quota views share the original bottom edge');await assertEntryCovered(page);
       assert.ok(Math.abs(Number.parseFloat(transition.height)-Math.max(oldHeight,newHeight))<=1,'settings morph fixes the larger measured height once');
       await assertMotionClean(page);oldHeight=newHeight;
@@ -379,6 +429,81 @@ test('M settings transitions use fixed measured bounds and interruptions restore
       assert.equal(await page.locator('.cq-settings-button').isVisible(),true,'next opening must recover the quota view');
     }
   }finally{await close(page);}
+});
+
+test('settings navigation preserves presentation and input through natural playback, reverse and close',async()=>{
+  const page=await pageFor();try{
+    await open(page);await page.emulateMedia({reducedMotion:'no-preference'});await settle(page);
+    const snapshot=()=>{
+      const p=document.getElementById('codex-quota-popover'),box=p.getBoundingClientRect(),clip=getComputedStyle(p).clipPath;
+      return {height:box.height-(parseFloat(clip.match(/^inset\(([^ ]+)/)?.[1])||0),
+        quota:Number(getComputedStyle(document.getElementById('codex-official-usage-host')).opacity),
+        settings:Number(getComputedStyle(document.getElementById('cq-settings')).opacity)};
+    };
+    await page.locator('.cq-settings-button').evaluate(el=>el.click());
+    await page.waitForTimeout(45);
+    assert.equal(await page.locator('#codex-quota-popover').evaluate(el=>el.hasAttribute('data-cq-pane')),true);
+    const natural=await page.evaluate(snapshot);assert.ok(natural.settings>0&&natural.settings<1,'new content actually fades during natural playback');assert.ok(natural.quota>0&&natural.quota<1,'outgoing content stays visible while fading');
+    for(const action of ['back','settings','close','open']){
+      const pair=await page.evaluate(({source,action})=>{
+        const take=eval('('+source+')'),before=take();
+        const selectors={back:'#cq-settings header button',settings:'.cq-settings-button',close:'.cq-collapse-button',open:'#codex-quota-trigger'};
+        document.querySelector(selectors[action]).click();
+        return Promise.resolve().then(()=>({before,after:take()}));
+      },{source:snapshot.toString(),action});
+      assert.ok(Math.abs(pair.before.height-pair.after.height)<1,`${action} must not jump to the endpoint`);
+      for(const key of ['quota','settings'])assert.ok(Math.abs(pair.before[key]-pair.after[key])<.03,`${action} must not restart the fade`);
+      await page.waitForTimeout(35);
+    }
+    await finishAnimations(page);await assertMotionClean(page);
+    assert.equal(await page.locator('#cq-settings').isVisible(),true);
+    assert.equal(await page.locator('#codex-official-usage-host').evaluate(el=>el.hidden&&!el.inert),true);
+    assert.equal(await page.locator('#cq-settings').evaluate(el=>!el.inert),true);
+    await page.locator('#cq-settings header button').click();await finishAnimations(page);
+    assert.equal(await page.locator('#cq-settings').count(),0);
+    // Pointer hit testing can end the settings tool's existing 120ms hover fade
+    // when the moving pane settles; that feedback is separate from pane playback.
+    await page.waitForTimeout(130);
+    await assertMotionClean(page);
+  }finally{await close(page);}
+});
+
+test('settings spacing, columns and small-window access stay aligned without visible scrollbars',async()=>{
+  for(const width of [238,220,180]){
+    const page=await pageFor();try{
+      await page.locator('.sidebar-navigation').evaluate((el,width)=>el.style.width=width+'px',width);await settle(page);await open(page);await page.locator('.cq-settings-button').click();
+      const layout=await page.evaluate(()=>{
+        const p=document.getElementById('codex-quota-popover'),q=s=>document.querySelector(s).getBoundingClientRect(),title=q('#cq-settings h2'),back=q('#cq-settings header button'),arrow=q('.cq-collapse-button');
+        const rows=[...document.querySelectorAll('#cq-settings label')];
+        return {left:[title.x,...rows.map(r=>r.getBoundingClientRect().left)],right:rows.map(r=>r.lastElementChild.getBoundingClientRect().right),
+          axis:back.x+back.width/2-arrow.x-arrow.width/2,overflow:p.scrollWidth-p.clientWidth,bars:getComputedStyle(p).scrollbarWidth,
+          title:getComputedStyle(document.querySelector('#cq-settings h2')).fontWeight,tools:getComputedStyle(document.querySelector('.cq-tools')).fontSize};
+      });
+      assert.ok(Math.max(...layout.left)-Math.min(...layout.left)<.1);assert.ok(Math.max(...layout.right)-Math.min(...layout.right)<.1);
+      assert.ok(Math.abs(layout.axis)<.1);assert.equal(layout.overflow,0);assert.equal(layout.bars,'none');assert.equal(layout.title,'600');assert.equal(layout.tools,'11px');
+    }finally{await close(page);}
+  }
+});
+
+test('real pointer input can reverse a mid-settings close and rail exit retains its spring',async()=>{
+  for(const rail of [false,true]){
+    const page=await pageFor();try{
+      if(rail){await page.locator('#collapse').click();await settle(page);}
+      await open(page);await page.emulateMedia({reducedMotion:'no-preference'});await settle(page);
+      await page.locator('.cq-settings-button').click();await page.waitForTimeout(40);
+      const panel=await page.locator('#cq-settings').elementHandle(),arrow=await page.locator('.cq-collapse-button').boundingBox();
+      await page.mouse.click(arrow.x+arrow.width/2,arrow.y+arrow.height/2);
+      assert.equal(await page.locator('#codex-quota-popover').evaluate(el=>el.matches(':popover-open')),false);
+      await page.waitForTimeout(rail?220:35);
+      assert.equal(await page.locator('.cq-collapse-button').evaluate(el=>getComputedStyle(el).opacity),'1','fixed arrow stays drawn during pane exit');
+      assert.equal(await page.locator('#codex-quota-popover').evaluate(el=>getComputedStyle(el).display!=='none'),true,'rail must not cut the spring at 180ms');
+      const entry=await page.locator('#codex-quota-trigger').boundingBox();
+      await page.mouse.click(rail?entry.x+entry.width/2:arrow.x+arrow.width/2,rail?entry.y+entry.height/2:arrow.y+arrow.height/2);
+      assert.equal(await page.locator('#codex-quota-popover').evaluate(el=>el.matches(':popover-open')),true);
+      assert.equal(await panel.evaluate(el=>el.isConnected),true,'pointer reversal keeps the current settings pane');
+      await finishAnimations(page);assert.equal(await page.locator('#cq-settings').isVisible(),true);
+    }finally{await close(page);}
+  }
 });
 
 test('graphical entries follow real windows, localize warnings, reuse nodes and fall back at narrow widths',async()=>{
@@ -441,6 +566,35 @@ test('graphical entries follow real windows, localize warnings, reuse nodes and 
   }finally{await close(page);}
 });
 
+test('rail gauge matches navigation and tracks the limiting official remaining window',async()=>{
+  const payload=used=>({planName:'pro',windows:[{label:'Weekly',usedPercent:used,resetAt:Date.now()/1000+302400}]});
+  const page=await pageFor(payload(50));try{
+    await page.locator('#collapse').click();await settle(page);
+    const trigger=page.locator('#codex-quota-trigger'),needle=page.locator('.cq-gauge-needle'),identity=await needle.elementHandle();
+    const style=await trigger.evaluate(el=>{const s=getComputedStyle(el),g=el.querySelector('.cq-trigger-icon');return {background:s.backgroundColor,border:s.borderTopWidth,shadow:s.boxShadow,blur:s.backdropFilter,size:g.getBoundingClientRect().width,viewBox:g.getAttribute('viewBox'),stroke:g.getAttribute('stroke-width')}});
+    assert.deepEqual(style,{background:'rgba(0, 0, 0, 0)',border:'0px',shadow:'none',blur:'none',size:20,viewBox:'0 0 20 20',stroke:'1.33'});
+    for(const remaining of [0,50,100]){
+      await update(page,payload(100-remaining));
+      const pose=await needle.evaluate(el=>{const p=new DOMPoint(10,7).matrixTransform(el.getCTM());return {x:p.x,y:p.y,remaining:Number(el.dataset.remaining),hidden:el.hasAttribute('hidden')}});
+      assert.equal(pose.remaining,remaining);assert.equal(pose.hidden,false);
+      assert.ok(Math.abs(pose.x-({0:6,50:10,100:14}[remaining]))<.01);assert.ok(Math.abs(pose.y-(remaining===50?7:11))<.01);
+      assert.equal(await identity.evaluate(el=>el===document.querySelector('.cq-gauge-needle')),true);
+    }
+    await update(page,{planName:'plus',windows:[{label:'Weekly',usedPercent:20,resetAt:Date.now()/1000+302400},{label:'5h',usedPercent:85,resetAt:Date.now()/1000+9000}]});
+    assert.equal(await needle.getAttribute('data-remaining'),'15');assert.match(await trigger.getAttribute('title'),/指针: 5h 剩余可用 15%/);
+    await update(page,{errorCode:'RATE_LIMITED',retryAfterSeconds:120});
+    assert.equal(await needle.getAttribute('data-remaining'),'15');assert.match(await trigger.getAttribute('title'),/更新失败.*上次成功/);
+    await page.evaluate(()=>__codexQuotaResetSession());
+    assert.equal(await needle.getAttribute('hidden'),'');assert.equal(await needle.getAttribute('data-remaining'),null);
+    await update(page,payload(50));await page.emulateMedia({reducedMotion:'no-preference'});
+    await update(page,payload(0));await page.waitForTimeout(50);
+    const halfway=await needle.evaluate(el=>new DOMPoint(10,7).matrixTransform(el.getCTM()).x);assert.ok(halfway>10&&halfway<14,'needle moves through intermediate positions');
+    await update(page,payload(100));await page.waitForTimeout(270);
+    assert.ok(Math.abs(await needle.evaluate(el=>new DOMPoint(10,7).matrixTransform(el.getCTM()).x)-6)<.01);
+    await page.emulateMedia({reducedMotion:'reduce'});assert.equal(await needle.evaluate(el=>getComputedStyle(el).transitionDuration),'0s');
+  }finally{await close(page);}
+});
+
 test('official used bars and time rings derive independently from real timestamps',async()=>{
   const page=await pageFor();try{
     await open(page);const now=1900000000;await page.evaluate(now=>Date.now=()=>now*1000,now);
@@ -461,6 +615,26 @@ test('official used bars and time rings derive independently from real timestamp
     }
     await update(page,{planName:'team',windows:[{label:'Daily',usedPercent:12,resetAt:now+2000},{label:'Monthly',usedPercent:27,resetAt:now+3000},{label:'Weekly',usedPercent:97,resetAt:now+4000}]});
     assert.equal(await page.locator('.cq-quota-row').count(),3);assert.equal(await page.locator('.cq-time-ring').count(),1);assert.match(await page.locator('.cq-value-group .cq-low:not([hidden])').innerText(),/剩余可用 3%/);
+  }finally{await close(page);}
+});
+
+test('quota fills interpolate without layout animation and hidden cancellation stays safe',async()=>{
+  const data={planName:'pro',windows:[{label:'Weekly',usedPercent:16,resetAt:Date.now()/1000+302400}]};
+  const page=await pageFor(data,{width:1024,height:720},{reducedMotion:'no-preference'});try{
+    await open(page);await finishAnimations(page);
+    const fill=page.locator('.cq-quota-row .cq-progress-fill');const previous=(await fill.boundingBox()).width;
+    await page.evaluate(data=>__codexQuotaUpdateOfficial({...data,windows:[{...data.windows[0],usedPercent:55}]}),data);
+    const middle=await fill.evaluate(el=>{
+      const motion=el.getAnimations()[0];motion.pause();motion.currentTime=100;
+      const result={width:el.getBoundingClientRect().width,target:parseFloat(getComputedStyle(el).width),keys:motion.effect.getKeyframes().flatMap(frame=>Object.keys(frame))};motion.play();return result;
+    });
+    assert.ok(middle.width>previous&&middle.width<middle.target,'the displayed fill moves continuously between real values');
+    assert.ok(middle.keys.includes('transform'));assert.equal(middle.keys.includes('width'),false,'intermediate frames must not relayout the track');
+    await page.evaluate(()=>{document.getElementById('codex-official-usage-host').hidden=true;__codexQuotaResetSession();});
+    assert.deepEqual(page.errors,[],'reset safely cancels a finite animation after its target becomes unrendered');
+    await update(page,data);
+    const inactive=await page.locator('.cq-quota-row .cq-progress-fill').evaluate(el=>el.getAnimations().length);
+    assert.equal(inactive,0,'hidden quota changes update final values without invisible animations');
   }finally{await close(page);}
 });
 
@@ -509,42 +683,45 @@ test('X focal rows preserve window identity, elapsed clocks and semantics at nar
   }finally{await close(page);}
 });
 
-test('API always means remaining; no total means no percentage, bar or ring',async()=>{
-  const page=await pageFor('api');try{
-    await open(page);assert.match(await page.locator('#codex-quota-trigger').innerText(),/API 剩余.*75.00/);await assertEntryCovered(page);const g=await geometry(page);assert.ok(Math.abs(g.popup.bottom-g.trigger.bottom)<1,'text-only API entry also grows in place');
-    assert.equal(await page.locator('.cq-rule').getAttribute('aria-valuenow'),'75');assert.match(await page.locator('.cq-rule').getAttribute('aria-label'),/剩余/);assert.equal(await page.locator('.cq-time-ring').count(),0);
-    assert.equal(await page.locator('#codex-quota-trigger').getAttribute('data-cq-graphical'),null);assert.equal(await page.locator('.cq-trigger-weekly-bar').count(),0);
-    assert.equal(await page.locator('.cq-trigger-plan').isVisible(),false);assert.equal(await page.locator('.cq-trigger-plan').getAttribute('data-cq-tier'),null);
-    await update(page,{...apiPayload,planName:'Pro'},'Api');
-    assert.equal(await page.locator('.cq-plan-badge.cq-plan').innerText(),'Pro');assert.equal(await page.locator('.cq-plan').getAttribute('data-cq-tier'),null,'API provider names never imply an official Pro tier');
-    assert.equal(await page.locator('.cq-plan').evaluate(el=>getComputedStyle(el).backgroundImage),'none');
-    await update(page,{used:5,remaining:24.8,unit:'USD'},'Api');assert.match(await page.locator('#codex-quota-popover').innerText(),/24.80/);assert.doesNotMatch(await page.locator('#codex-quota-popover').innerText(),/%/);assert.equal(await page.locator('.cq-rule').isVisible(),false);
-    await page.locator('.cq-settings-button').click();assert.equal(await page.locator('[name=compact],[name=transparency]').count(),0);
+test('reinjection removes retired API state and can only request official quota',async()=>{
+  const page=await pageFor();try{
+    await page.evaluate(()=>{
+      __codexQuotaApiPayload={remaining:75,total:100};__codexQuotaApiLoaded=true;
+      __codexQuotaApiRequestTimer=setTimeout(()=>{throw new Error('retired API timer ran');},60000);
+      __codexQuotaUpdateApi=()=>{};
+      document.body.insertAdjacentHTML('beforeend','<div id="codex-api-usage-host">stale API balance</div>');
+      requests=[];console.info=(marker,id)=>requests.push({marker,id});
+    });
+    await page.evaluate(source);await settle(page);
+    assert.deepEqual(await page.evaluate(()=>Object.keys(globalThis).filter(key=>key.startsWith('__codexQuotaApi')||key==='__codexQuotaUpdateApi')),[]);
+    assert.equal(await page.locator('#codex-api-usage-host').count(),0);
+    assert.equal(await page.locator('#codex-quota-trigger').getAttribute('data-cq-kind'),'official');
+    await open(page);await page.locator('.cq-refresh').click();
+    assert.deepEqual(await page.evaluate(()=>requests.map(request=>request.marker)),['__codexQuotaOfficialRequest__']);
+    await update(page,officialPayload());
   }finally{await close(page);}
 });
 
 test('unavailable and invalid responses never invent zero or erase previous successful data',async()=>{
-  for(const mode of ['account','api']){
-    const page=await pageFor(mode,null);try{
-      const kind=mode==='api'?'Api':'Official';await open(page);
-      assert.match(await page.locator('#codex-quota-trigger').innerText(),/暂不可用/);assert.equal(await page.locator('.cq-rule').count(),0);assert.equal(await page.locator('#codex-quota-trigger .cq-time-ring,.cq-trigger-weekly-bar').count(),0);
-      await update(page,mode==='api'?apiPayload:officialPayload(),kind);
-      assert.equal(await page.locator('.cq-status').count(),0);assert.equal(await page.locator('.cq-refresh').getAttribute('aria-describedby'),null);
-      const readyHeight=(await geometry(page)).popup.height;assert.equal(await page.locator('.cq-title').innerText(),'额度');
-      const summary=await page.locator('#codex-quota-trigger').innerText();
-      for(const data of [{errorCode:'AUTH_REQUIRED'},{errorCode:'RATE_LIMITED',retryAfterSeconds:60},{errorCode:'REQUEST_TIMEOUT'},mode==='api'?{remaining:'wrong'}:{planName:'pro',windows:[{label:'Weekly',usedPercent:NaN,resetAt:10}]}]){
-        await update(page,data,kind);assert.equal(await page.locator('#codex-quota-trigger').innerText(),summary);assert.match(await page.locator('.cq-status').innerText(),/更新失败.*上次成功/s);
-        assert.equal(await page.locator('.cq-title').innerText(),'更新失败');assert.equal((await geometry(page)).popup.height,readyHeight,'errors must not add a row or change height');
-        assert.equal(await page.locator('.cq-status').evaluate(el=>getComputedStyle(el).clipPath),'inset(50%)');
-        await page.locator('.cq-refresh').focus();assert.match(await page.locator('#cq-refresh-message').innerText(),/更新失败.*上次成功/s);await page.locator('.cq-settings-button').focus();
-      }
-      await update(page,mode==='api'?apiPayload:officialPayload(),kind);assert.equal(await page.locator('.cq-title').innerText(),'额度');assert.equal(await page.locator('.cq-status').count(),0);
-    }finally{await close(page);}
-  }
+  const page=await pageFor(null);try{
+    await open(page);
+    assert.match(await page.locator('#codex-quota-trigger').innerText(),/暂不可用/);assert.equal(await page.locator('.cq-rule').count(),0);assert.equal(await page.locator('#codex-quota-trigger .cq-time-ring,.cq-trigger-weekly-bar').count(),0);
+    await update(page,officialPayload());
+    assert.equal(await page.locator('.cq-status').count(),0);assert.equal(await page.locator('.cq-refresh').getAttribute('aria-describedby'),null);
+    const readyHeight=(await geometry(page)).popup.height;assert.equal(await page.locator('.cq-title').innerText(),'额度');
+    const summary=await page.locator('#codex-quota-trigger').innerText();
+    for(const data of [{errorCode:'AUTH_REQUIRED'},{errorCode:'RATE_LIMITED',retryAfterSeconds:60},{errorCode:'REQUEST_TIMEOUT'},{planName:'pro',windows:[{label:'Weekly',usedPercent:NaN,resetAt:10}]}]){
+      await update(page,data);assert.equal(await page.locator('#codex-quota-trigger').innerText(),summary);assert.match(await page.locator('.cq-status').innerText(),/更新失败.*上次成功/s);
+      assert.equal(await page.locator('.cq-title').innerText(),'更新失败');assert.equal((await geometry(page)).popup.height,readyHeight,'errors must not add a row or change height');
+      assert.equal(await page.locator('.cq-status').evaluate(el=>getComputedStyle(el).clipPath),'inset(50%)');
+      await page.locator('.cq-refresh').focus();assert.match(await page.locator('#cq-refresh-message').innerText(),/更新失败.*上次成功/s);await page.locator('.cq-settings-button').focus();
+    }
+    await update(page,officialPayload());assert.equal(await page.locator('.cq-title').innerText(),'额度');assert.equal(await page.locator('.cq-status').count(),0);
+  }finally{await close(page);}
 });
 
 test('refresh icons preserve continuous native motion and crossfade real results without scaling buttons',async()=>{
-  const page=await pageFor('account',{planName:'pro',windows:[{label:'Weekly',usedPercent:11,resetAt:Date.now()/1000+302400}]});try{
+  const page=await pageFor({planName:'pro',windows:[{label:'Weekly',usedPercent:11,resetAt:Date.now()/1000+302400}]});try{
     await open(page);await page.emulateMedia({reducedMotion:'no-preference'});await settle(page);
     const refresh=page.locator('.cq-refresh'),spinner=refresh.locator('.cq-refresh-icon');
     assert.equal(await spinner.evaluate(el=>el.tagName),'SPAN','an HTML layer owns native rotation');
@@ -592,33 +769,69 @@ test('refresh icons preserve continuous native motion and crossfade real results
   }finally{await close(page);}
 });
 
+test('hidden quota updates and settings preserve safe motion lifecycle and Back navigation',async()=>{
+  const data={planName:'pro',windows:[{label:'Weekly',usedPercent:14,resetAt:Date.now()/1000+302400}]};
+  const page=await pageFor(data,{width:1024,height:720},{reducedMotion:'no-preference'});try{
+    await update(page,{...data,windows:[{...data.windows[0],usedPercent:42}]});await page.waitForTimeout(260);
+    assert.deepEqual(page.errors,[],'updating a closed card must not commit styles on an unrendered element');
+    await open(page);await finishAnimations(page);
+    assert.equal(await page.locator('.cq-value-digits').innerText(),'42','opening shows the latest hidden update');
+    await page.locator('.cq-refresh').click();await page.waitForTimeout(160);
+    const spinning=()=>page.locator('.cq-refresh-icon').evaluate(el=>el.getAnimations().filter(a=>a.playState==='running'&&a.effect.getKeyframes().some(f=>f.transform!==undefined)).length);
+    assert.equal(await spinning(),1);
+    await page.locator('.cq-settings-button').click();await page.waitForTimeout(220);
+    assert.equal(await spinning(),0,'a refresh indicator must not spin behind the settings pane');
+    await page.evaluate(()=>{Object.defineProperty(document,'visibilityState',{configurable:true,get:()=> 'hidden'});document.dispatchEvent(new Event('visibilitychange'));delete document.visibilityState;document.dispatchEvent(new Event('visibilitychange'));});
+    await page.locator('#cq-settings header button').click();await finishAnimations(page);
+    assert.equal(await page.locator('.cq-refresh').isDisabled(),true);assert.equal(await spinning(),1,'returning to a still-busy card resumes the indicator');
+    await page.locator('.cq-settings-button').click();await page.waitForTimeout(220);
+    await page.locator('input[name=thresholds]').fill('0');await page.locator('input[name=hour12]').click();
+    assert.equal(await page.locator('input[name=thresholds]').evaluate(el=>el.validity.valid),false);
+    await page.locator('#cq-settings header button').click();await finishAnimations(page);
+    assert.equal(await page.locator('#cq-settings').count(),0,'Back must remain usable with an invalid unsaved threshold');
+    assert.equal(await spinning(),1);
+  }finally{await close(page);}
+});
+
 test('request deadlines, cooldown, late responses and reinjection keep existing request isolation',async()=>{
-  for(const mode of ['account','api']){
-    const page=await pageFor(mode);try{
-      await open(page);const kind=mode==='api'?'Api':'Official';const now=Date.now();await page.clock.install({time:new Date(now)});await page.clock.pauseAt(new Date(now+1000));
-      await page.evaluate(()=>{requests=[];console.info=(marker,id)=>requests.push({marker,id})});
-      const prior=await page.locator('#codex-quota-trigger').innerText();
-      const readyHeight=(await geometry(page)).popup.height;
-      await page.locator('.cq-refresh').evaluate(el=>el.click());
-      assert.equal(await page.locator('.cq-title').innerText(),'刷新中…');assert.equal((await geometry(page)).popup.height,readyHeight,'refresh must not change height');
-      const first=await page.evaluate(k=>({id:globalThis[`__codexQuota${k}RequestId`],deadline:globalThis[`__codexQuota${k}RequestDeadline`]}),kind);
-      await page.clock.fastForward(10000);await page.evaluate(source);
-      assert.equal(await page.evaluate(k=>globalThis[`__codexQuota${k}RequestDeadline`],kind),first.deadline);assert.equal(await page.evaluate(()=>requests.length),1);
-      await page.clock.fastForward(15000);assert.equal(await page.locator('.cq-refresh').isDisabled(),false);assert.match(await page.locator('.cq-status').innerText(),/更新失败.*超时/);assert.equal(await page.locator('#codex-quota-trigger').innerText(),prior);
-      await page.locator('.cq-refresh').evaluate(el=>el.click());
-      const second=await page.evaluate(k=>globalThis[`__codexQuota${k}RequestId`],kind);assert.notEqual(second,first.id);
-      await page.evaluate(({kind,id})=>globalThis[`__codexQuotaUpdate${kind}`]({errorCode:'AUTH_REQUIRED'},id),{kind,id:first.id});assert.equal(await page.locator('.cq-refresh').isDisabled(),true);
-      await update(page,mode==='api'?apiPayload:officialPayload(),kind);assert.equal(await page.locator('.cq-refresh').isDisabled(),false);
-      assert.equal(await page.locator('.cq-status').count(),0);assert.equal(await page.locator('.cq-refresh').getAttribute('data-cq-refreshed'),'unchanged');
-      const successfulRequests=await page.evaluate(()=>requests.length);
-      await page.clock.fastForward(1999);assert.equal(await page.locator('.cq-status').count(),0);assert.equal(await page.locator('.cq-refresh').getAttribute('data-cq-refreshed'),'unchanged');
-      await page.clock.fastForward(1);assert.equal(await page.locator('.cq-status').count(),0);assert.equal(await page.locator('.cq-refresh').getAttribute('data-cq-refreshed'),null);
-      assert.equal(await page.evaluate(()=>requests.length),successfulRequests,'feedback expiry must not request data');
-      await update(page,{errorCode:'RATE_LIMITED',retryAfterSeconds:120},kind);const count=await page.evaluate(()=>requests.length);
-      await page.locator('.cq-refresh').evaluate(el=>el.click());assert.equal(await page.evaluate(()=>requests.length),count);assert.match(await page.locator('.cq-status').innerText(),/更新失败.*上次成功/s);
-      await page.clock.fastForward(120000);assert.equal(await page.evaluate(()=>requests.length),count+1);
-    }finally{await close(page);}
-  }
+  const page=await pageFor();try{
+    await open(page);const now=Date.now();await page.clock.install({time:new Date(now)});await page.clock.pauseAt(new Date(now+1000));
+    await page.evaluate(()=>{requests=[];console.info=(marker,id)=>requests.push({marker,id})});
+    const prior=await page.locator('#codex-quota-trigger').innerText();
+    const readyHeight=(await geometry(page)).popup.height;
+    await page.locator('.cq-refresh').evaluate(el=>el.click());
+    assert.equal(await page.locator('.cq-title').innerText(),'刷新中…');assert.equal((await geometry(page)).popup.height,readyHeight,'refresh must not change height');
+    const first=await page.evaluate(()=>({id:__codexQuotaOfficialRequestId,deadline:__codexQuotaOfficialRequestDeadline}));
+    await page.clock.fastForward(10000);await page.evaluate(source);
+    assert.equal(await page.evaluate(()=>__codexQuotaOfficialRequestDeadline),first.deadline);assert.equal(await page.evaluate(()=>requests.length),1);
+    await page.clock.fastForward(15000);assert.equal(await page.locator('.cq-refresh').isDisabled(),false);assert.match(await page.locator('.cq-status').innerText(),/更新失败.*超时/);assert.equal(await page.locator('#codex-quota-trigger').innerText(),prior);
+    await page.locator('.cq-refresh').evaluate(el=>el.click());
+    const second=await page.evaluate(()=>__codexQuotaOfficialRequestId);assert.notEqual(second,first.id);
+    await page.evaluate(id=>__codexQuotaUpdateOfficial({errorCode:'AUTH_REQUIRED'},id),first.id);assert.equal(await page.locator('.cq-refresh').isDisabled(),true);
+    await update(page,officialPayload());assert.equal(await page.locator('.cq-refresh').isDisabled(),false);
+    assert.equal(await page.locator('.cq-status').count(),0);assert.equal(await page.locator('.cq-refresh').getAttribute('data-cq-refreshed'),'unchanged');
+    const successfulRequests=await page.evaluate(()=>requests.length);
+    await page.clock.fastForward(1999);assert.equal(await page.locator('.cq-status').count(),0);assert.equal(await page.locator('.cq-refresh').getAttribute('data-cq-refreshed'),'unchanged');
+    await page.clock.fastForward(1);assert.equal(await page.locator('.cq-status').count(),0);assert.equal(await page.locator('.cq-refresh').getAttribute('data-cq-refreshed'),null);
+    assert.equal(await page.evaluate(()=>requests.length),successfulRequests,'feedback expiry must not request data');
+    await update(page,{errorCode:'RATE_LIMITED',retryAfterSeconds:120});const count=await page.evaluate(()=>requests.length);
+    await page.locator('.cq-refresh').evaluate(el=>el.click());assert.equal(await page.evaluate(()=>requests.length),count);assert.match(await page.locator('.cq-status').innerText(),/更新失败.*上次成功/s);
+    await page.clock.fastForward(120000);assert.equal(await page.evaluate(()=>requests.length),count+1);
+  }finally{await close(page);}
+});
+
+test('long official cooldowns keep the server deadline without overflowing browser timers',async()=>{
+  const page=await pageFor();try{
+    const scheduled=await page.evaluate(()=>{
+      globalThis.cooldownSchedules=[];const original=setTimeout;
+      globalThis.setTimeout=(callback,delay,...args)=>{cooldownSchedules.push(delay);return original(callback,delay,...args);};
+      const now=Date.now();__codexQuotaUpdateOfficial({errorCode:'RATE_LIMITED',retryAfterSeconds:3000000});
+      return {delay:cooldownSchedules[0],until:__codexQuotaOfficialCooldownUntil,now};
+    });
+    assert.ok(scheduled.delay>0&&scheduled.delay<=2147483647,'each timer delay must fit the browser signed 32-bit millisecond range');
+    assert.ok(scheduled.until-scheduled.now>=3000000000,'capping one timer must not shorten the server cooldown');
+    await page.waitForTimeout(80);assert.equal(await page.evaluate(()=>cooldownSchedules.length),1,'long cooldown must sleep instead of spinning an overflow loop');
+  }finally{await close(page);}
 });
 
 test('entry and popover clocks advance while closed and cooling down, then catch up after visibility restore',async()=>{
@@ -654,18 +867,18 @@ test('session switch clears old values immediately, even while collapsed or sett
     assert.equal(await page.locator('.cq-trigger-plan').isVisible(),false);assert.equal(await page.locator('.cq-trigger-plan').getAttribute('data-cq-tier'),null);
     assert.equal(await page.locator('.cq-plan').textContent(),'');
     await open(page);assert.match(await page.locator('#codex-quota-popover').innerText(),/暂不可用/);assert.equal(await page.locator('.cq-settings-button').isVisible(),true);
-    await page.locator('#collapse').click();await settle(page);await page.evaluate(()=>__codexQuotaMode='api');await page.evaluate(source);await update(page,apiPayload,'Api');await open(page);
-    assert.equal(await page.locator('#codex-official-usage-host').count(),0);assert.match(await page.locator('#codex-quota-popover').innerText(),/API 剩余.*75.00/s);assert.equal(await page.locator('#codex-quota-trigger').getAttribute('data-cq-kind'),'api');
+    await page.locator('#collapse').click();await settle(page);await page.evaluate(()=>__codexQuotaSessionScope='new-official-session');await page.evaluate(source);await update(page,{planName:'pro',windows:[{label:'Weekly',usedPercent:41,resetAt:Date.now()/1000+302400}]});await open(page);
+    assert.equal(await page.locator('#codex-official-usage-host').count(),1);assert.equal(await page.locator('.cq-value-digits').innerText(),'41');assert.equal(await page.locator('#codex-quota-trigger').getAttribute('data-cq-kind'),'official');
   }finally{await close(page);}
 });
 
 test('host replacement, missing anchors and native data preserve a single recoverable entry',async()=>{
-  const page=await pageFor('api');try{
+  const page=await pageFor();try{
     const handle=await page.locator('#codex-quota-trigger').elementHandle();
     await page.evaluate(()=>{savedRail=document.querySelector('[data-app-navigation-rail]');savedRail.remove()});await settle(page);
-    await update(page,{...apiPayload,remaining:60,used:40},'Api');assert.equal(await page.locator('#codex-quota-trigger').isVisible(),false);
-    await page.evaluate(()=>document.body.prepend(savedRail));await settle(page);assert.equal(await handle.evaluate(el=>el.isConnected),true);assert.match(await page.locator('#codex-quota-trigger').innerText(),/60.00/);
-    await page.evaluate(()=>{const c=document.querySelector('.sidebar-navigation');const copy=c.cloneNode(true);copy.querySelector('#codex-quota-footer')?.remove();c.replaceWith(copy)});await settle(page);assert.equal(await page.locator('#codex-quota-trigger').count(),1);assert.equal(await page.locator('#codex-quota-trigger').isVisible(),true);assert.equal(await handle.evaluate(el=>el.isConnected),true);assert.equal(await page.locator('#codex-quota-popover').count(),1);await open(page);assert.match(await page.locator('#codex-quota-popover').innerText(),/API 剩余.*60.00/s);
+    await update(page,{planName:'pro',windows:[{label:'Weekly',usedPercent:40,resetAt:Date.now()/1000+302400}]});assert.equal(await page.locator('#codex-quota-trigger').isVisible(),false);
+    await page.evaluate(()=>document.body.prepend(savedRail));await settle(page);assert.equal(await handle.evaluate(el=>el.isConnected),true);assert.match(await page.locator('#codex-quota-trigger').getAttribute('aria-label'),/40%/);
+    await page.evaluate(()=>{const c=document.querySelector('.sidebar-navigation');const copy=c.cloneNode(true);copy.querySelector('#codex-quota-footer')?.remove();c.replaceWith(copy)});await settle(page);assert.equal(await page.locator('#codex-quota-trigger').count(),1);assert.equal(await page.locator('#codex-quota-trigger').isVisible(),true);assert.equal(await handle.evaluate(el=>el.isConnected),true);assert.equal(await page.locator('#codex-quota-popover').count(),1);await open(page);assert.equal(await page.locator('.cq-value-digits').innerText(),'40');
     await page.evaluate(()=>{document.getElementById('avatar').outerHTML='<svg id="avatar" width="22" height="22"><circle r="8" cx="11" cy="11"/></svg>'});await settle(page);assert.equal(await page.locator('#codex-quota-trigger').isVisible(),true);
   }finally{await close(page);}
 });
@@ -687,26 +900,47 @@ test('chat streaming and our own renders settle without observer loops',async()=
   }finally{await close(page);}
 });
 
-test('host surface tokens drive both account modes, including dark and forced colors',async()=>{
-  for(const mode of ['account','api']){
-    const page=await pageFor(mode);try{
-      await page.locator('[data-app-navigation-rail]').evaluate(el=>{el.style.setProperty('--radius-2xl','18px');el.style.setProperty('--radius-sm','9px')});
-      await settle(page);
-      const trigger=await page.locator('#codex-quota-trigger').evaluate(el=>{const s=getComputedStyle(el);return {blur:s.backdropFilter,border:s.borderTopStyle,width:parseFloat(s.borderTopWidth)}});
-      assert.equal(trigger.blur,'blur(18px)');assert.equal(trigger.border,'solid');assert.ok(trigger.width>0);
-      assert.deepEqual(await page.locator('#codex-quota-trigger,#codex-quota-popover').evaluateAll(els=>els.map(el=>getComputedStyle(el).borderRadius)),['9px','9px']);
-      assert.equal(await page.locator('#codex-quota-popover').evaluate(el=>getComputedStyle(el).backdropFilter),'blur(8px)');
-      assert.equal(await page.locator('#codex-quota-popover').evaluate(el=>parseFloat(getComputedStyle(el).borderTopWidth)),0);
-      await open(page);await page.addStyleTag({content:':root{color-scheme:dark;--color-surface-elevated-secondary:#272a23;--color-text:#f1f3e8;--color-text-secondary:#c7cbbb;--color-border:#42473a}'});await settle(page);
-      const colors=await page.locator('#codex-quota-popover').evaluate(el=>{const sample=document.createElement('span');sample.style.background='color-mix(in srgb, rgb(39, 42, 35) 90%, transparent)';el.append(sample);const expected=getComputedStyle(sample).backgroundColor;sample.remove();const s=getComputedStyle(el);return {background:s.backgroundColor,expected,color:s.color,blur:s.backdropFilter}});
-      assert.equal(colors.background,colors.expected);assert.equal(colors.color,'rgb(241, 243, 232)');assert.equal(colors.blur,'blur(8px)');
-      if(mode==='account')await update(page,{planName:'pro',windows:[{label:'Weekly',usedPercent:59,resetAt:Date.now()/1000+302400}]});
-      await page.emulateMedia({forcedColors:'active'});
-      const forced=await page.locator('#codex-quota-popover').evaluate(el=>{const s=getComputedStyle(el);return {shadow:s.boxShadow,blur:s.backdropFilter,border:parseFloat(s.borderTopWidth),background:s.backgroundColor}});
-      assert.equal(forced.shadow,'none');assert.equal(forced.blur,'none');assert.ok(forced.border>0);assert.match(forced.background,/^rgb\(/);
-      assert.equal(await page.locator('#codex-quota-trigger').evaluate(el=>getComputedStyle(el).backdropFilter),'none');
-      if(mode==='account')assert.deepEqual(await page.locator('.cq-trigger-plan').evaluate(el=>{const s=getComputedStyle(el);return {background:s.backgroundImage,shadow:s.boxShadow,textShadow:s.textShadow,distinct:s.color!==s.backgroundColor};}),{background:'none',shadow:'none',textShadow:'none',distinct:true});
-    }finally{await close(page);}
+test('host surface tokens drive official quota, including dark and forced colors',async()=>{
+  const page=await pageFor();try{
+    await page.locator('[data-app-navigation-rail]').evaluate(el=>{el.style.setProperty('--radius-2xl','18px');el.style.setProperty('--radius-sm','9px')});
+    await settle(page);
+    const trigger=await page.locator('#codex-quota-trigger').evaluate(el=>{const s=getComputedStyle(el);return {blur:s.backdropFilter,border:s.borderTopStyle,width:parseFloat(s.borderTopWidth)}});
+    assert.equal(trigger.blur,'blur(18px)');assert.equal(trigger.border,'solid');assert.ok(trigger.width>0);
+    assert.deepEqual(await page.locator('#codex-quota-trigger,#codex-quota-popover').evaluateAll(els=>els.map(el=>getComputedStyle(el).borderRadius)),['9px','9px']);
+    assert.equal(await page.locator('#codex-quota-popover').evaluate(el=>getComputedStyle(el).backdropFilter),'blur(8px)');
+    assert.equal(await page.locator('#codex-quota-popover').evaluate(el=>parseFloat(getComputedStyle(el).borderTopWidth)),0);
+    await open(page);await page.addStyleTag({content:':root{color-scheme:dark;--color-surface-elevated-secondary:#272a23;--color-text:#f1f3e8;--color-text-secondary:#c7cbbb;--color-border:#42473a}'});await settle(page);
+    const colors=await page.locator('#codex-quota-popover').evaluate(el=>{const sample=document.createElement('span');sample.style.background='color-mix(in srgb, rgb(39, 42, 35) 90%, transparent)';el.append(sample);const expected=getComputedStyle(sample).backgroundColor;sample.remove();const s=getComputedStyle(el);return {background:s.backgroundColor,expected,color:s.color,blur:s.backdropFilter}});
+    assert.equal(colors.background,colors.expected);assert.equal(colors.color,'rgb(241, 243, 232)');assert.equal(colors.blur,'blur(8px)');
+    await update(page,{planName:'pro',windows:[{label:'Weekly',usedPercent:59,resetAt:Date.now()/1000+302400}]});
+    await page.emulateMedia({forcedColors:'active'});
+    const forced=await page.locator('#codex-quota-popover').evaluate(el=>{const s=getComputedStyle(el);return {shadow:s.boxShadow,blur:s.backdropFilter,border:parseFloat(s.borderTopWidth),background:s.backgroundColor}});
+    assert.equal(forced.shadow,'none');assert.equal(forced.blur,'none');assert.ok(forced.border>0);assert.match(forced.background,/^rgb\(/);
+    assert.equal(await page.locator('#codex-quota-trigger').evaluate(el=>getComputedStyle(el).backdropFilter),'none');
+    assert.deepEqual(await page.locator('.cq-trigger-plan').evaluate(el=>{const s=getComputedStyle(el);return {background:s.backgroundImage,shadow:s.boxShadow,textShadow:s.textShadow,distinct:s.color!==s.backgroundColor};}),{background:'none',shadow:'none',textShadow:'none',distinct:true});
+  }finally{await close(page);}
+});
+
+test('late notification permission cannot override a newer toggle or resurrect a disposed settings view',async()=>{
+  for(const action of ['turn-off','other-window','reinjection','leave-settings']){
+    const {context,pages:[page,other]}=await sharedPages(action==='other-window'?2:1);try{
+      await update(page,officialPayload());await open(page);await page.locator('.cq-settings-button').click();
+      await page.evaluate(()=>Object.defineProperty(Notification,'requestPermission',{configurable:true,value:()=>new Promise(resolve=>globalThis.permissionReply=resolve)}));
+      await page.locator('[name=system]').check();
+      if(action==='turn-off')await page.locator('[name=system]').uncheck();
+      else if(action==='other-window'){
+        await other.evaluate(()=>localStorage.setItem('codex-usage-card.settings.v2',JSON.stringify({system:false})));
+        await page.waitForFunction(()=>!document.querySelector('[name=system]').checked);
+      }
+      else if(action==='reinjection')await page.evaluate(source);
+      else await page.locator('#cq-settings header button').click();
+      await page.evaluate(()=>permissionReply('granted'));await settle(page);
+      assert.equal(await page.locator('#codex-quota-trigger').count(),1);
+      assert.equal(await page.locator('#codex-quota-popover').count(),1);
+      assert.notEqual(await page.evaluate(()=>JSON.parse(localStorage.getItem('codex-usage-card.settings.v2')||'{}').system),true);
+      if(action==='turn-off'||action==='other-window')assert.equal(await page.locator('[name=system]').isChecked(),false);
+      else assert.equal(await page.locator('#cq-settings').count(),0);
+    }finally{await context.close();}
   }
 });
 
@@ -746,7 +980,7 @@ test('self-drawn switches survive host reset, keyboard use, rejected notificatio
 
 test('real native text fallback never invents a timestamp or a second window',async()=>{
   const page=await browser.newPage({reducedMotion:'reduce'});try{
-    await page.setContent(shell);await page.evaluate(()=>{document.body.insertAdjacentHTML('beforeend','<div id="native" role="status" class="rounded-2xl border bg-token-main-surface-primary"><progress max="100" value="20"></progress><span class="font-medium">80%</span><div class="text-sm text-token-text-secondary">Resets at 20:00</div></div>')});await setup(page,'account',null);await open(page);
+    await page.setContent(shell);await page.evaluate(()=>{document.body.insertAdjacentHTML('beforeend','<div id="native" role="status" class="rounded-2xl border bg-token-main-surface-primary"><progress max="100" value="20"></progress><span class="font-medium">80%</span><div class="text-sm text-token-text-secondary">Resets at 20:00</div></div>')});await setup(page,null);await open(page);
     assert.equal(await page.locator('#native').isVisible(),false);assert.match(await page.locator('.cq-value').innerText(),/20%/);assert.equal(await page.locator('.cq-ring-fill').getAttribute('stroke-dasharray'),null);
     assert.equal(await page.locator('#codex-quota-trigger').getAttribute('data-cq-graphical'),null);assert.equal(await page.locator('#codex-quota-trigger .cq-time-ring,.cq-trigger-weekly-bar').count(),0);
     await page.locator('#native progress').evaluate(el=>el.value=42);await settle(page);assert.match(await page.locator('.cq-value').innerText(),/42%/);
@@ -756,7 +990,7 @@ test('real native text fallback never invents a timestamp or a second window',as
 test('synthetic desktop and narrow captures for visual review',async()=>{
   const dir=join(__dirname,'../.runtime-test/sidebar-v3-verification');mkdirSync(dir,{recursive:true});
   for(const width of [1024,320]){
-    const page=await pageFor('account',officialPayload(),{width,height:720});try{await open(page);await page.screenshot({path:join(dir,`light-${width}.png`)});await page.locator('.cq-settings-button').click();await page.screenshot({path:join(dir,`settings-${width}.png`)});}finally{await close(page);}
+    const page=await pageFor(officialPayload(),{width,height:720});try{await open(page);await page.screenshot({path:join(dir,`light-${width}.png`)});await page.locator('.cq-settings-button').click();await page.screenshot({path:join(dir,`settings-${width}.png`)});}finally{await close(page);}
   }
 });
 
@@ -812,6 +1046,47 @@ test('recovery alerts work independently and queued old-session alerts are disca
     assert.equal(await page.locator('#cq-notice').count(), 0);
     assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem('codex-usage-card.alerts.v2')).records.Weekly.resetAt), 1900600000);
   } finally { await context.close(); }
+});
+
+test('queued alerts cannot survive a session reset or UI reinjection',async()=>{
+  const {context,pages:[page]}=await sharedPages();try{
+    for(const interruption of ['reset','reinjection']){
+      await page.evaluate(()=>{
+        localStorage.removeItem('codex-usage-card.alerts.v2');document.getElementById('cq-notice')?.remove();delete globalThis.releaseQuotaLock;
+        void navigator.locks.request('codex-usage-card.alerts',()=>new Promise(resolve=>{globalThis.releaseQuotaLock=resolve;}));
+      });
+      await page.waitForFunction(()=>typeof releaseQuotaLock==='function');
+      await update(page,{planName:'pro',windows:[{label:'Weekly',usedPercent:95,resetAt:1900000000}]});
+      if(interruption==='reset'){
+        // Logout can reset the page before the helper supplies a new scope. A fast
+        // success must not make a queued result from the previous lifecycle valid.
+        await page.evaluate(()=>__codexQuotaResetSession());
+        await update(page,{planName:'pro',windows:[{label:'Weekly',usedPercent:42,resetAt:1900000000}]});
+      }else await page.evaluate(source);
+      await page.evaluate(()=>releaseQuotaLock());await page.waitForTimeout(80);
+      assert.equal(await page.locator('#cq-notice').count(),0,`${interruption} must discard the queued low-quota message`);
+      assert.deepEqual(await page.evaluate(()=>JSON.parse(localStorage.getItem('codex-usage-card.alerts.v2')||'{}').records?.Weekly?.sent||[]),[],'discarded results must not mark a threshold as delivered');
+    }
+  }finally{await context.close();}
+});
+
+test('a disposed installation retry cannot resurrect an older UI',async()=>{
+  const page=await browser.newPage({reducedMotion:'reduce',locale:'zh-CN'});const errors=[];page.on('pageerror',e=>errors.push(e.message));try{
+    await page.setContent(shell);
+    const installed=await page.evaluate(source=>{
+      globalThis.__codexQuotaMode='account';globalThis.__codexQuotaOfficialLoaded=true;
+      const query=document.querySelectorAll;
+      document.querySelectorAll=function(selector){if(selector==='nav[data-app-navigation-rail="true"]')throw new Error('synthetic temporary host failure');return query.call(this,selector);};
+      const first=eval(source);document.querySelectorAll=query;
+      const second=eval(source);return {first,second};
+    },source);
+    assert.deepEqual(installed,{first:false,second:true});
+    await page.waitForTimeout(550);
+    assert.equal(await page.locator('#codex-quota-trigger').count(),1,'an obsolete retry must not create a second entry');
+    assert.equal(await page.locator('#codex-quota-popover').count(),1);
+    assert.equal(await page.locator('[data-cq-ui]').getAttribute('data-cq-ui'),await page.evaluate(()=>String(__codexQuotaUiRevision)),'the latest successful UI must remain installed');
+    assert.deepEqual(errors,[]);
+  }finally{await page.close();}
 });
 
 test('cold document injection installs once and stays collapsed on reload', async()=>{

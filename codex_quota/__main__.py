@@ -1,13 +1,12 @@
 import tkinter as tk
 
-from .api_card import ApiUsageCard, OfficialUsageCard
-from .model import OfficialUsageSnapshot
-from .provider import QuotaProviderError, select_provider
+from .card import OfficialUsageCard
+from .provider import OfficialQuotaProvider, QuotaProviderError
 
 
 def main() -> None:
     try:
-        snapshot = select_provider().fetch()
+        snapshot = OfficialQuotaProvider().fetch()
         error = None
     except QuotaProviderError as exc:
         snapshot = None
@@ -16,8 +15,7 @@ def main() -> None:
     root.title("Codex Usage")
     root.configure(bg="#f7f7f7")
     root.resizable(False, False)
-    card_type = OfficialUsageCard if isinstance(snapshot, OfficialUsageSnapshot) else ApiUsageCard
-    card_type(root, snapshot=snapshot, error=error).pack(padx=10, pady=10)
+    OfficialUsageCard(root, snapshot=snapshot, error=error).pack(padx=10, pady=10)
     root.mainloop()
 
 

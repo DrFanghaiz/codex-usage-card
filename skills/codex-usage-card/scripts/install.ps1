@@ -47,9 +47,19 @@ $stopExactProcesses = {
   })
   foreach ($process in $matchingProcesses) {
     $nativeProcess = Get-Process -Id $process.ProcessId -ErrorAction Stop
-    Stop-Process -Id $nativeProcess.Id -Force
-    if (-not $nativeProcess.WaitForExit(5000)) {
-      throw ('Helper process did not exit: {0}' -f $nativeProcess.Id)
+    try {
+      # Keep the opened handle and reject PID reuse; CIM creation times have microsecond precision.
+      if ($nativeProcess.Handle -eq [IntPtr]::Zero -or -not $process.CreationDate -or
+          [Math]::Abs($nativeProcess.StartTime.ToUniversalTime().Ticks - ([DateTime]$process.CreationDate).ToUniversalTime().Ticks) -ge 10 -or
+          -not [String]::Equals([IO.Path]::GetFullPath($nativeProcess.MainModule.FileName), $Path, [StringComparison]::OrdinalIgnoreCase)) {
+        throw ('Helper process identity changed before stopping: {0}' -f $process.ProcessId)
+      }
+      $nativeProcess.Kill()
+      if (-not $nativeProcess.WaitForExit(5000)) {
+        throw ('Helper process did not exit: {0}' -f $nativeProcess.Id)
+      }
+    } finally {
+      $nativeProcess.Dispose()
     }
   }
   $remaining = @(Get-CimInstance Win32_Process | Where-Object {

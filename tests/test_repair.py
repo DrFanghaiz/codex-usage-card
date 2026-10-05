@@ -115,3 +115,24 @@ class RepairTests(unittest.TestCase):
         self.assertEqual(connect.call_count, 2)
         disconnected.close.assert_called_once_with()
         replacement.close.assert_called_once_with()
+
+    def test_title_change_keeps_the_existing_injection_session(self):
+        package = inspect_package(self._package())
+        first = {"id": "1", "url": "app://-/index.html", "title": "First chat"}
+        second = {**first, "title": "Second chat"}
+        with patch("codex_quota.repair.discover_latest_package", return_value=package), \
+             patch("codex_quota.repair.target_info", side_effect=[first, second]), \
+             patch("codex_quota.repair._connect", return_value=MagicMock()) as connect, \
+             patch("codex_quota.repair._patch_connection") as install, \
+             patch("codex_quota.repair._evaluate", return_value=True):
+            watch(port=9222, max_cycles=2, sleep=lambda _: None, write=lambda _: None)
+        connect.assert_called_once()
+        install.assert_called_once()
+
+    def test_unreadable_manifest_is_a_reportable_package_error(self):
+        package = self._package()
+        error = PermissionError("synthetic manifest access denied")
+        with patch("codex_quota.repair.ET.parse", side_effect=error):
+            with self.assertRaises(RepairMatchError) as raised:
+                inspect_package(package)
+        self.assertIs(raised.exception.__cause__, error)
