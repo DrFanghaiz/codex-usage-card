@@ -1,43 +1,21 @@
 import json
-import os
+import math
 from datetime import datetime, timezone
 from urllib.request import Request, urlopen
 
 from .discover import DiscoveredCredentials, discover_credentials
-from .model import ApiUsageSnapshot, OfficialUsageSnapshot, QuotaSnapshot, QuotaWindow
+from .model import OfficialUsageSnapshot, QuotaWindow
 
 
 class QuotaProviderError(RuntimeError):
     pass
 
 
-def _window(payload: dict, name: str) -> QuotaWindow:
-    value = payload.get(name)
-    if not isinstance(value, dict):
-        raise QuotaProviderError(f"missing object: {name}")
-    used = value.get("used_percent")
-    if not isinstance(used, (int, float)) or isinstance(used, bool) or not 0 <= used <= 100:
-        raise QuotaProviderError(f"invalid used_percent: {name}")
-    reset_raw = value.get("reset_at")
-    if reset_raw is None:
-        reset_at = None
-    elif isinstance(reset_raw, str):
-        try:
-            reset_at = datetime.fromisoformat(reset_raw.replace("Z", "+00:00"))
-        except ValueError as exc:
-            raise QuotaProviderError(f"invalid reset_at: {name}") from exc
-    else:
-        raise QuotaProviderError(f"invalid reset_at: {name}")
-    return QuotaWindow(float(used), reset_at)
-
-
-def parse_quota_payload(payload: object) -> QuotaSnapshot:
-    if not isinstance(payload, dict):
-        raise QuotaProviderError("response must be a JSON object")
-    return QuotaSnapshot(
-        five_hour=_window(payload, "five_hour"),
-        weekly=_window(payload, "weekly"),
-    )
+def _is_finite_number(value: object) -> bool:
+    try:
+        return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+    except OverflowError:
+        return False
 
 
 def _official_window(value: object, name: str, required: bool = False) -> QuotaWindow | None:
@@ -50,11 +28,11 @@ def _official_window(value: object, name: str, required: bool = False) -> QuotaW
     used = value.get("used_percent")
     seconds = value.get("limit_window_seconds")
     reset_at = value.get("reset_at")
-    if not isinstance(used, (int, float)) or isinstance(used, bool) or not 0 <= used <= 100:
+    if not _is_finite_number(used) or not 0 <= used <= 100:
         raise QuotaProviderError(f"invalid used_percent: {name}")
-    if not isinstance(seconds, (int, float)) or isinstance(seconds, bool) or seconds <= 0:
+    if not _is_finite_number(seconds) or seconds <= 0:
         raise QuotaProviderError(f"invalid limit_window_seconds: {name}")
-    if not isinstance(reset_at, (int, float)) or isinstance(reset_at, bool) or reset_at < 0:
+    if not _is_finite_number(reset_at) or reset_at < 0:
         raise QuotaProviderError(f"invalid reset_at: {name}")
     try:
         reset_datetime = datetime.fromtimestamp(float(reset_at), tz=timezone.utc)
@@ -82,43 +60,6 @@ def parse_official_usage_payload(payload: object) -> OfficialUsageSnapshot:
     return OfficialUsageSnapshot(plan_type=plan_type, primary=primary, secondary=secondary)
 
 
-def parse_api_usage_payload(payload: object) -> ApiUsageSnapshot:
-    """Parse the provider's explicit daily subscription usage contract."""
-    if not isinstance(payload, dict):
-        raise QuotaProviderError("response must be a JSON object")
-    if payload.get("isValid") is not True:
-        message = payload.get("invalidMessage")
-        raise QuotaProviderError(str(message) if isinstance(message, str) and message else "API usage unavailable")
-    status = "active"
-    plan_name = payload.get("planName")
-    unit = payload.get("unit")
-    if not isinstance(plan_name, str) or not plan_name:
-        raise QuotaProviderError("missing planName")
-    if not isinstance(unit, str) or not unit:
-        raise QuotaProviderError("missing unit")
-    numbers = {"remaining": payload.get("remaining")}
-    subscription = payload.get("subscription")
-    if isinstance(subscription, dict):
-        numbers["used"] = subscription.get("daily_usage_usd")
-        numbers["total"] = subscription.get("daily_limit_usd")
-    else:
-        usage = payload.get("usage")
-        today = usage.get("today") if isinstance(usage, dict) else None
-        if not isinstance(today, dict):
-            raise QuotaProviderError("missing daily usage")
-        numbers["used"] = today.get("cost")
-        numbers["total"] = 0
-    for name, value in numbers.items():
-        if not isinstance(value, (int, float)) or isinstance(value, bool) or value < 0:
-            raise QuotaProviderError(f"invalid {name}")
-        numbers[name] = float(value)
-    if numbers["total"] == 0:
-        numbers["total"] = None
-    elif numbers["used"] > numbers["total"]:
-        raise QuotaProviderError("invalid total or used")
-    return ApiUsageSnapshot(status=status, plan_name=plan_name, unit=unit, **numbers)
-
-
 def _get_json(url: str, headers: dict[str, str], timeout: float) -> object:
     request = Request(url, headers=headers, method="GET")
     try:
@@ -128,65 +69,31 @@ def _get_json(url: str, headers: dict[str, str], timeout: float) -> object:
         raise QuotaProviderError("quota request failed") from exc
 
 
-class ApiQuotaProvider:
-    def __init__(
-        self,
-        url: str | None = None,
-        api_key: str | None = None,
-        timeout: float = 10.0,
-        credentials: DiscoveredCredentials | None = None,
-    ):
-        credentials = credentials or discover_credentials()
-        self.url = url or os.environ.get("CODEX_USAGE_URL")
-        if self.url is None and credentials.base_url:
-            base_url = credentials.base_url.rstrip("/")
-            self.url = base_url + ("/usage" if base_url.endswith("/v1") else "/v1/usage")
-        self.api_key = api_key if api_key is not None else credentials.api_key
-        self.base_url = credentials.base_url
-        self.timeout = timeout
-
-    def fetch(self) -> ApiUsageSnapshot:
-        if not self.url:
-            raise QuotaProviderError("CODEX_USAGE_URL is not configured")
-        headers = {"Accept": "application/json"}
-        if self.api_key:
-            headers["Authorization"] = f"Bearer {self.api_key}"
-        return parse_api_usage_payload(_get_json(self.url, headers, self.timeout))
-
-
 class OfficialQuotaProvider:
     DEFAULT_URL = "https://chatgpt.com/backend-api/wham/usage"
 
     def __init__(
         self,
-        url: str | None = None,
-        access_token: str | None = None,
-        account_id: str | None = None,
         timeout: float = 10.0,
         credentials: DiscoveredCredentials | None = None,
     ):
-        credentials = credentials or discover_credentials()
-        self.url = url or os.environ.get("CODEX_OFFICIAL_USAGE_URL") or self.DEFAULT_URL
-        self.access_token = access_token if access_token is not None else credentials.access_token
-        self.account_id = account_id if account_id is not None else credentials.account_id
+        try:
+            credentials = credentials or discover_credentials()
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise QuotaProviderError("官方登录信息读取失败，请检查 Codex 登录状态或配置目录权限。") from exc
+        self.access_token = credentials.access_token
+        self.account_id = credentials.account_id
         self.timeout = timeout
 
     def fetch(self) -> OfficialUsageSnapshot:
-        if not self.access_token or not self.account_id:
-            raise QuotaProviderError("official account auth unavailable")
+        if not self.access_token or not self.access_token.strip() or not self.account_id or not self.account_id.strip():
+            raise QuotaProviderError("未登录官方账户，请在 Codex 中使用 ChatGPT 账户登录。")
         headers = {
             "Accept": "application/json",
             "Authorization": f"Bearer {self.access_token}",
             "ChatGPT-Account-ID": self.account_id,
         }
-        return parse_official_usage_payload(_get_json(self.url, headers, self.timeout))
-
-
-def select_provider(credentials: DiscoveredCredentials | None = None):
-    credentials = credentials or discover_credentials()
-    if credentials.access_token is not None or credentials.account_id is not None:
-        return OfficialQuotaProvider(credentials=credentials)
-    return ApiQuotaProvider(credentials=credentials)
+        return parse_official_usage_payload(_get_json(self.DEFAULT_URL, headers, self.timeout))
 
 
 def _window_label(window: QuotaWindow) -> str:
@@ -199,26 +106,17 @@ def _window_label(window: QuotaWindow) -> str:
     return f"{window.window_minutes:.0f} min"
 
 
-def snapshot_to_card_payload(snapshot: OfficialUsageSnapshot | ApiUsageSnapshot) -> dict[str, object]:
-    if isinstance(snapshot, OfficialUsageSnapshot):
-        windows = []
-        for window in (snapshot.primary, snapshot.secondary):
-            if window is not None:
-                windows.append({
-                    "label": _window_label(window),
-                    "used_percent": window.used_percent,
-                    "reset_at": window.reset_at.isoformat() if window.reset_at else None,
-                })
-        return {"kind": "official", "plan_name": snapshot.plan_type, "windows": windows}
-    return {
-        "kind": "api",
-        "plan_name": snapshot.plan_name,
-        "used": snapshot.used,
-        "total": snapshot.total,
-        "remaining": snapshot.remaining,
-        "unit": snapshot.unit,
-    }
+def snapshot_to_card_payload(snapshot: OfficialUsageSnapshot) -> dict[str, object]:
+    windows = []
+    for window in (snapshot.primary, snapshot.secondary):
+        if window is not None:
+            windows.append({
+                "label": _window_label(window),
+                "used_percent": window.used_percent,
+                "reset_at": window.reset_at.isoformat() if window.reset_at else None,
+            })
+    return {"kind": "official", "plan_name": snapshot.plan_type, "windows": windows}
 
 
 def fetch_card_payload() -> dict[str, object]:
-    return snapshot_to_card_payload(select_provider().fetch())
+    return snapshot_to_card_payload(OfficialQuotaProvider().fetch())

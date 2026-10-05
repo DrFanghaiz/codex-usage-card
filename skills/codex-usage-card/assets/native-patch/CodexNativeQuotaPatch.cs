@@ -27,7 +27,6 @@ internal static class CodexNativeQuotaPatch
     private static int CachedPayloadGeneration;
     private static readonly object PayloadGate = new object();
     private static string CachedPayloadScope;
-    private static bool CachedPayloadOfficial;
     private static Dictionary<string, object> CachedPayload;
     private static DateTimeOffset CachedPayloadExpiresAt;
     private static readonly HashSet<string> ObservedCodexRoots = new HashSet<string>();
@@ -87,9 +86,7 @@ internal static class CodexNativeQuotaPatch
                     continue;
                 }
                 var targets = await FindTargetsAsync();
-                ApiConfiguration api;
-                bool official;
-                if (!TryLoadLoginConfiguration(out api, out official))
+                if (!TryLoadLoginConfiguration())
                 {
                     foreach (var target in targets)
                     using (var socket = new CdpSocket(target.WebSocketDebuggerUrl))
@@ -100,8 +97,8 @@ internal static class CodexNativeQuotaPatch
                     await WaitForLoginConfigurationChangeAsync();
                     continue;
                 }
-                using (var sessions = new PageSessions(api, official))
-                using (var loginWatcher = WatchLoginConfiguration(sessions.Close, api, official))
+                using (var sessions = new PageSessions())
+                using (var loginWatcher = WatchLoginConfiguration(sessions.Close))
                 {
                     foreach (var target in targets) sessions.Start(target);
                     if (await sessions.Ready.Task) retrySeconds = 1;
@@ -117,10 +114,10 @@ internal static class CodexNativeQuotaPatch
         }
     }
 
-    private static void InstallForCurrentAndFuturePages(CdpSocket socket, string mode)
+    private static void InstallForCurrentAndFuturePages(CdpSocket socket)
     {
         var initialization = "globalThis.__codexQuotaSessionScope=" + Json.Serialize(SessionScope) +
-            ";globalThis.__codexQuotaMode=" + Json.Serialize(mode) + ";";
+            ";globalThis.__codexQuotaMode=" + Json.Serialize("account") + ";";
         SendCommand(socket, "Page.enable", new Dictionary<string, object>());
         SendCommand(socket, "Runtime.enable", new Dictionary<string, object>());
         SendCommand(socket, "Page.addScriptToEvaluateOnNewDocument", new Dictionary<string, object>
@@ -151,9 +148,19 @@ internal static class CodexNativeQuotaPatch
         }");
     }
 
+    private static string ConfigurationRoot()
+    {
+        var configured = Environment.GetEnvironmentVariable("CODEX_HOME");
+        var root = Path.GetFullPath(String.IsNullOrWhiteSpace(configured)
+            ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".codex")
+            : configured);
+        return root.Length > Path.GetPathRoot(root).Length
+            ? root.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) : root;
+    }
+
     private static async Task WaitForLoginConfigurationChangeAsync()
     {
-        var root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".codex");
+        var root = ConfigurationRoot();
         var completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         if (!Directory.Exists(root))
         {
@@ -162,7 +169,7 @@ internal static class CodexNativeQuotaPatch
                 watcher.NotifyFilter = NotifyFilters.DirectoryName;
                 FileSystemEventHandler created = (sender, change) =>
                 {
-                    if (String.Equals(Path.GetFileName(change.FullPath), ".codex", StringComparison.OrdinalIgnoreCase))
+                    if (String.Equals(Path.GetFileName(change.FullPath), Path.GetFileName(root), StringComparison.OrdinalIgnoreCase))
                         completion.TrySetResult(true);
                 };
                 RenamedEventHandler renamed = (sender, change) => created(sender, change);
@@ -180,9 +187,7 @@ internal static class CodexNativeQuotaPatch
             watcher.NotifyFilter = NotifyFilters.FileName | NotifyFilters.LastWrite | NotifyFilters.Size;
             FileSystemEventHandler changed = (sender, change) =>
             {
-                var name = Path.GetFileName(change.FullPath);
-                if (String.Equals(name, "auth.json", StringComparison.OrdinalIgnoreCase) ||
-                    String.Equals(name, "config.toml", StringComparison.OrdinalIgnoreCase)) completion.TrySetResult(true);
+                if (IsLoginConfigurationChange(change)) completion.TrySetResult(true);
             };
             RenamedEventHandler renamed = (sender, change) => changed(sender, change);
             watcher.Changed += changed;
@@ -193,29 +198,19 @@ internal static class CodexNativeQuotaPatch
             watcher.EnableRaisingEvents = true;
 
             // Close the gap between the caller's first check and watcher startup.
-            ApiConfiguration api;
-            bool official;
-            if (TryLoadLoginConfiguration(out api, out official)) return;
+            if (TryLoadLoginConfiguration()) return;
             await completion.Task;
         }
     }
 
-    private static bool TryLoadLoginConfiguration(out ApiConfiguration api, out bool official)
+    private static bool TryLoadLoginConfiguration()
     {
-        api = null;
-        official = false;
         try
         {
             var account = LoadOfficialConfiguration();
-            official = account != null;
-            if (!official) api = LoadApiConfiguration();
-            if (!official && api == null) return false;
+            if (account == null) return false;
             // The credential fingerprint stays in the helper; pages receive only a random scope.
-            string fingerprint;
-            using (var hash = SHA256.Create())
-                fingerprint = Convert.ToBase64String(hash.ComputeHash(Encoding.UTF8.GetBytes(official
-                    ? Json.Serialize(new[] { "account", account.AccountId })
-                    : Json.Serialize(new[] { "api", api.Url, api.ApiKey }))));
+            var fingerprint = AccountFingerprint(account);
             if (LoginFingerprint != null && LoginFingerprint != fingerprint)
             {
                 SessionScope = Guid.NewGuid().ToString("N");
@@ -234,23 +229,25 @@ internal static class CodexNativeQuotaPatch
         }
     }
 
-    private static FileSystemWatcher WatchLoginConfiguration(
-        Action close,
-        ApiConfiguration activeApi,
-        bool activeOfficial)
+    private static string AccountFingerprint(OfficialConfiguration account)
+    {
+        using (var hash = SHA256.Create())
+            return Convert.ToBase64String(hash.ComputeHash(Encoding.UTF8.GetBytes(
+                Json.Serialize(new[] { "account", account.AccountId }))));
+    }
+
+    private static FileSystemWatcher WatchLoginConfiguration(Action close)
     {
         var generation = Volatile.Read(ref SessionGeneration);
-        var root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".codex");
-        if (!Directory.Exists(root)) return null;
+        var root = ConfigurationRoot();
+        if (!Directory.Exists(root)) { close(); return null; }
         var watcher = new FileSystemWatcher(root)
         {
             NotifyFilter = NotifyFilters.FileName | NotifyFilters.LastWrite | NotifyFilters.Size,
         };
         FileSystemEventHandler changed = (sender, change) =>
         {
-            var name = Path.GetFileName(change.FullPath);
-            if (String.Equals(name, "auth.json", StringComparison.OrdinalIgnoreCase) ||
-                String.Equals(name, "config.toml", StringComparison.OrdinalIgnoreCase))
+            if (IsLoginConfigurationChange(change))
             {
                 Interlocked.Increment(ref SessionGeneration);
                 close();
@@ -267,12 +264,8 @@ internal static class CodexNativeQuotaPatch
             watcher.EnableRaisingEvents = true;
 
             // Recheck after the watcher starts so a config write cannot fall into the setup gap.
-            ApiConfiguration currentApi;
-            bool currentOfficial;
-            if (!TryLoadLoginConfiguration(out currentApi, out currentOfficial) ||
-                Volatile.Read(ref SessionGeneration) != generation ||
-                currentOfficial != activeOfficial ||
-                !SameApiConfiguration(currentApi, activeApi))
+            if (!TryLoadLoginConfiguration() ||
+                Volatile.Read(ref SessionGeneration) != generation)
             {
                 Interlocked.Increment(ref SessionGeneration);
                 close();
@@ -286,14 +279,19 @@ internal static class CodexNativeQuotaPatch
         }
     }
 
-    private static bool SameApiConfiguration(ApiConfiguration left, ApiConfiguration right)
+    private static bool IsLoginConfigurationChange(FileSystemEventArgs change)
     {
-        if (left == null || right == null) return left == null && right == null;
-        return String.Equals(left.Url, right.Url, StringComparison.Ordinal) &&
-            String.Equals(left.ApiKey, right.ApiKey, StringComparison.Ordinal);
+        var renamed = change as RenamedEventArgs;
+        foreach (var path in new[] { change.FullPath, renamed == null ? null : renamed.OldFullPath })
+        {
+            var name = Path.GetFileName(path);
+            if (String.Equals(name, "auth.json", StringComparison.OrdinalIgnoreCase) ||
+                String.Equals(name, "config.toml", StringComparison.OrdinalIgnoreCase)) return true;
+        }
+        return false;
     }
 
-    private static void KeepSessionOpen(CdpSocket socket, ApiConfiguration api, bool official)
+    private static void KeepSessionOpen(CdpSocket socket)
     {
         while (true)
         {
@@ -303,10 +301,8 @@ internal static class CodexNativeQuotaPatch
             string requestId;
             if (IsConsoleRequest(message, "__codexQuotaDoctorRequest__"))
                 PublishDiagnosis(socket);
-            else if (official && TryConsoleRequest(message, "__codexQuotaOfficialRequest__", out requestId))
+            else if (TryConsoleRequest(message, "__codexQuotaOfficialRequest__", out requestId))
                 PublishOfficialPayload(socket, requestId);
-            else if (!official && TryConsoleRequest(message, "__codexQuotaApiRequest__", out requestId))
-                PublishApiPayload(socket, api, requestId);
         }
     }
 
@@ -324,6 +320,7 @@ internal static class CodexNativeQuotaPatch
     private static bool TryConsoleRequest(string message, string name, out string requestId)
     {
         requestId = null;
+        if (name != "__codexQuotaOfficialRequest__" && name != "__codexQuotaDoctorRequest__") return false;
         var root = Json.DeserializeObject(message) as Dictionary<string, object>;
         if (root == null || StringValue(root, "method") != "Runtime.consoleAPICalled") return false;
         var parameters = root.ContainsKey("params") ? root["params"] as Dictionary<string, object> : null;
@@ -331,7 +328,7 @@ internal static class CodexNativeQuotaPatch
         var argument = args != null && (args.Length == 1 || args.Length == 2) ? args[0] as Dictionary<string, object> : null;
         if (argument == null || StringValue(argument, "type") != "string" || StringValue(argument, "value") != name) return false;
         if (args.Length == 1) return true; // Previous helpers/pages used a single marker.
-        if (name != "__codexQuotaOfficialRequest__" && name != "__codexQuotaApiRequest__") return false;
+        if (name != "__codexQuotaOfficialRequest__") return false;
         var id = args[1] as Dictionary<string, object>;
         if (id == null || StringValue(id, "type") != "string" || !ValidRequestId(StringValue(id, "value"))) return false;
         requestId = StringValue(id, "value");
@@ -459,10 +456,10 @@ internal static class CodexNativeQuotaPatch
         Evaluate(socket, "globalThis.__codexQuotaUpdateDiagnosis(" + Json.Serialize(payload) + ")");
     }
 
-    private static bool PageDataRequested(CdpSocket socket, string kind, out string requestId)
+    private static bool PageDataRequested(CdpSocket socket, out string requestId)
     {
         requestId = null;
-        var prefix = "__codexQuota" + kind;
+        const string prefix = "__codexQuotaOfficial";
         var result = Evaluate(socket, "({needsData:globalThis[" + Json.Serialize(prefix + "NeedsData") + "]===true,id:globalThis[" +
             Json.Serialize(prefix + "RequestId") + "]??null})");
         var remote = result.ContainsKey("result") ? result["result"] as Dictionary<string, object> : null;
@@ -479,22 +476,17 @@ internal static class CodexNativeQuotaPatch
 
     private static void PublishOfficialPayload(CdpSocket socket, string requestId = null)
     {
-        Evaluate(socket, "globalThis.__codexQuotaUpdateOfficial(" + Json.Serialize(SharedPayload(null, true, socket.Scope, socket.Generation)) + "," + Json.Serialize(requestId) + ")");
+        Evaluate(socket, "globalThis.__codexQuotaUpdateOfficial(" + Json.Serialize(SharedPayload(socket.Scope, socket.Generation)) + "," + Json.Serialize(requestId) + ")");
     }
 
-    private static void PublishApiPayload(CdpSocket socket, ApiConfiguration api, string requestId = null)
-    {
-        Evaluate(socket, "globalThis.__codexQuotaUpdateApi(" + Json.Serialize(SharedPayload(api, false, socket.Scope, socket.Generation)) + "," + Json.Serialize(requestId) + ")");
-    }
-
-    private static Dictionary<string, object> SharedPayload(ApiConfiguration api, bool official, string scope, int generation)
+    private static Dictionary<string, object> SharedPayload(string scope, int generation)
     {
         // ponytail: one fetch lock per helper; split by account only if concurrent accounts are supported.
         lock (PayloadGate)
         {
             if (scope != SessionScope || generation != Volatile.Read(ref SessionGeneration)) throw new IOException("Login session changed");
             var now = DateTimeOffset.UtcNow;
-            if (CachedPayload != null && CachedPayloadScope == scope && CachedPayloadOfficial == official && now < CachedPayloadExpiresAt &&
+            if (CachedPayload != null && CachedPayloadScope == scope && now < CachedPayloadExpiresAt &&
                 (CachedPayloadGeneration == generation || StringValue(CachedPayload, "errorCode") == "RATE_LIMITED"))
             {
                 var cached = new Dictionary<string, object>(CachedPayload);
@@ -505,18 +497,13 @@ internal static class CodexNativeQuotaPatch
             Dictionary<string, object> payload;
             try
             {
-                if (official)
-                {
-                    var account = LoadOfficialConfiguration();
-                    payload = account == null
-                        ? new Dictionary<string, object> { { "errorCode", "AUTH_REQUIRED" } }
-                        : FetchOfficialPayload(account);
-                }
-                else
-                {
-                    if (api == null) throw new InvalidOperationException();
-                    payload = FetchApiPayload(api);
-                }
+                var account = LoadOfficialConfiguration();
+                // File watcher delivery may lag the credential write; never fetch a new account for an old scope.
+                if (account != null && AccountFingerprint(account) != LoginFingerprint)
+                    throw new InvalidOperationException();
+                payload = account == null
+                    ? new Dictionary<string, object> { { "errorCode", "AUTH_REQUIRED" } }
+                    : FetchOfficialPayload(account);
             }
             catch (WebException exception) { payload = WebErrorPayload(exception); }
             catch { payload = new Dictionary<string, object> { { "errorCode", "INVALID_RESPONSE" } }; }
@@ -525,51 +512,23 @@ internal static class CodexNativeQuotaPatch
             CachedPayload = payload;
             CachedPayloadScope = scope;
             CachedPayloadGeneration = generation;
-            CachedPayloadOfficial = official;
             CachedPayloadExpiresAt = DateTimeOffset.UtcNow.AddSeconds(seconds);
+            // Keep same-account Retry-After across a token rewrite, but never reply to the stale page session.
+            if (scope != SessionScope || generation != Volatile.Read(ref SessionGeneration))
+                throw new IOException("Login session changed");
             return new Dictionary<string, object>(payload);
         }
     }
 
-    private static ApiConfiguration LoadApiConfiguration()
-    {
-        var root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".codex");
-        var authPath = Path.Combine(root, "auth.json");
-        var configPath = Path.Combine(root, "config.toml");
-        if (!File.Exists(authPath) || !File.Exists(configPath)) return null;
-        var auth = Json.DeserializeObject(File.ReadAllText(authPath, Encoding.UTF8)) as Dictionary<string, object>;
-        var apiKey = auth != null && auth.ContainsKey("OPENAI_API_KEY") ? auth["OPENAI_API_KEY"] as string : null;
-        if (String.IsNullOrWhiteSpace(apiKey)) return null;
-        var config = File.ReadAllText(configPath, Encoding.UTF8);
-        var providerMatch = Regex.Match(config, "^\\s*model_provider\\s*=\\s*\\\"([^\\\"]+)\\\"\\s*$", RegexOptions.Multiline);
-        if (!providerMatch.Success) return null;
-        var sectionMatch = Regex.Match(
-            config,
-            "^\\s*\\[model_providers\\." + Regex.Escape(providerMatch.Groups[1].Value) + "\\]\\s*$",
-            RegexOptions.Multiline);
-        if (!sectionMatch.Success) return null;
-        var remainder = config.Substring(sectionMatch.Index + sectionMatch.Length);
-        var nextSection = Regex.Match(remainder, "^\\s*\\[", RegexOptions.Multiline);
-        if (nextSection.Success) remainder = remainder.Substring(0, nextSection.Index);
-        var baseMatch = Regex.Match(remainder, "^\\s*base_url\\s*=\\s*\\\"([^\\\"]+)\\\"\\s*$", RegexOptions.Multiline);
-        if (!baseMatch.Success) return null;
-        Uri baseUri;
-        if (!Uri.TryCreate(baseMatch.Groups[1].Value.TrimEnd('/'), UriKind.Absolute, out baseUri) ||
-            (baseUri.Scheme != Uri.UriSchemeHttp && baseUri.Scheme != Uri.UriSchemeHttps)) return null;
-        var baseUrl = baseUri.AbsoluteUri.TrimEnd('/');
-        return new ApiConfiguration
-        {
-            Url = baseUrl + (baseUrl.EndsWith("/v1", StringComparison.OrdinalIgnoreCase) ? "/usage" : "/v1/usage"),
-            ApiKey = apiKey
-        };
-    }
-
     private static OfficialConfiguration LoadOfficialConfiguration()
     {
-        var path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".codex", "auth.json");
+        var path = Path.Combine(ConfigurationRoot(), "auth.json");
         if (!File.Exists(path)) return null;
         var auth = Json.DeserializeObject(File.ReadAllText(path, Encoding.UTF8)) as Dictionary<string, object>;
         if (auth == null || !auth.ContainsKey("tokens") || auth["tokens"] == null) return null;
+        var mode = StringValue(auth, "auth_mode");
+        if (String.Equals(mode, "api", StringComparison.OrdinalIgnoreCase) ||
+            String.Equals(mode, "apikey", StringComparison.OrdinalIgnoreCase)) return null;
         var tokens = auth["tokens"] as Dictionary<string, object>;
         if (tokens == null) throw new InvalidOperationException();
         if (!tokens.ContainsKey("access_token") && !tokens.ContainsKey("account_id")) return null;
@@ -585,55 +544,18 @@ internal static class CodexNativeQuotaPatch
         };
     }
 
-    private static Dictionary<string, object> FetchApiPayload(ApiConfiguration api)
-    {
-        var request = (HttpWebRequest)WebRequest.Create(api.Url);
-        request.Method = "GET";
-        request.Proxy = ApiProxy();
-        request.Timeout = 10000;
-        request.ReadWriteTimeout = 10000;
-        request.Accept = "application/json";
-        request.Headers[HttpRequestHeader.Authorization] = "Bearer " + api.ApiKey;
-        var response = ReadQuotaResponse(request);
-        if (response == null || !BooleanValue(response, "isValid")) throw new InvalidOperationException();
-        var planName = StringValue(response, "planName");
-        var unit = StringValue(response, "unit");
-        var subscription = response.ContainsKey("subscription") ? response["subscription"] as Dictionary<string, object> : null;
-        double remaining, used, total;
-        if (String.IsNullOrWhiteSpace(planName) || String.IsNullOrWhiteSpace(unit) ||
-            !NumberValue(response, "remaining", out remaining)) throw new InvalidOperationException();
-        if (subscription != null)
-        {
-            if (!NumberValue(subscription, "daily_usage_usd", out used) ||
-                !NumberValue(subscription, "daily_limit_usd", out total)) throw new InvalidOperationException();
-        }
-        else
-        {
-            var usage = response.ContainsKey("usage") ? response["usage"] as Dictionary<string, object> : null;
-            var today = usage != null && usage.ContainsKey("today") ? usage["today"] as Dictionary<string, object> : null;
-            if (today == null || !NumberValue(today, "cost", out used)) throw new InvalidOperationException();
-            total = 0;
-        }
-        if (remaining < 0 || used < 0 || total < 0 || (total > 0 && used > total)) throw new InvalidOperationException();
-        return new Dictionary<string, object>
-        {
-            { "planName", planName }, { "unit", unit }, { "remaining", remaining }, { "used", used },
-            { "total", total == 0 ? null : (object)total }
-        };
-    }
-
     private static Dictionary<string, object> FetchOfficialPayload(OfficialConfiguration official)
     {
         var request = (HttpWebRequest)WebRequest.Create(official.Url);
         request.Method = "GET";
-        request.Proxy = ApiProxy();
+        request.Proxy = QuotaProxy();
         request.Timeout = 10000;
         request.ReadWriteTimeout = 10000;
         request.Accept = "application/json";
         request.Headers[HttpRequestHeader.Authorization] = "Bearer " + official.AccessToken;
         request.Headers["ChatGPT-Account-ID"] = official.AccountId;
         var response = ReadQuotaResponse(request);
-        var planName = response == null ? "" : StringValue(response, "plan_type");
+        var planName = response != null && response.ContainsKey("plan_type") ? response["plan_type"] as string : null;
         var rateLimit = response != null && response.ContainsKey("rate_limit")
             ? response["rate_limit"] as Dictionary<string, object>
             : null;
@@ -677,12 +599,14 @@ internal static class CodexNativeQuotaPatch
         string name,
         bool required)
     {
-        var window = rateLimit.ContainsKey(name) ? rateLimit[name] as Dictionary<string, object> : null;
-        if (window == null)
+        object raw;
+        if (!rateLimit.TryGetValue(name, out raw) || raw == null)
         {
             if (required) throw new InvalidOperationException();
             return null;
         }
+        var window = raw as Dictionary<string, object>;
+        if (window == null) throw new InvalidOperationException();
         double used, seconds, resetAt;
         if (!NumberValue(window, "used_percent", out used) || used < 0 || used > 100 ||
             !NumberValue(window, "limit_window_seconds", out seconds) || seconds <= 0 ||
@@ -697,7 +621,7 @@ internal static class CodexNativeQuotaPatch
         };
     }
 
-    private static IWebProxy ApiProxy()
+    private static IWebProxy QuotaProxy()
     {
         var value = Environment.GetEnvironmentVariable("HTTPS_PROXY");
         if (String.IsNullOrWhiteSpace(value)) value = Environment.GetEnvironmentVariable("HTTPS_PROXY", EnvironmentVariableTarget.User);
@@ -721,15 +645,10 @@ internal static class CodexNativeQuotaPatch
     private static bool NumberValue(Dictionary<string, object> values, string key, out double value)
     {
         value = 0;
-        if (!values.ContainsKey(key) || values[key] == null) return false;
-        try { value = Convert.ToDouble(values[key]); }
-        catch { return false; }
+        object raw;
+        if (!values.TryGetValue(key, out raw) || !(raw is int || raw is long || raw is decimal || raw is double || raw is float)) return false;
+        value = Convert.ToDouble(raw, CultureInfo.InvariantCulture);
         return !Double.IsNaN(value) && !Double.IsInfinity(value);
-    }
-
-    private static bool BooleanValue(Dictionary<string, object> values, string key)
-    {
-        return values.ContainsKey(key) && values[key] is bool && (bool)values[key];
     }
 
     private static bool BooleanValue(Dictionary<string, object> values, string key, out bool value)
@@ -1091,6 +1010,8 @@ internal static class CodexNativeQuotaPatch
                 request.Proxy = null;
                 request.Timeout = 3000;
                 request.ReadWriteTimeout = 3000;
+                using (var deadline = new CancellationTokenSource(3000))
+                using (deadline.Token.Register(request.Abort))
                 using (var response = (HttpWebResponse)request.GetResponse())
                 using (var reader = new StreamReader(response.GetResponseStream()))
                 {
@@ -1185,7 +1106,7 @@ internal static class CodexNativeQuotaPatch
                     if (socket.OnEvent != null) socket.OnEvent(message);
                     // Runtime.enable replays console history; only queue requests from the live session.
                     if (method != "Runtime.enable" && (IsConsoleRequest(message, "__codexQuotaDoctorRequest__") ||
-                        IsConsoleRequest(message, "__codexQuotaOfficialRequest__") || IsConsoleRequest(message, "__codexQuotaApiRequest__")))
+                        IsConsoleRequest(message, "__codexQuotaOfficialRequest__")))
                         socket.PendingEvents.Enqueue(message);
                     continue;
                 }
@@ -1242,13 +1163,9 @@ internal static class CodexNativeQuotaPatch
     {
         private readonly object gate = new object();
         private readonly Dictionary<string, CdpSocket> sockets = new Dictionary<string, CdpSocket>();
-        private readonly ApiConfiguration api;
-        private readonly bool official;
         private bool closed;
         public readonly TaskCompletionSource<bool> Ready = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         public readonly TaskCompletionSource<bool> Completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-
-        public PageSessions(ApiConfiguration api, bool official) { this.api = api; this.official = official; }
 
         public void Start(CdpTarget target)
         {
@@ -1270,15 +1187,12 @@ internal static class CodexNativeQuotaPatch
                             lock (gate) { if (closed) return; }
                             ResetPageSession(socket);
                             SendCommand(socket, "Target.setDiscoverTargets", new Dictionary<string, object> { { "discover", true } });
-                            InstallForCurrentAndFuturePages(socket, official ? "account" : "api");
+                            InstallForCurrentAndFuturePages(socket);
                             string requestId;
-                            if (PageDataRequested(socket, official ? "Official" : "Api", out requestId))
-                            {
-                                if (official) PublishOfficialPayload(socket, requestId);
-                                else PublishApiPayload(socket, api, requestId);
-                            }
+                            if (PageDataRequested(socket, out requestId))
+                                PublishOfficialPayload(socket, requestId);
                             Ready.TrySetResult(true);
-                            KeepSessionOpen(socket, api, official);
+                            KeepSessionOpen(socket);
                         }
                     }
                     catch { Close(); }
@@ -1300,12 +1214,6 @@ internal static class CodexNativeQuotaPatch
         }
 
         public void Dispose() { Close(); }
-    }
-
-    private sealed class ApiConfiguration
-    {
-        public string Url;
-        public string ApiKey;
     }
 
     private sealed class CodexProcessInfo

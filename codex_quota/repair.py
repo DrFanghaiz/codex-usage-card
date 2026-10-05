@@ -11,6 +11,7 @@ from typing import Callable
 
 from .page_injector import (
     PageInjectionError,
+    NATIVE_PATCH_READY_SCRIPT,
     _connect,
     _evaluate,
     _patch_connection,
@@ -53,8 +54,8 @@ def inspect_package(root: str | Path) -> PackageMatch:
     try:
         document = ET.parse(manifest_path)
         identity = next(element for element in document.getroot() if element.tag.endswith("Identity"))
-    except (ET.ParseError, StopIteration) as exc:
-        raise RepairMatchError("invalid AppxManifest.xml") from exc
+    except (OSError, ET.ParseError, StopIteration) as exc:
+        raise RepairMatchError("could not read a valid AppxManifest.xml") from exc
     name = identity.attrib.get("Name")
     version = identity.attrib.get("Version")
     if name != "OpenAI.Codex":
@@ -211,8 +212,8 @@ def wait_for_repair(
     raise RepairMatchError("Codex did not become ready before timeout")
 
 
-def _target_signature(target: dict[str, object]) -> tuple[object, object, object]:
-    return target.get("id"), target.get("url"), target.get("title")
+def _target_signature(target: dict[str, object]) -> tuple[object, object]:
+    return target.get("id"), target.get("url")
 
 
 def watch(
@@ -231,7 +232,7 @@ def watch(
         raise ValueError("refresh_interval must be positive")
     del refresh_interval
     observed_package: PackageMatch | None = None
-    observed_target: tuple[object, object, object] | None = None
+    observed_target: tuple[object, object] | None = None
     actual_port: int | None = None
     connection = None
     cycle = 0
@@ -254,7 +255,7 @@ def watch(
             else:
                 patched = _evaluate(
                     connection,
-                    "Boolean(globalThis.__STATSIG__?.instance?.().__codexNativeQuotaPatched)",
+                    NATIVE_PATCH_READY_SCRIPT,
                     5,
                 ) is True
                 if not patched:

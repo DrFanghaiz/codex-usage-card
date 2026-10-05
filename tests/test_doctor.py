@@ -38,7 +38,7 @@ $cases = @(@(2,2,0), @(2,1,0), @(2,1,1), @(2,0,1), @(2,0,2), @(0,0,0))
 $results = @(foreach ($case in $cases) {
   $windowCount, $visibleCardCount, $uninspectedWindowCount = $case
   $cardVisible = $null
-  $cardKinds = @('Api', 'Official')
+  $cardKinds = @('Official', 'Official')
   $cardKind = $null
 ''' + aggregate + '''
   [pscustomobject]@{ visible = $cardVisible; kind = $cardKind }
@@ -51,7 +51,7 @@ ConvertTo-Json -Compress -InputObject $results
         )
         values = json.loads(result.stdout)
         self.assertEqual([row['visible'] for row in values], [True, False, None, False, None, None])
-        self.assertEqual(values[0]['kind'], 'Mixed')
+        self.assertEqual(values[0]['kind'], 'Official')
 
     def test_root_and_skill_doctors_are_exact_mirrors(self):
         self.assertEqual(ROOT_DOCTOR, SKILL_DOCTOR)
@@ -210,7 +210,7 @@ try {
         self.assertIn("method = 'Runtime.evaluate'", ROOT_DOCTOR)
         self.assertIn("$item.url -eq 'app://-/index.html'", ROOT_DOCTOR)
         self.assertNotIn("$item.title -match", ROOT_DOCTOR)
-        self.assertIn("codex-api-usage-host", ROOT_DOCTOR)
+        self.assertNotIn("codex-api-usage-host", ROOT_DOCTOR)
         self.assertIn("codex-official-usage-host", ROOT_DOCTOR)
         self.assertIn(".codex-native-compact-usage", ROOT_DOCTOR)
         self.assertIn("offsetParent !== null", ROOT_DOCTOR)
@@ -252,7 +252,7 @@ global.innerWidth = 800;
 global.innerHeight = 600;
 const cases = [
   ['collapsed, no quota data or global patch flags', () => {}, true],
-  ['official', ({trigger}) => { trigger.attributes['data-cq-kind'] = 'official'; }, true],
+  ['removed API entry', ({trigger}) => { trigger.attributes['data-cq-kind'] = 'api'; }, false],
   ['missing trigger', (state) => { state.trigger = null; }, false],
   ['legacy only', (state) => { state.trigger = null; state.legacy.offsetParent = {}; }, true],
   ['hidden trigger with visible legacy', (state) => { state.trigger.hidden = true; state.legacy.offsetParent = {}; }, false],
@@ -287,18 +287,18 @@ for (const [name, expression] of Object.entries(probes)) {
     const state = {trigger: new HTMLButtonElement(), popover: new HTMLElement(), ancestor: new HTMLElement(), legacy: new HTMLElement()};
     state.legacy.querySelector = () => ({});
     state.trigger.parentElement = state.ancestor;
-    state.trigger.attributes = {'aria-controls': 'codex-quota-popover', 'data-cq-kind': 'api', 'aria-expanded': 'false'};
+    state.trigger.attributes = {'aria-controls': 'codex-quota-popover', 'data-cq-kind': 'official', 'aria-expanded': 'false'};
     state.popover.hidden = true;
     state.popover.style.display = 'none';
     modify(state);
     global.document = {
-      getElementById: (id) => ({'codex-quota-trigger': state.trigger, 'codex-quota-popover': state.popover, 'codex-api-usage-host': state.legacy})[id] ?? null,
+      getElementById: (id) => ({'codex-quota-trigger': state.trigger, 'codex-quota-popover': state.popover, 'codex-official-usage-host': state.legacy})[id] ?? null,
       querySelectorAll: () => [],
     };
     const actual = eval(expression);
     assert.equal(name === 'doctor' ? actual.visible : actual, expected, `${name}: ${label}`);
     if (name === 'doctor' && expected) {
-      assert.equal(actual.kind, state.trigger?.attributes['data-cq-kind'] === 'official' ? 'Official' : 'Api', label);
+      assert.equal(actual.kind, 'Official', label);
     }
   }
 }

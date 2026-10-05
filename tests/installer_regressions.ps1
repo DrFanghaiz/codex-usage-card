@@ -238,7 +238,53 @@ try {
       else { Assert (-not (Test-Path -LiteralPath $path)) 'Partial fresh skill file was not removed' }
     }
   }
-  Write-Output 'Installer regressions: 23 scenarios and 6 uninstall identity checks passed, 0 failed.'
+  # Exercise production process-stop blocks without opening or terminating any OS process.
+  & {
+    function Get-CimInstance {
+      param($ClassName)
+      if ($global:installerIdentity_kills -eq 0) {
+        [pscustomobject]@{ ExecutablePath=$testExecutable; ProcessId=123; CreationDate=$observedStart }
+      }
+    }
+    function Get-Process { param($Id, $ErrorAction) $fakeProcess }
+    function Stop-Process { param($Id, [switch]$Force) $global:installerIdentity_kills++ }
+    $testExecutable = Join-Path $testRoot 'native-patch\CodexNativeQuotaPatch.next.exe'
+    $observedStart = [DateTime]::UtcNow
+    foreach ($operation in @('install', 'uninstall')) {
+      $source = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $workspace ('skills\codex-usage-card\scripts\' + $operation + '.ps1'))
+      $startMarker = if ($operation -eq 'install') { '$stopExactProcesses = {' } else { '$matchingProcesses = @(' }
+      $endMarker = if ($operation -eq 'install') { '$taskActionMatches = {' } else { 'if ($shortcutMatches)' }
+      $start = $source.IndexOf($startMarker)
+      $end = $source.IndexOf($endMarker, $start)
+      Assert ($start -ge 0 -and $end -gt $start) 'Production process-stop boundary missing'
+      $block = $source.Substring($start, $end - $start)
+      if ($operation -eq 'install') { $block += '& $stopExactProcesses $testExecutable' }
+      $executable = $testExecutable
+      foreach ($scenario in @('reused-path', 'reused-start-time', 'missing-handle', 'matching', 'wmi-precision')) {
+        $global:installerIdentity_kills = 0
+        $global:installerIdentity_disposed = 0
+        $fakeProcess = [pscustomobject]@{
+          Id=123
+          Handle=$(if ($scenario -eq 'missing-handle') { [IntPtr]::Zero } else { [IntPtr]1 })
+          MainModule=[pscustomobject]@{ FileName=$(if ($scenario -eq 'reused-path') { 'C:\Unrelated.exe' } else { $testExecutable }) }
+          StartTime=$(if ($scenario -eq 'reused-start-time') { $observedStart.AddSeconds(1) } elseif ($scenario -eq 'wmi-precision') { $observedStart.AddTicks(9) } else { $observedStart })
+        }
+        $fakeProcess | Add-Member ScriptMethod Kill { $global:installerIdentity_kills++ }
+        $fakeProcess | Add-Member ScriptMethod WaitForExit { param($Timeout) return $true }
+        $fakeProcess | Add-Member ScriptMethod Dispose { $global:installerIdentity_disposed++ }
+        $failure = $null
+        try { & ([scriptblock]::Create($block)) } catch { $failure = $_ }
+        if ($scenario -in @('matching', 'wmi-precision')) {
+          Assert (-not $failure -and $global:installerIdentity_kills -eq 1) "$operation/$scenario failed to stop the exact helper: $failure"
+        } else {
+          Assert ($failure -and $global:installerIdentity_kills -eq 0) "$operation/$scenario stopped a process with changed identity"
+        }
+        Assert ($global:installerIdentity_disposed -eq 1) "$operation/$scenario leaked the process handle"
+      }
+    }
+    Remove-Variable -Name installerIdentity_kills, installerIdentity_disposed -Scope Global
+  }
+  Write-Output 'Installer regressions: 23 scenarios, 6 uninstall identity checks and 10 process identity checks passed, 0 failed.'
 } finally {
   $resolved = [IO.Path]::GetFullPath($testRoot)
   if (-not $resolved.StartsWith($workspace + '\', [StringComparison]::OrdinalIgnoreCase)) { throw 'Unsafe test cleanup path' }
