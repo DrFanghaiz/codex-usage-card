@@ -872,6 +872,48 @@ test('session switch clears old values immediately, even while collapsed or sett
   }finally{await close(page);}
 });
 
+test('clipped host sidebar mounts the gauge on cold start and after animated clipping changes',async()=>{
+  for(const coldCollapsed of [true,false]){
+    const page=await browser.newPage({reducedMotion:'reduce',locale:'zh-CN',viewport:{width:1024,height:720},deviceScaleFactor:1.25});
+    const errors=[];page.on('pageerror',e=>errors.push(e.message));page.errors=errors;
+    try{
+      await page.setContent(shell);
+      await page.evaluate(collapsed=>{
+        const rail=document.querySelector('[data-app-navigation-rail]'),column=document.querySelector('.sidebar-navigation');
+        const clip=document.createElement('div'),inner=document.createElement('div');
+        clip.id='host-sidebar-clip';
+        clip.style.cssText=`display:flex;flex:none;overflow:hidden;width:${collapsed?51:289}px`;
+        inner.style.cssText='display:flex;flex:none;width:289px;min-width:289px;height:100%';
+        document.body.prepend(clip);clip.append(inner);inner.append(rail,column);
+      },coldCollapsed);
+      await setup(page);
+      const trigger=page.locator('#codex-quota-trigger'),identity=await trigger.elementHandle();
+      const verify=async collapsed=>{
+        assert.equal(await trigger.evaluate(el=>el.hasAttribute('data-cq-collapsed')),collapsed);
+        assert.equal(await trigger.evaluate(el=>{const r=el.getBoundingClientRect();return el.contains(document.elementFromPoint(r.x+r.width/2,r.y+r.height/2))}),true,'entry must be painted and clickable, not only have a nonzero rect');
+        assert.equal(await trigger.count(),1);assert.equal(await identity.evaluate(el=>el.isConnected),true);
+        const g=await geometry(page);
+        if(collapsed){assert.ok(g.trigger.bottom<=g.help.top);assert.ok(g.trigger.left>=g.rail.left&&g.trigger.right<=g.rail.right);}
+        else assert.ok(Math.abs(g.trigger.top-g.avatar.top)<=1);
+      };
+      await verify(coldCollapsed);
+      for(const collapsed of [!coldCollapsed,coldCollapsed]){
+        // WAAPI changes only the clipping ancestor's width; the column keeps its rect.
+        await page.evaluate(async collapsed=>{
+          const clip=document.getElementById('host-sidebar-clip'),width=getComputedStyle(clip).width;
+          clip.getAnimations().forEach(animation=>animation.cancel());
+          await clip.animate([{width},{width:(collapsed?51:289)+'px'}],{duration:140,fill:'forwards'}).finished;
+        },collapsed);
+        await settle(page);await verify(collapsed);
+        await open(page);assert.equal(await page.locator('#codex-quota-popover').isVisible(),true);
+        await page.keyboard.press('Escape');await settle(page);
+      }
+      const scans=await page.evaluate(()=>layoutScans);await settle(page);
+      assert.equal(await page.evaluate(()=>layoutScans),scans,'clipping observation must settle without a render loop');
+    }finally{await close(page);}
+  }
+});
+
 test('host replacement, missing anchors and native data preserve a single recoverable entry',async()=>{
   const page=await pageFor();try{
     const handle=await page.locator('#codex-quota-trigger').elementHandle();

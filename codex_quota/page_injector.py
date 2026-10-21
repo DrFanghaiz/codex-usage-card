@@ -234,15 +234,37 @@ def card_present(port: int, target: dict[str, Any] | None = None) -> bool:
               const trigger = document.getElementById('codex-quota-trigger');
               const triggerVisible = (element) => {
                 if (!element.isConnected) return false;
+                const rect = element.getBoundingClientRect();
+                if (rect.width <= 0 || rect.height <= 0) return false;
+                let left = Math.max(0, rect.left), right = Math.min(innerWidth, rect.right);
+                let top = Math.max(0, rect.top), bottom = Math.min(innerHeight, rect.bottom);
                 for (let ancestor = element; ancestor instanceof HTMLElement; ancestor = ancestor.parentElement) {
                   const style = getComputedStyle(ancestor);
                   if (ancestor.hidden || ancestor.inert || style.display === 'none' ||
                       style.visibility === 'hidden' || style.visibility === 'collapse' ||
                       Number(style.opacity) === 0) return false;
+                  if (ancestor !== element && style.display !== 'contents') {
+                    const clipX = /^(hidden|clip|scroll|auto)$/.test(style.overflowX);
+                    const clipY = /^(hidden|clip|scroll|auto)$/.test(style.overflowY);
+                    if (clipX || clipY) {
+                      const box = ancestor.getBoundingClientRect();
+                      const scaleX = ancestor.offsetWidth ? box.width / ancestor.offsetWidth : 1;
+                      const scaleY = ancestor.offsetHeight ? box.height / ancestor.offsetHeight : 1;
+                      if (clipX) {
+                        const edge = box.left + ancestor.clientLeft * scaleX;
+                        left = Math.max(left, edge);
+                        right = Math.min(right, edge + ancestor.clientWidth * scaleX);
+                      }
+                      if (clipY) {
+                        const edge = box.top + ancestor.clientTop * scaleY;
+                        top = Math.max(top, edge);
+                        bottom = Math.min(bottom, edge + ancestor.clientHeight * scaleY);
+                      }
+                    }
+                  }
+                  if (right <= left || bottom <= top) return false;
                 }
-                const rect = element.getBoundingClientRect();
-                return rect.width > 0 && rect.height > 0 && rect.right > 0 && rect.bottom > 0 &&
-                  rect.left < innerWidth && rect.top < innerHeight;
+                return true;
               };
               if (trigger && trigger instanceof HTMLButtonElement &&
                   trigger.getAttribute('aria-controls') === 'codex-quota-popover' &&

@@ -241,6 +241,9 @@ global.HTMLElement = class {
     this.rect = {left: 10, top: 20, right: 40, bottom: 50, width: 30, height: 30};
     this.attributes = {};
     this.offsetParent = null; // Fixed entries have no offsetParent and remain visible.
+    this.clientLeft = this.clientTop = 0;
+    this.clientWidth = this.offsetWidth = 30;
+    this.clientHeight = this.offsetHeight = 30;
   }
   getBoundingClientRect() { return this.rect; }
   getAttribute(name) { return this.attributes[name] ?? null; }
@@ -271,6 +274,26 @@ const cases = [
   ['outside bottom', ({trigger}) => { trigger.rect.top = 600; trigger.rect.bottom = 630; }, false],
   ['partially in viewport', ({trigger}) => { trigger.rect.left = -10; trigger.rect.right = 20; }, true],
 ];
+const clipBox = (element, left, top, width, height, scale = 1, border = 0) => {
+  element.rect = {left, top, right: left + width * scale, bottom: top + height * scale, width: width * scale, height: height * scale};
+  element.offsetWidth = width; element.offsetHeight = height;
+  element.clientLeft = element.clientTop = border;
+  element.clientWidth = width - 2 * border; element.clientHeight = height - 2 * border;
+};
+for (const overflow of ['hidden', 'clip', 'scroll', 'auto']) {
+  cases.push([`ancestor clips x with ${overflow}`, ({ancestor}) => { clipBox(ancestor, 0, 0, 10, 100); ancestor.style.overflowX = overflow; }, false]);
+  cases.push([`ancestor clips y with ${overflow}`, ({ancestor}) => { clipBox(ancestor, 0, 0, 100, 20); ancestor.style.overflowY = overflow; }, false]);
+}
+cases.push(
+  ['partially clipped', ({ancestor}) => { clipBox(ancestor, 0, 0, 20, 100); ancestor.style.overflowX = 'hidden'; }, true],
+  ['visible overflow does not clip', ({ancestor}) => { clipBox(ancestor, 0, 0, 10, 10); ancestor.style.overflowX = ancestor.style.overflowY = 'visible'; }, true],
+  ['contents has no clipping box', ({ancestor}) => { clipBox(ancestor, 0, 0, 0, 0); ancestor.style.display = 'contents'; ancestor.style.overflowX = ancestor.style.overflowY = 'hidden'; }, true],
+  ['border is not content', ({ancestor}) => { clipBox(ancestor, 0, 0, 14, 100, 1, 5); ancestor.style.overflowX = 'hidden'; }, false],
+  ['scrollbar is not content', ({ancestor}) => { clipBox(ancestor, 0, 0, 40, 100); ancestor.clientWidth = 10; ancestor.style.overflowX = 'auto'; }, false],
+  ['scaled content remains visible', ({ancestor, trigger}) => { clipBox(ancestor, 0, 0, 30, 100, 1.25, 2); clipBox(trigger, 30, 20, 4, 30); ancestor.style.overflowX = 'hidden'; }, true],
+  ['scaled border clips', ({ancestor, trigger}) => { clipBox(ancestor, 0, 0, 12, 100, 1.25, 1); clipBox(trigger, 14, 20, 3, 30); ancestor.style.overflowX = 'hidden'; }, false],
+  ['nested clips intersect', ({ancestor}) => { clipBox(ancestor, 0, 0, 25, 100); ancestor.style.overflowX = 'hidden'; const outer = new HTMLElement(); clipBox(outer, 30, 0, 100, 100); outer.style.overflowX = 'hidden'; ancestor.parentElement = outer; }, false],
+);
 for (const target of ['trigger', 'ancestor']) {
   for (const attribute of ['hidden', 'inert']) {
     cases.push([`${target} ${attribute}`, (state) => { state[target][attribute] = true; }, false]);
@@ -303,6 +326,50 @@ for (const [name, expression] of Object.entries(probes)) {
   }
 }
 """], input=json.dumps(probes), text=True, capture_output=True, check=False, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        connection.close.assert_called_once_with()
+
+    @unittest.skipUnless(shutil.which('node'), 'Node.js required')
+    def test_clipped_entry_visibility_in_browser(self):
+        available = subprocess.run(['node', '-e', "require.resolve('playwright')"], capture_output=True, timeout=10)
+        if available.returncode:
+            self.skipTest('Existing Playwright runtime required (set NODE_PATH)')
+        expression = ROOT_DOCTOR.split("$expression = @'\n", 1)[1].split("\n'@", 1)[0]
+        connection = MagicMock()
+        with patch('codex_quota.page_injector._connect', return_value=connection), \
+             patch('codex_quota.page_injector._evaluate', return_value=True) as evaluate:
+            self.assertTrue(card_present(9222, {'webSocketDebuggerUrl': 'ws://synthetic'}))
+        probes = {'doctor': expression, 'card_present': evaluate.call_args.args[1]}
+        result = subprocess.run(['node', '-e', r"""
+const assert = require('node:assert/strict');
+const probes = JSON.parse(require('node:fs').readFileSync(0, 'utf8'));
+const {chromium} = require('playwright');
+(async () => {
+  const browser = await chromium.launch({headless: true, channel: 'msedge'});
+  try {
+    const page = await browser.newPage();
+    const check = async expected => {
+      for (const [name, expression] of Object.entries(probes)) {
+        const actual = await page.evaluate(expression);
+        assert.equal(name === 'doctor' ? actual.visible : actual, expected, name);
+      }
+    };
+    for (const overflow of ['hidden', 'clip', 'auto', 'scroll']) for (const zoom of [1, 1.25]) {
+      await page.setContent(`<style>body{margin:0}#clip{display:flex;width:52px;height:150px;overflow:${overflow};zoom:${zoom};border:4px solid}#rail{width:52px;flex:none}#column{width:238px;flex:none}button{width:32px;height:32px;margin:8px}</style><div id="clip"><div id="rail"></div><div id="column"><button id="codex-quota-trigger" data-cq-kind="official" aria-controls="codex-quota-popover">Quota</button></div></div><div id="codex-quota-popover" hidden></div>`);
+      await check(false); // Fixed-width column is entirely clipped by its collapsed parent.
+      await page.locator('#clip').evaluate(el => el.style.width = '290px');
+      await check(true);
+      await page.locator('#clip').evaluate(el => el.style.width = '52px');
+      await page.locator('#rail').evaluate(el => el.append(document.getElementById('codex-quota-trigger')));
+      await check(true); // The same entry is visible when mounted above the avatar in the rail.
+      assert.equal(await page.locator('#codex-quota-trigger').evaluate(el => { const r = el.getBoundingClientRect(); return el.contains(document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2)); }), true);
+    }
+    await page.locator('#column').evaluate(el => el.append(document.getElementById('codex-quota-trigger')));
+    await page.locator('#clip').evaluate(el => el.style.display = 'contents');
+    await check(true);
+  } finally { await browser.close(); }
+})().catch(error => { console.error(error); process.exitCode = 1; });
+"""], input=json.dumps(probes), text=True, capture_output=True, check=False, timeout=40)
         self.assertEqual(result.returncode, 0, result.stderr)
         connection.close.assert_called_once_with()
 
