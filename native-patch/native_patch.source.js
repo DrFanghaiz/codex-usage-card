@@ -1353,13 +1353,31 @@
   let anchors = null;
   let quotaShell = null;
   let nativeSnapshot = null;
+  const clipsOverflow = value => /^(hidden|clip|scroll|auto)$/.test(value);
   const visible = (node) => {
     if (!(node instanceof Element) || !node.isConnected || !node.getClientRects().length) return false;
     const rect = node.getBoundingClientRect();
     if (rect.width <= 0 || rect.height <= 0 || rect.right <= 0 || rect.bottom <= 0 || rect.left >= innerWidth || rect.top >= innerHeight) return false;
+    let left = Math.max(0, rect.left), right = Math.min(innerWidth, rect.right);
+    let top = Math.max(0, rect.top), bottom = Math.min(innerHeight, rect.bottom);
     for (let parent = node; parent; parent = parent.parentElement) {
       const style = getComputedStyle(parent);
       if (parent.hidden || parent.inert || style.display === "none" || style.visibility !== "visible" || Number(style.opacity) === 0) return false;
+      // The host can collapse by clipping a still full-width sidebar.
+      if (parent !== node && style.display !== "contents" && (clipsOverflow(style.overflowX) || clipsOverflow(style.overflowY))) {
+        const box = parent.getBoundingClientRect();
+        const scaleX = parent.offsetWidth ? box.width / parent.offsetWidth : 1;
+        const scaleY = parent.offsetHeight ? box.height / parent.offsetHeight : 1;
+        if (clipsOverflow(style.overflowX)) {
+          const edge = box.left + parent.clientLeft * scaleX;
+          left = Math.max(left, edge); right = Math.min(right, edge + parent.clientWidth * scaleX);
+        }
+        if (clipsOverflow(style.overflowY)) {
+          const edge = box.top + parent.clientTop * scaleY;
+          top = Math.max(top, edge); bottom = Math.min(bottom, edge + parent.clientHeight * scaleY);
+        }
+        if (right <= left || bottom <= top) return false;
+      }
     }
     return true;
   };
@@ -1990,6 +2008,12 @@
     };
     const observeAnchors = () => {
       const current = new Set(anchors ? [anchors.rail, anchors.stack, anchors.avatar, anchors.column].filter(Boolean) : []);
+      for (const anchor of [anchors?.rail, anchors?.column]) {
+        for (let node = anchor?.parentElement; node; node = node.parentElement) {
+          const style = getComputedStyle(node);
+          if (style.display !== "contents" && (clipsOverflow(style.overflowX) || clipsOverflow(style.overflowY))) current.add(node);
+        }
+      }
       for (const node of observed.keys()) if (!current.has(node)) { resize.unobserve(node); observed.delete(node); }
       for (const node of current) {
         const added = !observed.has(node);
