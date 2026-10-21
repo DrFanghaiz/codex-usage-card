@@ -1,3 +1,4 @@
+import re
 import unittest
 from pathlib import Path
 
@@ -132,10 +133,17 @@ class NativeHelperTests(unittest.TestCase):
                 "Unregister-ScheduledTask -TaskPath '\\' -TaskName $legacyTaskName"
             ),
         )
-        self.assertIn("$releaseTag = 'v2.3.0'", ROOT_INSTALL_SCRIPT)
         self.assertIn("$archiveName = 'codex-usage-card.skill.zip'", ROOT_INSTALL_SCRIPT)
         self.assertIn("'scripts\\doctor.ps1'", ROOT_INSTALL_SCRIPT)
-        self.assertIn("E3BFBF7B61434DBB44A06646A60C2F4D821F2A93DB1F1FE65951D5BD3BD47E61", ROOT_INSTALL_SCRIPT)
+        self.assertIn("'scripts\\official_shortcuts.ps1'", ROOT_INSTALL_SCRIPT)
+
+    def test_release_metadata_matches_documented_installation(self):
+        tag = re.search(r"\$releaseTag = '(v\d+\.\d+\.\d+)'", ROOT_INSTALL_SCRIPT)
+        digest = re.search(r"\$expectedSha256 = '([A-F0-9]{64})'", ROOT_INSTALL_SCRIPT)
+        self.assertIsNotNone(tag)
+        self.assertIsNotNone(digest)
+        self.assertIn(f"/{tag[1]}/install.ps1", (ROOT / 'README.md').read_text(encoding='utf-8'))
+        self.assertIn(digest[1], (ROOT / 'docs' / 'releases' / f'{tag[1]}.md').read_text(encoding='utf-8'))
 
 
 if __name__ == "__main__":

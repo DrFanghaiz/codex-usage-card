@@ -94,6 +94,7 @@ $shortcutMatches = {
     $Shortcut.Arguments -ceq '--launch'
 }
 if (-not $SkipTaskRegistration) {
+  . (Join-Path $PSScriptRoot 'official_shortcuts.ps1')
   $ShortcutPath = [IO.Path]::GetFullPath($ShortcutPath)
   if ([IO.Path]::GetExtension($ShortcutPath) -ine '.lnk') { throw 'ShortcutPath must be a .lnk file.' }
   $shortcutShell = New-Object -ComObject WScript.Shell
@@ -152,6 +153,7 @@ $legacyChanged = $false
 $processesStopped = $false
 $filesChanged = $false
 $shortcutCreated = $false
+$officialShortcutTransaction = $null
 try {
   if (-not $SkipTaskRegistration) {
     $processesStopped = $true
@@ -173,6 +175,11 @@ try {
       TaskRegistered = $false
     } | Format-List
     return
+  }
+
+  $officialShortcutTransaction = Install-CodexOfficialShortcuts -InstallRoot $InstallRoot -BackupDirectory $backupDirectory
+  if ($officialShortcutTransaction.Status -in @('NotFound', 'PackageNotFound')) {
+    Write-Warning ('Official shortcut arguments were not configured ({0}). Existing native package shortcuts are required; virtual Start menu entries cannot store these arguments.' -f $officialShortcutTransaction.Status)
   }
 
   if (-not $existingShortcut) {
@@ -247,6 +254,11 @@ try {
   }
 } catch {
   $installFailure = $_
+  $officialShortcutRollbackFailure = $null
+  if ($officialShortcutTransaction) {
+    try { Undo-CodexOfficialShortcutInstall -Transaction $officialShortcutTransaction }
+    catch { $officialShortcutRollbackFailure = $_ }
+  }
   try {
     if ($shortcutCreated -and (Test-Path -LiteralPath $ShortcutPath)) {
       if (-not (& $shortcutMatches ($shortcutShell.CreateShortcut($ShortcutPath)))) {
@@ -294,7 +306,10 @@ try {
       if ($legacyTask.State -eq 'Running') { Start-ScheduledTask -TaskPath '\' -TaskName $legacyTaskName }
     }
   } catch {
-    throw ('Installation failed: {0}. Rollback also failed: {1}. Backup retained at {2}' -f $installFailure, $_, $backupDirectory)
+    throw ('Installation failed: {0}. Rollback also failed: {1}. Official shortcut rollback: {2}. Backup retained at {3}' -f $installFailure, $_, $officialShortcutRollbackFailure, $backupDirectory)
+  }
+  if ($officialShortcutRollbackFailure) {
+    throw ('Installation failed: {0}. Files and task restored, but official shortcut rollback failed: {1}. Backup: {2}' -f $installFailure, $officialShortcutRollbackFailure, $backupDirectory)
   }
   throw ('Installation failed; previous files and task restored: {0}. Backup: {1}' -f $installFailure, $backupDirectory)
 }
@@ -303,6 +318,10 @@ try {
   Installed = $true
   InstallRoot = $InstallRoot
   ShortcutPath = $ShortcutPath
+  OfficialShortcutStatus = $officialShortcutTransaction.Status
+  OfficialShortcutsConfigured = $officialShortcutTransaction.ConfiguredCount
+  OfficialShortcutsAlreadyConfigured = $officialShortcutTransaction.AlreadyConfiguredCount
+  OfficialShortcutPaths = $officialShortcutTransaction.Paths
   TaskName = $TaskName
   TaskState = $task.State
   ProcessId = $running[0].ProcessId

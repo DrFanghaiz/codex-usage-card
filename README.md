@@ -9,7 +9,7 @@ Codex Usage Card 在 Codex 桌面端列表侧栏底部提供一行额度入口�
 在 PowerShell 7 中运行：
 
 ```powershell
-$installer = Join-Path $env:TEMP 'install-codex-usage-card.ps1'; Invoke-WebRequest 'https://raw.githubusercontent.com/DrFanghaiz/codex-usage-card/v2.3.1/install.ps1' -OutFile $installer; Unblock-File -LiteralPath $installer; & $installer
+$installer = Join-Path $env:TEMP 'install-codex-usage-card.ps1'; Invoke-WebRequest 'https://raw.githubusercontent.com/DrFanghaiz/codex-usage-card/v2.4.0/install.ps1' -OutFile $installer; Unblock-File -LiteralPath $installer; & $installer
 ```
 
 安装器会校验发布包的 SHA-256，把 Skill 安装到 `$CODEX_HOME\skills`（未设置时为 `$env:USERPROFILE\.codex\skills`），把无窗口修复器部署到 `$env:LOCALAPPDATA\CodexUsageCard`，并注册当前用户的计划任务 `Codex Usage Card`。从旧版升级时，只迁移路径与动作完全匹配的旧任务。安装完成后会输出 `ActivationState`、`StageCodes` 和 `CardVisible` 等只读验收结果；Codex 未运行时显示等待状态，不把已完成安装误报为失败。
@@ -24,7 +24,7 @@ python "$env:USERPROFILE\.codex\skills\.system\skill-installer\scripts\install-s
 
 ## 工作方式
 
-- 新版界面的初始数据和几何契约见 [`spec.md`](docs/quota-sidebar-v3/spec.md)，后续已确认的外观与动画以[当前设计方案](docs/codex-bar-proposal-20260926.html)为准；发布验证见 [v2.3.1 验证记录](docs/releases/v2.3.1.md)。官方模式沿用 Helper 校验后的真实额度窗口；原生单窗口数据仍可作为回退来源，未知窗口逐条呈现。
+- 新版界面的初始数据和几何契约见 [`spec.md`](docs/quota-sidebar-v3/spec.md)，后续已确认的外观与动画以[当前设计方案](docs/codex-bar-proposal-20260926.html)为准；发布验证见 [v2.4.0 验证记录](docs/releases/v2.4.0.md)。官方模式沿用 Helper 校验后的真实额度窗口；原生单窗口数据仍可作为回退来源，未知窗口逐条呈现。
 - 入口上沿按宿主头像实际矩形对齐，兼容宿主自身缩放；footer 在 `.sidebar-navigation` 中正常留位。弹层打开时按实测列表列宽取 `min(272px, 列宽 − 16px)`，不越出列表列，矮窗口可内部滚动。官方横线表示已用，高 2px，L2 方案填充至少 3px。浅色轨道 `#E2D8C4`、填充 `#8E4617`，额度数字字重 600；时间环为 10px/描边 2.75。深色填充结合宿主前景调亮，表面与文字优先使用宿主 token。
 - 折叠侧栏入口使用 20px 自绘仪表，1.33px 轮廓、三枚轻刻度与轴心，背景和图标色与宿主导航一致。指针显示官方剩余额度：左 0%、上 50%、右 100%；多窗口采用剩余最少者，悬停说明窗口。随现有刷新回包更新并平滑转动，不额外轮询；失败保留上次值，无数据隐藏指针。
 - 页面可见时使用唯一的自适应单次计时器：最近聚焦 5 分钟内每 2 分钟、聚焦后 5 分钟至 1 小时每 5 分钟、闲置 1–4 小时每 15 分钟、超过 4 小时每 30 分钟；若额度值刚发生变化则维持 5 分钟档。页面隐藏时立即停表，恢复可见或重新聚焦时按新鲜度补刷新。失败重试继续服从至少 60 秒及服务端 `Retry-After` 冷却，不监听键盘、不扫描进程或会话文件。
@@ -40,7 +40,11 @@ Codex 必须暴露本机调试端口，修复器才能向页面注入控件。�
 
 历史上的 v1.0–v1.7 只挂接已经开放端口的客户端；启动脚本或 Codex++ 从第一次启动就附带连接参数时，可以一次打开便加载额度卡。v1.8 才加入普通入口的自动二次重启。恢复前一种体验需要入口在第一次启动时传入参数，单独回退控件 UI 不会给普通启动补上端口。
 
-本机已验证：保留原官方快捷方式的包应用目标，仅在其 Arguments 中加入 `--remote-debugging-address=127.0.0.1 --remote-debugging-port=0`，即可由应用选择动态本机端口，Helper 直接连接；一次完整退出重开的实测没有二次重启。不要将目标改成 WindowsApps 内的 EXE，也无需额外启动脚本。这是具体快捷方式的配置，不会自动影响开始菜单或其他入口；本版安装器不自动修改原官方快捷方式。
+安装器会检查当前用户桌面、开始菜单 Programs 和任务栏固定目录中的现有 `.lnk`，按注册的 Codex 包应用身份匹配，为原官方快捷方式补充 `--remote-debugging-address=127.0.0.1 --remote-debugging-port=0`。仅修改 Arguments，保留包应用目标、PIDL、图标和其他元数据；不使用额外启动脚本，不将目标改成 WindowsApps 内的 EXE。已配置的入口不重复写入，其他参数保留；冲突的调试参数会明确报错，不依赖重复开关的先后顺序。
+
+安装结果单独输出 `OfficialShortcutStatus`、本次配置数及已配置数。没有已注册 Codex 包或找不到匹配的真实 `.lnk` 时会明确警告；开始菜单的虚拟应用入口本身无法保存这些参数，未处理的入口仍沿用现有启动逻辑。`-SkipTaskRegistration` 完全跳过快捷方式操作。安装失败会回滚本次修改；升级保留首次原件，卸载只恢复仍与安装器写入内容相同的官方链接，用户后来修改的链接保留并提示。原件与恢复记录保存在运行目录的 `official-shortcuts` 中。
+
+本机已用这两个参数完成一次手动完全退出重开：应用直接获得动态 loopback 端口，额度卡无需二次重启。该验证适用于已配置的原官方快捷方式；安装不会关闭当前正在运行的 Codex，未来宿主若不再支持透传参数仍需重新验证。
 
 ## 设置、提醒与可靠性
 

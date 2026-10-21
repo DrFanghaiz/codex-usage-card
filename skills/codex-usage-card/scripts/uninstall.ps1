@@ -40,6 +40,15 @@ if ($task) {
   if (-not (& $taskActionMatches $task $executable)) {
     throw ('The task action does not match and was not removed: {0}' -f $actualExecutable)
   }
+}
+
+$officialShortcutRestore = $null
+if (Test-Path -LiteralPath (Join-Path $InstallRoot 'official-shortcuts\state.json') -PathType Leaf) {
+  . (Join-Path $PSScriptRoot 'official_shortcuts.ps1')
+  $officialShortcutRestore = Restore-CodexOfficialShortcuts -InstallRoot $InstallRoot
+}
+
+if ($task) {
   Stop-ScheduledTask -TaskPath '\' -TaskName $TaskName
   Unregister-ScheduledTask -TaskPath '\' -TaskName $TaskName -Confirm:$false
 }
@@ -96,4 +105,6 @@ if ((Test-Path -LiteralPath $InstallRoot -PathType Container) -and
   Uninstalled = $true
   InstallRoot = $InstallRoot
   TaskName = $TaskName
+  OfficialShortcutsRestored = $(if ($officialShortcutRestore) { $officialShortcutRestore.RestoredCount } else { 0 })
+  OfficialShortcutsPreserved = $(if ($officialShortcutRestore) { $officialShortcutRestore.SkippedCount } else { 0 })
 } | Format-List

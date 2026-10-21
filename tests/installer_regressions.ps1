@@ -99,7 +99,7 @@ function Expand-Archive {
   }
 }
 try {
-  foreach ($global:installerTest_scenario in @('identity', 'legacy-identity', 'arguments', 'working-directory', 'legacy-arguments', 'legacy-working-directory', 'copy-failure', 'startup', 'fresh-startup', 'skip-success', 'migration-failure', 'shortcut-target', 'shortcut-arguments', 'shortcut-working-directory', 'shortcut-create', 'shortcut-existing', 'shortcut-rollback', 'startup-prompt', 'helper-window', 'startup-launcher', 'helper-multiple')) {
+  foreach ($global:installerTest_scenario in @('identity', 'legacy-identity', 'arguments', 'working-directory', 'legacy-arguments', 'legacy-working-directory', 'copy-failure', 'startup', 'fresh-startup', 'skip-success', 'migration-failure', 'shortcut-target', 'shortcut-arguments', 'shortcut-working-directory', 'shortcut-create', 'shortcut-existing', 'shortcut-rollback', 'startup-prompt', 'helper-window', 'startup-launcher', 'helper-multiple', 'official-failure', 'official-undo-failure')) {
     $caseRoot = Join-Path $testRoot $global:installerTest_scenario
     $global:installerTest_destination = Join-Path $caseRoot 'installed'
     $scripts = Join-Path $caseRoot 'skill\scripts'
@@ -117,6 +117,31 @@ try {
       $previousShortcut = [Convert]::ToBase64String([IO.File]::ReadAllBytes($shortcutPath))
     }
     Microsoft.PowerShell.Management\Copy-Item -LiteralPath $installer -Destination (Join-Path $scripts 'install.ps1')
+    Microsoft.PowerShell.Management\Copy-Item -LiteralPath (Join-Path $workspace 'skills\codex-usage-card\scripts\uninstall.ps1') -Destination (Join-Path $scripts 'uninstall.ps1')
+    $global:installerTest_officialPath = Join-Path $caseRoot 'official.lnk'
+    Set-Content -LiteralPath $global:installerTest_officialPath -Value 'original official shortcut'
+    # Isolate the installer orchestration: real Shell/PIDL behavior has its own regression script.
+    Set-Content -LiteralPath (Join-Path $scripts 'official_shortcuts.ps1') -Value @'
+function Install-CodexOfficialShortcuts {
+  param($InstallRoot, $BackupDirectory)
+  $global:installerTest_officialCalls++
+  if ($global:installerTest_scenario -eq 'official-failure') { throw 'Injected official shortcut failure' }
+  Set-Content -LiteralPath $global:installerTest_officialPath -Value 'configured official shortcut'
+  [pscustomobject]@{Status='Configured';ConfiguredCount=1;AlreadyConfiguredCount=0;Paths=@($global:installerTest_officialPath)}
+}
+function Undo-CodexOfficialShortcutInstall {
+  param($Transaction)
+  $global:installerTest_officialUndos++
+  if ($global:installerTest_scenario -eq 'official-undo-failure') { throw 'Injected official shortcut rollback failure' }
+  Set-Content -LiteralPath $global:installerTest_officialPath -Value 'original official shortcut'
+}
+function Restore-CodexOfficialShortcuts {
+  param($InstallRoot)
+  $global:installerTest_officialRestores++
+  Set-Content -LiteralPath $global:installerTest_officialPath -Value 'original official shortcut'
+  [pscustomobject]@{RestoredCount=1;SkippedCount=0;Paths=@($global:installerTest_officialPath)}
+}
+'@
     Set-Content -LiteralPath (Join-Path $scripts 'doctor.ps1') -Value 'new doctor'
     if ($global:installerTest_scenario -in @('migration-failure', 'shortcut-create', 'shortcut-existing')) {
       Set-Content -LiteralPath (Join-Path $scripts 'doctor.ps1') -Value "param(`$TaskName, `$InstallRoot); [pscustomobject]@{ ActivationState = 'ready' }"
@@ -140,6 +165,8 @@ try {
     $global:installerTest_registered = $false; $global:installerTest_restoredXml = $null; $global:installerTest_faultInjected = $false
     $global:installerTest_running = $false
     $global:installerTest_comCreated = 0
+    $global:installerTest_officialCalls = 0; $global:installerTest_officialUndos = 0
+    $global:installerTest_officialRestores = 0
     $successExpected = $global:installerTest_scenario -in @('skip-success', 'shortcut-create', 'shortcut-existing', 'startup-prompt', 'startup-launcher')
     $failure = $null
     try { $installOutput = & (Join-Path $scripts 'install.ps1') -InstallRoot $global:installerTest_destination -ShortcutPath $shortcutPath -SkipTaskRegistration:($global:installerTest_scenario -eq 'skip-success') | Out-String }
@@ -148,6 +175,19 @@ try {
       Assert (-not $failure) ('Installation failed: ' + $failure)
     } else {
       Assert ($null -ne $failure) ('Expected failure: ' + $global:installerTest_scenario)
+    }
+    $officialExpected = if (($successExpected -and $global:installerTest_scenario -ne 'skip-success') -or $global:installerTest_scenario -eq 'official-undo-failure') { 'configured official shortcut' } else { 'original official shortcut' }
+    Assert ((Get-Content -LiteralPath $global:installerTest_officialPath -Raw).Trim() -ceq $officialExpected) 'Official shortcut configuration or rollback was not preserved'
+    if ($successExpected -and $global:installerTest_scenario -ne 'skip-success') {
+      Assert ($installOutput -match 'OfficialShortcutStatus\s*:\s*Configured') 'Official shortcut result was not reported'
+    }
+    if ($global:installerTest_scenario -eq 'official-failure') {
+      Assert ($failure -like '*Injected official shortcut failure*') 'Official shortcut failure was not surfaced'
+      Assert ($global:installerTest_started -eq 1) 'Prior helper was not restored after shortcut configuration failure'
+    }
+    if ($global:installerTest_scenario -eq 'official-undo-failure') {
+      Assert ($failure -like '*Files and task restored, but official shortcut rollback failed*') 'Partial rollback failure was not reported'
+      Assert ($global:installerTest_restoredXml -eq '<Task>old definition</Task>' -and $global:installerTest_started -eq 2) 'Shortcut rollback failure blocked task recovery'
     }
     if ($global:installerTest_scenario -in @('startup-prompt', 'startup-launcher')) {
       Assert ($installOutput -match 'ActivationState\s*:\s*AwaitingStartupDecision') 'Expected startup interaction state was not returned'
@@ -175,11 +215,14 @@ try {
       Assert ($global:installerTest_unregistered -eq 0) 'Removed a task before all identity checks'
     }
     if ($global:installerTest_scenario -in @('arguments', 'working-directory')) {
+      New-Item -ItemType Directory -Path (Join-Path $global:installerTest_destination 'official-shortcuts') -Force | Out-Null
+      Set-Content -LiteralPath (Join-Path $global:installerTest_destination 'official-shortcuts\state.json') -Value '{}'
       $uninstallFailure = $null
-      try { & (Join-Path $workspace 'skills\codex-usage-card\scripts\uninstall.ps1') -InstallRoot $global:installerTest_destination -ShortcutPath $shortcutPath | Out-Null }
+      try { & (Join-Path $scripts 'uninstall.ps1') -InstallRoot $global:installerTest_destination -ShortcutPath $shortcutPath | Out-Null }
       catch { $uninstallFailure = $_ }
       Assert ($uninstallFailure -like '*task action does not match*') 'Uninstall did not reject the unrelated task action'
       Assert ($global:installerTest_stopped -eq 0 -and $global:installerTest_unregistered -eq 0) 'Uninstall changed an unrelated task'
+      Assert ($global:installerTest_officialRestores -eq 0) 'Uninstall changed official shortcuts before validating task identity'
       Assert (Test-Path -LiteralPath (Join-Path $global:installerTest_destination 'native-patch\native_patch.js')) 'Uninstall removed files after identity mismatch'
     }
     if ($global:installerTest_scenario -eq 'copy-failure') { Assert ($global:installerTest_started -eq 1) ('Old task was not restarted after failed copy: ' + $failure) }
@@ -208,16 +251,25 @@ try {
     } else {
       Assert (-not (Test-Path -LiteralPath $shortcutPath)) 'Failed installation left a new shortcut'
     }
-    if ($global:installerTest_scenario -eq 'skip-success') { Assert ($global:installerTest_comCreated -eq 0) 'Skip registration accessed shell shortcuts' }
+    if ($global:installerTest_scenario -eq 'skip-success') { Assert ($global:installerTest_comCreated -eq 0 -and $global:installerTest_officialCalls -eq 0) 'Skip registration accessed shell shortcuts' }
     if ($global:installerTest_scenario -in @('shortcut-target', 'shortcut-arguments', 'shortcut-working-directory', 'shortcut-create')) {
       $global:installerTest_running = $false
-      & (Join-Path $workspace 'skills\codex-usage-card\scripts\uninstall.ps1') -InstallRoot $global:installerTest_destination -ShortcutPath $shortcutPath | Out-Null
+      if ($global:installerTest_scenario -eq 'shortcut-create') {
+        New-Item -ItemType Directory -Path (Join-Path $global:installerTest_destination 'official-shortcuts') -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $global:installerTest_destination 'official-shortcuts\state.json') -Value '{}'
+      }
+      $uninstallOutput = & (Join-Path $scripts 'uninstall.ps1') -InstallRoot $global:installerTest_destination -ShortcutPath $shortcutPath | Out-String
+      if ($global:installerTest_scenario -eq 'shortcut-create') {
+        Assert ($global:installerTest_officialRestores -eq 1) 'Uninstall did not restore the official shortcut'
+        Assert ($uninstallOutput -match 'OfficialShortcutsRestored\s*:\s*1') 'Uninstall did not report restored official shortcut'
+        Assert ((Get-Content -LiteralPath $global:installerTest_officialPath -Raw).Trim() -ceq 'original official shortcut') 'Uninstall removed or failed to restore original official link'
+      }
       if ($previousShortcut) {
         Assert ([Convert]::ToBase64String([IO.File]::ReadAllBytes($shortcutPath)) -ceq $previousShortcut) 'Uninstall changed an unrelated shortcut'
       } else { Assert (-not (Test-Path -LiteralPath $shortcutPath)) 'Uninstall left its exact shortcut' }
     }
   }
-  $global:installerTest_skillFiles = @('SKILL.md', 'agents\openai.yaml', 'scripts\install.ps1', 'scripts\doctor.ps1', 'scripts\uninstall.ps1',
+  $global:installerTest_skillFiles = @('SKILL.md', 'agents\openai.yaml', 'scripts\install.ps1', 'scripts\doctor.ps1', 'scripts\official_shortcuts.ps1', 'scripts\uninstall.ps1',
     'assets\native-patch\CodexNativeQuotaPatch.cs', 'assets\native-patch\CodexNativeQuotaPatch.next.exe', 'assets\native-patch\native_patch.js')
   foreach ($scenario in @('existing-skill', 'fresh-skill')) {
     $skillDestination = Join-Path $testRoot $scenario
@@ -284,7 +336,7 @@ try {
     }
     Remove-Variable -Name installerIdentity_kills, installerIdentity_disposed -Scope Global
   }
-  Write-Output 'Installer regressions: 23 scenarios, 6 uninstall identity checks and 10 process identity checks passed, 0 failed.'
+  Write-Output 'Installer regressions: 25 scenarios, 6 uninstall identity checks and 10 process identity checks passed, 0 failed.'
 } finally {
   $resolved = [IO.Path]::GetFullPath($testRoot)
   if (-not $resolved.StartsWith($workspace + '\', [StringComparison]::OrdinalIgnoreCase)) { throw 'Unsafe test cleanup path' }
