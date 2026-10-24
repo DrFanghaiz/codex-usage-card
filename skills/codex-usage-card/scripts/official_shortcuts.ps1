@@ -1,4 +1,4 @@
-# Installation-time helpers only. Dot-sourcing does not inspect or modify the host.
+# Installation and background maintenance helpers. Dot-sourcing does not inspect or modify the host.
 function Initialize-CodexOfficialShortcutApi {
   if ('CodexUsageCard.OfficialShortcut' -as [type]) { return }
   Add-Type -TypeDefinition @'
@@ -166,6 +166,8 @@ function Read-CodexOfficialShortcutState {
         $entry.InstalledHash -notmatch '\A[0-9A-Fa-f]{64}\z' -or -not $entry.IdList -or -not $entry.AppId -or -not $seen.Add([IO.Path]::GetFullPath($entry.Path))) {
       throw 'Invalid official shortcut restoration entry.'
     }
+    # PowerShell 7 may deserialize ISO dates; preserve their full precision across later parsing.
+    if ($entry.OriginalWriteTimeUtc -is [DateTime]) { $entry.OriginalWriteTimeUtc=$entry.OriginalWriteTimeUtc.ToUniversalTime().ToString('o') }
     [void][DateTime]::Parse($entry.OriginalWriteTimeUtc, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)
     $entry
   }
@@ -183,7 +185,18 @@ function Save-CodexOfficialShortcutState {
   [CodexUsageCard.OfficialShortcut]::Hash($bytes)
 }
 
-function Undo-CodexOfficialShortcutInstall {
+function Invoke-CodexOfficialShortcutLock {
+  param([Parameter(Mandatory=$true)][scriptblock]$Action)
+  $mutex=[Threading.Mutex]::new($false,'Local\CodexUsageCard.OfficialShortcuts')
+  $locked=$false
+  try {
+    try { $locked=$mutex.WaitOne(30000) } catch [Threading.AbandonedMutexException] { $locked=$true }
+    if (-not $locked) { throw 'Official shortcut maintenance lock timed out.' }
+    & $Action
+  } finally { if ($locked) { $mutex.ReleaseMutex() }; $mutex.Dispose() }
+}
+
+function Undo-CodexOfficialShortcutUpdate {
   param([Parameter(Mandatory=$true)]$Transaction)
   if ($Transaction.RolledBack) { return }
   if (-not $Transaction.Changes.Count -and -not $Transaction.CreatedBackups.Count -and -not $Transaction.StateAfterHash) { return }
@@ -216,8 +229,14 @@ function Undo-CodexOfficialShortcutInstall {
   $Transaction.RolledBack = $true
 }
 
-function Install-CodexOfficialShortcuts {
-  param([Parameter(Mandatory=$true)][string]$InstallRoot, [Parameter(Mandatory=$true)][string]$BackupDirectory)
+function Undo-CodexOfficialShortcutInstall {
+  param([Parameter(Mandatory=$true)]$Transaction)
+  Invoke-CodexOfficialShortcutLock { Undo-CodexOfficialShortcutUpdate $Transaction }
+}
+
+function Update-CodexOfficialShortcuts {
+  param([Parameter(Mandatory=$true)][string]$InstallRoot, [Parameter(Mandatory=$true)][string]$BackupDirectory,
+    [switch]$Repair, [string]$CandidatePath)
   $stateDirectory = Join-Path ([IO.Path]::GetFullPath($InstallRoot)) 'official-shortcuts'
   $transaction = [pscustomobject]@{Status='PackageNotFound'; ConfiguredCount=0; AlreadyConfiguredCount=0; Paths=@(); Changes=(New-Object 'System.Collections.Generic.List[object]'); CreatedBackups=(New-Object 'System.Collections.Generic.List[object]'); StatePath=(Join-Path $stateDirectory 'state.json'); StateBeforeBackup=$null; StateBeforeHash=$null; StateAfterHash=$null; RolledBack=$false}
   $appId = Get-CodexOfficialAppId
@@ -229,7 +248,8 @@ function Install-CodexOfficialShortcuts {
   foreach ($entry in @(Read-CodexOfficialShortcutState $transaction.StatePath)) { $entries.Add($entry) }
   $transaction.Status = 'NotFound'
   try {
-    foreach ($path in @(Get-CodexOfficialShortcutCandidates | Select-Object -Unique)) {
+    $candidates = if ($CandidatePath) { @($CandidatePath) } else { @(Get-CodexOfficialShortcutCandidates | Select-Object -Unique) }
+    foreach ($path in $candidates) {
       $path = [IO.Path]::GetFullPath($path)
       if (-not [IO.File]::Exists($path) -or [IO.Path]::GetExtension($path) -ine '.lnk' -or ([IO.File]::GetAttributes($path) -band [IO.FileAttributes]::ReparsePoint)) { continue }
       try { $before = [CodexUsageCard.OfficialShortcut]::Read($path) }
@@ -242,7 +262,8 @@ function Install-CodexOfficialShortcuts {
       $beforeHash = [CodexUsageCard.OfficialShortcut]::Hash($bytes)
       $writeTime = [IO.File]::GetLastWriteTimeUtc($path)
       $owned = @($entries | Where-Object { $_.Path -ieq $path })
-      if ($owned.Count -and $owned[0].InstalledHash -cne $beforeHash) { throw ('Official shortcut changed since installation; unchanged: {0}' -f $path) }
+      $rebaseline = $owned.Count -and $owned[0].InstalledHash -cne $beforeHash
+      if ($rebaseline -and -not $Repair) { throw ('Official shortcut changed since installation; unchanged: {0}' -f $path) }
       [void][IO.Directory]::CreateDirectory($BackupDirectory)
       [void][IO.Directory]::CreateDirectory($stateDirectory)
       if (-not $transaction.Changes.Count -and $null -ne $stateBytes) {
@@ -263,11 +284,13 @@ function Install-CodexOfficialShortcuts {
       if ($after.Arguments -cne $arguments) { throw 'Official shortcut arguments were not saved.' }
       $updated = [IO.File]::ReadAllBytes($staged)
       $afterHash = [CodexUsageCard.OfficialShortcut]::Hash($updated)
-      if (-not $owned.Count) {
+      if (-not $owned.Count -or $rebaseline) {
         $backupName = [Guid]::NewGuid().ToString('N') + '.lnk'
         $backupPath = Join-Path $stateDirectory $backupName
         [IO.File]::WriteAllBytes($backupPath,$bytes)
         $transaction.CreatedBackups.Add(@{Path=$backupPath;Hash=$beforeHash})
+        # An updater may replace metadata: restore this new baseline, retaining the older backup.
+        if ($rebaseline) { [void]$entries.Remove($owned[0]) }
         $entries.Add([pscustomobject]@{Path=$path;BackupName=$backupName;OriginalHash=$beforeHash;InstalledHash=$afterHash;IdList=$before.IdList;AppId=$appId;OriginalWriteTimeUtc=$writeTime.ToString('o')})
       } else { $owned[0].InstalledHash=$afterHash }
       [CodexUsageCard.OfficialShortcut]::WriteChecked($path,$updated,$beforeHash)
@@ -287,7 +310,75 @@ function Install-CodexOfficialShortcuts {
   }
 }
 
-function Restore-CodexOfficialShortcuts {
+function Install-CodexOfficialShortcuts {
+  param([Parameter(Mandatory=$true)][string]$InstallRoot, [Parameter(Mandatory=$true)][string]$BackupDirectory)
+  Invoke-CodexOfficialShortcutLock { Update-CodexOfficialShortcuts -InstallRoot $InstallRoot -BackupDirectory $BackupDirectory }
+}
+
+function Test-CodexShortcutReparsePath {
+  param([string]$Path)
+  for ($current = [IO.Path]::GetFullPath($Path); $current; $current = [IO.Path]::GetDirectoryName($current)) {
+    if (([IO.File]::Exists($current) -or [IO.Directory]::Exists($current)) -and
+        ([IO.File]::GetAttributes($current) -band [IO.FileAttributes]::ReparsePoint)) { return $true }
+  }
+  return $false
+}
+
+function Repair-CodexOfficialShortcutState {
+  param([Parameter(Mandatory=$true)][string]$InstallRoot, [int]$HelperProcessId, [long]$HelperStartTicks)
+  $result = [pscustomobject]@{Status='PackageNotFound';ConfiguredCount=0;AlreadyConfiguredCount=0;SkippedCount=0;RetryNeeded=$false}
+  if ($HelperProcessId) {
+    $helper=$null
+    try {
+      $helper=[Diagnostics.Process]::GetProcessById($HelperProcessId)
+      if ($helper.HasExited -or $helper.StartTime.ToUniversalTime().Ticks -ne $HelperStartTicks) { throw 'Helper identity changed.' }
+    } catch { $result.Status='HelperStopped'; return $result }
+    finally { if ($helper) { $helper.Dispose() } }
+  }
+  $appId = Get-CodexOfficialAppId
+  if (-not $appId) { $result.RetryNeeded=$true; return $result }
+  Initialize-CodexOfficialShortcutApi
+  $stateDirectory = Join-Path ([IO.Path]::GetFullPath($InstallRoot)) 'official-shortcuts'
+  $statePath = Join-Path $stateDirectory 'state.json'
+  if (Test-CodexShortcutReparsePath $statePath) { $result.Status='UnsafeStatePath'; return $result }
+  if ([IO.Directory]::Exists($statePath)) { $result.Status='InvalidState'; return $result }
+  try { $null = @(Read-CodexOfficialShortcutState $statePath) }
+  catch {
+    $result.Status='InvalidState'
+    $errorType=$_.Exception.GetBaseException()
+    $result.RetryNeeded=$errorType -is [IO.IOException] -or $errorType -is [UnauthorizedAccessException]
+    return $result
+  }
+  $result.Status='NotFound'
+  foreach ($path in @(Get-CodexOfficialShortcutCandidates | Select-Object -Unique)) {
+    try {
+      $path=[IO.Path]::GetFullPath($path)
+      if ([IO.Path]::GetExtension($path) -ine '.lnk' -or (Test-CodexShortcutReparsePath $path)) { $result.SkippedCount++; continue }
+      $before=[CodexUsageCard.OfficialShortcut]::Read($path)
+      if (-not [CodexUsageCard.OfficialShortcut]::IsPackageTarget($before,$appId)) { $result.SkippedCount++; continue }
+    } catch { $result.SkippedCount++; $result.RetryNeeded=$true; continue }
+    try { $arguments=[CodexUsageCard.OfficialShortcut]::MergeArguments($before.Arguments) }
+    catch { $result.SkippedCount++; continue }
+    if ($arguments -ceq $before.Arguments) { $result.AlreadyConfiguredCount++; continue }
+    try {
+      # Each candidate is its own rollback unit; a locked or changed link cannot block another.
+      $backup=Join-Path $stateDirectory ('repair-' + [Guid]::NewGuid().ToString('N'))
+      $transaction=Update-CodexOfficialShortcuts -InstallRoot $InstallRoot -BackupDirectory $backup -Repair -CandidatePath $path
+      $result.ConfiguredCount += $transaction.ConfiguredCount
+      $result.AlreadyConfiguredCount += $transaction.AlreadyConfiguredCount
+      if ($transaction.Status -eq 'PackageNotFound') { $result.RetryNeeded=$true }
+    } catch { $result.SkippedCount++; $result.RetryNeeded=$true }
+  }
+  $result.Status = if ($result.ConfiguredCount) { 'Configured' } elseif ($result.AlreadyConfiguredCount) { 'AlreadyConfigured' } else { 'NotFound' }
+  return $result
+}
+
+function Repair-CodexOfficialShortcuts {
+  param([Parameter(Mandatory=$true)][string]$InstallRoot, [int]$HelperProcessId, [long]$HelperStartTicks)
+  Invoke-CodexOfficialShortcutLock { Repair-CodexOfficialShortcutState -InstallRoot $InstallRoot -HelperProcessId $HelperProcessId -HelperStartTicks $HelperStartTicks }
+}
+
+function Restore-CodexOfficialShortcutState {
   param([Parameter(Mandatory=$true)][string]$InstallRoot)
   $directory = Join-Path ([IO.Path]::GetFullPath($InstallRoot)) 'official-shortcuts'
   $statePath = Join-Path $directory 'state.json'
@@ -316,4 +407,9 @@ function Restore-CodexOfficialShortcuts {
   if ($result.RestoredCount) { [void](Save-CodexOfficialShortcutState $statePath $remaining.ToArray() $stateHash) }
   $result.Status = if ($result.SkippedCount) { 'ChangedShortcutsRetained' } elseif ($result.RestoredCount) { 'Restored' } else { 'NotFound' }
   return $result
+}
+
+function Restore-CodexOfficialShortcuts {
+  param([Parameter(Mandatory=$true)][string]$InstallRoot)
+  Invoke-CodexOfficialShortcutLock { Restore-CodexOfficialShortcutState -InstallRoot $InstallRoot }
 }

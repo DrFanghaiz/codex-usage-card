@@ -55,7 +55,8 @@ internal static class CodexNativeQuotaPatch
                 NativeScript = File.ReadAllText(
                     Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "native_patch.js"),
                     Encoding.UTF8);
-                MainAsync().GetAwaiter().GetResult();
+                using (var shortcuts = new OfficialShortcutMonitor())
+                    MainAsync().GetAwaiter().GetResult();
             }
         }
         catch (Exception error)
@@ -146,6 +147,151 @@ internal static class CodexNativeQuotaPatch
             document.getElementById('codex-api-usage-host')?.remove();
             document.getElementById('codex-official-usage-host')?.remove();
         }");
+    }
+
+    private sealed class OfficialShortcutMonitor : IDisposable
+    {
+        private readonly object gate = new object();
+        private readonly List<FileSystemWatcher> watchers = new List<FileSystemWatcher>();
+        private readonly Timer timer;
+        private bool disposed, running, pending, retryPending;
+        private int retryIndex;
+        private static readonly int[] RetryDelays = { 2000, 10000, 30000 };
+
+        public OfficialShortcutMonitor()
+        {
+            timer = new Timer(Scan, null, Timeout.Infinite, Timeout.Infinite);
+            var locations = new[] {
+                Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory),
+                Environment.GetFolderPath(Environment.SpecialFolder.Programs),
+                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                    @"Microsoft\Internet Explorer\Quick Launch")
+            };
+            foreach (var location in locations)
+            {
+                if (String.IsNullOrWhiteSpace(location) || !Directory.Exists(location)) continue;
+                try
+                {
+                    var watcher = new FileSystemWatcher(location) {
+                        IncludeSubdirectories = location != locations[0],
+                        NotifyFilter = NotifyFilters.FileName | NotifyFilters.DirectoryName | NotifyFilters.LastWrite | NotifyFilters.Size,
+                    };
+                    FileSystemEventHandler changed = (sender, change) => {
+                        if (String.Equals(Path.GetExtension(change.FullPath), ".lnk", StringComparison.OrdinalIgnoreCase) ||
+                            Directory.Exists(change.FullPath)) Schedule();
+                    };
+                    watcher.Changed += changed;
+                    watcher.Created += changed;
+                    watcher.Deleted += changed;
+                    watcher.Renamed += (sender, change) => {
+                        if (String.Equals(Path.GetExtension(change.OldFullPath), ".lnk", StringComparison.OrdinalIgnoreCase)) Schedule();
+                        else changed(sender, change);
+                    };
+                    watcher.Error += (sender, error) => Schedule();
+                    watchers.Add(watcher);
+                    watcher.EnableRaisingEvents = true;
+                }
+                catch (IOException error) { LogStartup("shortcut-watch-failed", 0, error); }
+                catch (UnauthorizedAccessException error) { LogStartup("shortcut-watch-failed", 0, error); }
+            }
+            Schedule();
+        }
+
+        private void Schedule()
+        {
+            lock (gate)
+            {
+                if (disposed) return;
+                pending = true;
+                if (running || retryPending) return;
+                retryIndex = 0;
+                timer.Change(1000, Timeout.Infinite);
+            }
+        }
+
+        private void Scan(object unused)
+        {
+            lock (gate)
+            {
+                if (disposed || running) return;
+                running = true;
+                pending = false;
+                retryPending = false;
+            }
+            var retry = false;
+            try { retry = RepairOfficialShortcuts(); }
+            catch (Exception error) { retry = true; LogStartup("shortcut-repair-failed", 0, error); }
+            finally
+            {
+                lock (gate)
+                {
+                    running = false;
+                    if (!disposed)
+                    {
+                        // Failed writes/rollback can emit our own events; they must not reset the retry budget.
+                        if (retry) {
+                            pending = false;
+                            if (retryIndex < RetryDelays.Length) {
+                                retryPending = true;
+                                timer.Change(RetryDelays[retryIndex++], Timeout.Infinite);
+                            }
+                        } else if (pending) {
+                            retryIndex = 0;
+                            timer.Change(1000, Timeout.Infinite);
+                        }
+                    }
+                }
+            }
+        }
+
+        public void Dispose()
+        {
+            lock (gate) { disposed = true; timer.Dispose(); }
+            foreach (var watcher in watchers) watcher.Dispose();
+            // An in-flight repair holds the shared maintenance lock; never kill it mid-transaction.
+        }
+    }
+
+    private static bool RepairOfficialShortcuts()
+    {
+        var root = Path.GetFullPath(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, ".."));
+        var script = Path.Combine(root, "scripts", "official_shortcuts.ps1");
+        if (!File.Exists(script)) throw new FileNotFoundException("Official shortcut maintenance module is missing.");
+        int helperId;
+        long helperStart;
+        using (var helper = Process.GetCurrentProcess()) { helperId = helper.Id; helperStart = helper.StartTime.ToUniversalTime().Ticks; }
+        var command = "$ErrorActionPreference='Stop'; $WarningPreference='SilentlyContinue'; $ProgressPreference='SilentlyContinue'; " +
+            "[Console]::OutputEncoding=[Text.Encoding]::UTF8; . '" + script.Replace("'", "''") + "'; " +
+            "$result=Repair-CodexOfficialShortcuts -InstallRoot '" + root.Replace("'", "''") +
+            "' -HelperProcessId " + helperId.ToString(CultureInfo.InvariantCulture) +
+            " -HelperStartTicks " + helperStart.ToString(CultureInfo.InvariantCulture) + "; " +
+            "[Console]::Write(($result | ConvertTo-Json -Compress -Depth 4))";
+        var startInfo = new ProcessStartInfo {
+            FileName = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), @"WindowsPowerShell\v1.0\powershell.exe"),
+            Arguments = "-NoProfile -NonInteractive -EncodedCommand " + Convert.ToBase64String(Encoding.Unicode.GetBytes(command)),
+            UseShellExecute = false, CreateNoWindow = true, WindowStyle = ProcessWindowStyle.Hidden,
+            RedirectStandardOutput = true, RedirectStandardError = true, StandardOutputEncoding = Encoding.UTF8
+        };
+        using (var process = Process.Start(startInfo))
+        {
+            if (process == null) throw new InvalidOperationException("Could not start shortcut maintenance.");
+            var output = process.StandardOutput.ReadToEndAsync();
+            var errors = process.StandardError.ReadToEndAsync();
+            if (!process.WaitForExit(30000)) {
+                LogStartup("shortcut-repair-slow", helperId);
+                // Keep one worker until it finishes; aborting a file transaction can break restoration.
+                process.WaitForExit();
+            }
+            errors.GetAwaiter().GetResult();
+            if (process.ExitCode != 0) throw new InvalidOperationException("Official shortcut maintenance failed (exit " + process.ExitCode.ToString(CultureInfo.InvariantCulture) + ").");
+            var result = Json.Deserialize<Dictionary<string, object>>(output.GetAwaiter().GetResult());
+            if (result == null || !result.ContainsKey("Status")) throw new InvalidDataException("Invalid shortcut maintenance result.");
+            var retry = result.ContainsKey("RetryNeeded") && result["RetryNeeded"] is bool && (bool)result["RetryNeeded"];
+            var stage = Convert.ToInt32(result["ConfiguredCount"], CultureInfo.InvariantCulture) > 0 ? "official-shortcuts-repaired" :
+                retry || (string)result["Status"] == "InvalidState" || (string)result["Status"] == "UnsafeStatePath" ? "official-shortcuts-incomplete" : "official-shortcuts-checked";
+            LogStartup(stage, helperId);
+            return retry;
+        }
     }
 
     private static string ConfigurationRoot()
@@ -338,8 +484,8 @@ internal static class CodexNativeQuotaPatch
     private static Dictionary<string, object> HttpErrorPayload(int statusCode, string retryAfter, DateTimeOffset now)
     {
         var payload = new Dictionary<string, object> {
-            { "errorCode", statusCode == 401 || statusCode == 403 ? "AUTH_REQUIRED" :
-                statusCode == 429 ? "RATE_LIMITED" : "NETWORK_ERROR" }
+            { "errorCode", statusCode == 401 ? "AUTH_REQUIRED" : statusCode == 403 ? "ACCESS_DENIED" :
+                statusCode == 407 ? "PROXY_AUTH_REQUIRED" : statusCode == 429 ? "RATE_LIMITED" : "NETWORK_ERROR" }
         };
         if (statusCode == 429)
         {
@@ -356,11 +502,26 @@ internal static class CodexNativeQuotaPatch
 
     private static Dictionary<string, object> WebErrorPayload(WebException exception)
     {
-        if (exception.Status == WebExceptionStatus.Timeout)
-            return new Dictionary<string, object> { { "errorCode", "REQUEST_TIMEOUT" } };
         using (var response = exception.Response as HttpWebResponse)
-            return HttpErrorPayload(response == null ? 0 : (int)response.StatusCode,
-                response == null ? null : response.Headers["Retry-After"], DateTimeOffset.UtcNow);
+        {
+            if (response != null)
+                return HttpErrorPayload((int)response.StatusCode, response.Headers["Retry-After"], DateTimeOffset.UtcNow);
+        }
+        string code;
+        switch (exception.Status)
+        {
+            case WebExceptionStatus.Timeout: code = "REQUEST_TIMEOUT"; break;
+            case WebExceptionStatus.ProxyNameResolutionFailure: code = "PROXY_CONNECTION_FAILED"; break;
+            case WebExceptionStatus.ConnectFailure:
+                code = CurrentNetworkDiagnosis != null && StringValue(CurrentNetworkDiagnosis, "NetworkMode") == "proxy"
+                    ? "PROXY_CONNECTION_FAILED" : "CONNECTION_FAILED";
+                break;
+            case WebExceptionStatus.NameResolutionFailure: code = "DNS_FAILED"; break;
+            case WebExceptionStatus.TrustFailure:
+            case WebExceptionStatus.SecureChannelFailure: code = "TLS_FAILED"; break;
+            default: code = "NETWORK_ERROR"; break;
+        }
+        return new Dictionary<string, object> { { "errorCode", code } };
     }
 
     private static Dictionary<string, object> SanitizeDiagnosis(Dictionary<string, object> raw)
@@ -408,6 +569,7 @@ internal static class CodexNativeQuotaPatch
         if (codes != null) foreach (var code in codes)
             if (code is string && allowedCodes.Contains((string)code)) safeCodes.Add((string)code);
         result["StageCodes"] = safeCodes;
+        foreach (var entry in SanitizeNetworkDiagnosis(raw)) result[entry.Key] = entry.Value;
         return result;
     }
 
@@ -495,6 +657,8 @@ internal static class CodexNativeQuotaPatch
                 return cached;
             }
             Dictionary<string, object> payload;
+            CurrentNetworkDiagnosis = SanitizeNetworkDiagnosis(new Dictionary<string, object>());
+            CurrentNetworkDiagnosis["NetworkCheckedAt"] = now.UtcDateTime.ToString("o", CultureInfo.InvariantCulture);
             try
             {
                 var account = LoadOfficialConfiguration();
@@ -506,7 +670,10 @@ internal static class CodexNativeQuotaPatch
                     : FetchOfficialPayload(account);
             }
             catch (WebException exception) { payload = WebErrorPayload(exception); }
+            catch (NetworkConfigurationException exception) { payload = new Dictionary<string, object> { { "errorCode", exception.Code } }; }
             catch { payload = new Dictionary<string, object> { { "errorCode", "INVALID_RESPONSE" } }; }
+            CurrentNetworkDiagnosis["LastRequestError"] = StringValue(payload, "errorCode");
+            payload["network"] = SanitizeNetworkDiagnosis(CurrentNetworkDiagnosis);
             var seconds = StringValue(payload, "errorCode") == "RATE_LIMITED"
                 ? (payload.ContainsKey("retryAfterSeconds") ? (int)payload["retryAfterSeconds"] : 30) : 5;
             CachedPayload = payload;
@@ -623,23 +790,181 @@ internal static class CodexNativeQuotaPatch
 
     private static IWebProxy QuotaProxy()
     {
-        var value = Environment.GetEnvironmentVariable("HTTPS_PROXY");
-        if (String.IsNullOrWhiteSpace(value)) value = Environment.GetEnvironmentVariable("HTTPS_PROXY", EnvironmentVariableTarget.User);
-        if (String.IsNullOrWhiteSpace(value)) value = Environment.GetEnvironmentVariable("HTTP_PROXY");
-        if (String.IsNullOrWhiteSpace(value)) value = Environment.GetEnvironmentVariable("HTTP_PROXY", EnvironmentVariableTarget.User);
-        if (String.IsNullOrWhiteSpace(value))
+        CurrentNetworkDiagnosis = SanitizeNetworkDiagnosis(new Dictionary<string, object>());
+        CurrentNetworkDiagnosis["NetworkCheckedAt"] = DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture);
+        try
         {
-            var path = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "api-proxy.dat");
-            if (File.Exists(path))
+            var settings = ReadNetworkSettings();
+            var mode = StringValue(settings, "mode");
+            CurrentNetworkDiagnosis["NetworkMode"] = mode;
+            CurrentNetworkDiagnosis["ProxySource"] = StringValue(settings, "source");
+            if (mode == "system") return WebRequest.DefaultWebProxy;
+            var uri = NetworkProxyUri(DecryptNetworkProxy(StringValue(settings, "proxyProtected")));
+            CurrentNetworkDiagnosis["ProxyEndpoint"] = ProxyEndpoint(uri);
+            var proxy = new WebProxy(new Uri(ProxyEndpoint(uri)));
+            if (!String.IsNullOrEmpty(uri.UserInfo))
             {
-                var encrypted = File.ReadAllBytes(path);
-                value = Encoding.UTF8.GetString(ProtectedData.Unprotect(encrypted, null, DataProtectionScope.CurrentUser));
+                var credentials = uri.UserInfo.Split(new[] { ':' }, 2);
+                proxy.Credentials = new NetworkCredential(Uri.UnescapeDataString(credentials[0]),
+                    credentials.Length == 2 ? Uri.UnescapeDataString(credentials[1]) : "");
+            }
+            return proxy;
+        }
+        catch (NetworkConfigurationException) { throw; }
+        catch (UnauthorizedAccessException) { throw new NetworkConfigurationException("NETWORK_CONFIG_UNREADABLE"); }
+        catch (IOException) { throw new NetworkConfigurationException("NETWORK_CONFIG_UNREADABLE"); }
+        catch (System.Security.SecurityException) { throw new NetworkConfigurationException("NETWORK_CONFIG_UNREADABLE"); }
+        catch (CryptographicException) { throw new NetworkConfigurationException("NETWORK_CONFIG_INVALID"); }
+        catch (ArgumentException) { throw new NetworkConfigurationException("NETWORK_CONFIG_INVALID"); }
+        catch (FormatException) { throw new NetworkConfigurationException("NETWORK_CONFIG_INVALID"); }
+        catch (InvalidOperationException) { throw new NetworkConfigurationException("NETWORK_CONFIG_INVALID"); }
+    }
+
+    // Quota requests and their diagnostic context are serialized by PayloadGate.
+    private static Dictionary<string, object> CurrentNetworkDiagnosis;
+
+    private sealed class NetworkConfigurationException : Exception
+    {
+        internal readonly string Code;
+        internal NetworkConfigurationException(string code) : base(code) { Code = code; }
+    }
+
+    private static readonly string[] NetworkSources = { "default", "explicit", "legacy-process-https", "legacy-user-https",
+        "legacy-process-http", "legacy-user-http", "legacy-file", "legacy-default" };
+    private static readonly string[] NetworkErrors = { "REQUEST_TIMEOUT", "PROXY_CONNECTION_FAILED", "CONNECTION_FAILED",
+        "DNS_FAILED", "TLS_FAILED", "PROXY_AUTH_REQUIRED", "AUTH_REQUIRED", "ACCESS_DENIED", "RATE_LIMITED", "NETWORK_ERROR",
+        "NETWORK_CONFIG_INVALID", "NETWORK_CONFIG_UNREADABLE", "INVALID_RESPONSE" };
+
+    private static string ProxyEndpoint(Uri uri)
+    {
+        return uri.Scheme + "://" + uri.Host + ":" + uri.Port.ToString(CultureInfo.InvariantCulture);
+    }
+
+    private static Uri NetworkProxyUri(string value)
+    {
+        Uri uri;
+        // .NET Framework HttpWebRequest supports HTTP proxies (including CONNECT for HTTPS targets), not HTTPS proxies.
+        if (String.IsNullOrWhiteSpace(value) || !Uri.TryCreate(value.Trim(), UriKind.Absolute, out uri) ||
+            uri.Scheme != "http" || String.IsNullOrEmpty(uri.Host) || uri.Port <= 0 ||
+            uri.AbsolutePath != "/" || uri.Query.Length != 0 || uri.Fragment.Length != 0)
+            throw new NetworkConfigurationException("NETWORK_CONFIG_INVALID");
+        return uri;
+    }
+
+    private static string DecryptNetworkProxy(string encrypted)
+    {
+        return new UTF8Encoding(false, true).GetString(ProtectedData.Unprotect(Convert.FromBase64String(encrypted),
+            null, DataProtectionScope.CurrentUser));
+    }
+
+    private static Dictionary<string, object> ValidateNetworkSettings(string json)
+    {
+        var settings = Json.DeserializeObject(json) as Dictionary<string, object>;
+        object version;
+        if (settings == null || !settings.TryGetValue("version", out version) || !(version is int) || (int)version != 1)
+            throw new NetworkConfigurationException("NETWORK_CONFIG_INVALID");
+        var mode = StringValue(settings, "mode");
+        var source = StringValue(settings, "source");
+        if (Array.IndexOf(NetworkSources, source) < 0 ||
+            (mode != "system" && mode != "proxy") ||
+            (mode == "system" && source != "default" && source != "explicit" && source != "legacy-default") ||
+            (mode == "proxy" && (source == "default" || source == "legacy-default")))
+            throw new NetworkConfigurationException("NETWORK_CONFIG_INVALID");
+        if (mode == "proxy") NetworkProxyUri(DecryptNetworkProxy(StringValue(settings, "proxyProtected")));
+        else if (settings.ContainsKey("proxyProtected")) throw new NetworkConfigurationException("NETWORK_CONFIG_INVALID");
+        return settings;
+    }
+
+    private static Dictionary<string, object> ReadNetworkSettings()
+    {
+        var path = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "network-settings.json");
+        try { return ValidateNetworkSettings(File.ReadAllText(path, Encoding.UTF8)); }
+        catch (FileNotFoundException) { }
+        // Missing settings is an existing installation: preserve its previous selection once, then stop consulting it.
+        var settings = MigrateNetworkSettings();
+        var temporary = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+        try
+        {
+            File.WriteAllText(temporary, Json.Serialize(settings), new UTF8Encoding(false));
+            try { File.Move(temporary, path); }
+            catch (IOException)
+            {
+                // Another helper or explicit configuration may have won the race. Its valid settings take precedence.
+                return ValidateNetworkSettings(File.ReadAllText(path, Encoding.UTF8));
             }
         }
-        if (String.IsNullOrWhiteSpace(value)) return WebRequest.DefaultWebProxy;
+        finally
+        {
+            try { File.Delete(temporary); }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+        }
+        return settings;
+    }
+
+    private static Dictionary<string, object> MigrateNetworkSettings()
+    {
+        string value = null, source = "legacy-default";
+        foreach (var variable in new[] { "HTTPS_PROXY", "HTTP_PROXY" })
+        {
+            foreach (var target in new[] { EnvironmentVariableTarget.Process, EnvironmentVariableTarget.User })
+            {
+                value = Environment.GetEnvironmentVariable(variable, target);
+                if (!String.IsNullOrWhiteSpace(value))
+                {
+                    source = "legacy-" + (target == EnvironmentVariableTarget.Process ? "process-" : "user-") +
+                        (variable == "HTTPS_PROXY" ? "https" : "http");
+                    break;
+                }
+            }
+            if (!String.IsNullOrWhiteSpace(value)) break;
+        }
+        if (String.IsNullOrWhiteSpace(value))
+        {
+            try
+            {
+                value = new UTF8Encoding(false, true).GetString(ProtectedData.Unprotect(
+                    File.ReadAllBytes(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "api-proxy.dat")),
+                    null, DataProtectionScope.CurrentUser));
+                if (!String.IsNullOrWhiteSpace(value)) source = "legacy-file";
+            }
+            catch (FileNotFoundException) { }
+        }
+        var settings = new Dictionary<string, object> {
+            { "version", 1 }, { "mode", String.IsNullOrWhiteSpace(value) ? "system" : "proxy" }, { "source", source }
+        };
+        if (!String.IsNullOrWhiteSpace(value))
+        {
+            NetworkProxyUri(value);
+            settings["proxyProtected"] = Convert.ToBase64String(ProtectedData.Protect(Encoding.UTF8.GetBytes(value.Trim()),
+                null, DataProtectionScope.CurrentUser));
+        }
+        return settings;
+    }
+
+    private static Dictionary<string, object> SanitizeNetworkDiagnosis(Dictionary<string, object> raw)
+    {
+        var mode = StringValue(raw, "NetworkMode");
+        var source = StringValue(raw, "ProxySource");
+        var error = StringValue(raw, "LastRequestError");
+        string endpoint = null, checkedAt = null;
         Uri uri;
-        if (!Uri.TryCreate(value, UriKind.Absolute, out uri)) throw new InvalidOperationException();
-        return new WebProxy(uri);
+        var rawEndpoint = StringValue(raw, "ProxyEndpoint");
+        if (mode == "proxy" && Uri.TryCreate(rawEndpoint, UriKind.Absolute, out uri) && uri.Scheme == "http" &&
+            !String.IsNullOrEmpty(uri.Host) && uri.Port > 0 && uri.UserInfo.Length == 0 && uri.AbsolutePath == "/" &&
+            uri.Query.Length == 0 && uri.Fragment.Length == 0)
+            endpoint = ProxyEndpoint(uri);
+        DateTimeOffset date;
+        if (DateTimeOffset.TryParseExact(StringValue(raw, "NetworkCheckedAt"),
+            new[] { "yyyy-MM-dd'T'HH:mm:ss.FFFFFFF'Z'", "yyyy-MM-dd'T'HH:mm:ss.FFFFFFFzzz" }, CultureInfo.InvariantCulture,
+            DateTimeStyles.AssumeUniversal, out date) && date.Offset == TimeSpan.Zero)
+            checkedAt = date.UtcDateTime.ToString("o", CultureInfo.InvariantCulture);
+        return new Dictionary<string, object> {
+            { "NetworkMode", mode == "system" || mode == "proxy" ? mode : "unknown" },
+            { "ProxySource", Array.IndexOf(NetworkSources, source) >= 0 ? source : "unknown" },
+            { "ProxyEndpoint", endpoint }, { "LastRequestError", Array.IndexOf(NetworkErrors, error) >= 0 ? error : null },
+            { "NetworkCheckedAt", checkedAt }
+        };
     }
 
     private static bool NumberValue(Dictionary<string, object> values, string key, out double value)

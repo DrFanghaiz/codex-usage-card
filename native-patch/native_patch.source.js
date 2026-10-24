@@ -9,11 +9,13 @@
   const {animate, spring, createElement, ChevronUp} = __codexQuotaLibraries;
   const restoreOpen = Boolean(document.getElementById("codex-quota-popover")?.matches(":popover-open"));
   globalThis.__codexQuotaMotionCleanup?.();
+  globalThis.__codexQuotaNoticeCleanup?.();
   for (const key of Object.keys(globalThis)) if (key.startsWith("__codexQuotaApi") || key === "__codexQuotaUpdateApi") delete globalThis[key];
   document.getElementById("cq-settings")?.remove();
   globalThis.__codexQuotaGeometryCleanup?.();
-  for (const id of ["codex-quota-trigger", "codex-quota-footer", "codex-quota-popover", "codex-official-usage-host", "codex-api-usage-host"]) document.getElementById(id)?.remove();
+  for (const id of ["codex-quota-trigger", "codex-quota-footer", "codex-quota-popover", "codex-official-usage-host", "codex-api-usage-host", "cq-inline-announcement"]) document.getElementById(id)?.remove();
   clearTimeout(globalThis.__codexQuotaDiagnosisTimer);
+  delete globalThis.__codexQuotaNetworkDiagnosis;
   const uiRevision = String(globalThis.__codexQuotaUiRevision = (globalThis.__codexQuotaUiRevision || 0) + 1);
   const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
   const motions = new Map();
@@ -107,6 +109,7 @@
     done: [["path", {d: "m3.5 8.25 3 3 6.25-6.5"}]],
     warning: [["circle", {cx: "8", cy: "8", r: "5.5"}], ["path", {d: "M8 4.75v3.5M8 11.25h.01"}]],
     back: [["path", {d: "m9.75 3.5-4.5 4.5 4.5 4.5"}]],
+    close: [["path", {d: "m4 4 8 8M12 4l-8 8"}]],
   };
   const toolIcon = (name, className) => createElement(toolIcons[name], {
     class: className, viewBox: "0 0 16 16", width: "16", height: "16",
@@ -166,8 +169,10 @@
   const onMotionPreference = () => {
     for (const id of ["codex-quota-trigger", "codex-quota-popover"]) document.getElementById(id)?.toggleAttribute("data-cq-instant", document.visibilityState !== "visible");
     hideRefreshMessage();
+    suspendInlineAlert();
     finishMotion();
-    document.querySelectorAll('.cq-actions button, #cq-settings button, #cq-settings a, #cq-notice button').forEach(button => button.cqRelease?.());
+    syncInlineAlert();
+    document.querySelectorAll('.cq-actions button, #cq-settings button, #cq-settings a').forEach(button => button.cqRelease?.());
     document.querySelectorAll(".cq-refresh").forEach(refreshMotion);
   };
   reducedMotion.addEventListener("change", onMotionPreference);
@@ -175,6 +180,7 @@
   window.addEventListener("blur", onMotionPreference);
   globalThis.__codexQuotaMotionCleanup = () => {
     disposed = true;
+    removeNotice();
     clearInterval(installRetryTimer);
     for (const timer of requestTimers.values()) clearTimeout(timer);
     hideRefreshMessage();
@@ -262,6 +268,51 @@
   };
   let preferences = readSettings();
   const words = (zh, en) => isChinese ? zh : en;
+  const requestErrorReasons = {
+    AUTH_REQUIRED: words("请重新登录", "Sign in again"),
+    RATE_LIMITED: words("服务端限流", "Rate limited"),
+    REQUEST_TIMEOUT: words("刷新超时，可重试", "Refresh timed out; retry"),
+    NETWORK_CONFIG_INVALID: words("网络配置无效，请检查设置", "Invalid network configuration; check settings"),
+    NETWORK_CONFIG_UNREADABLE: words("无法读取网络配置", "Cannot read network configuration"),
+    PROXY_CONNECTION_FAILED: words("无法连接代理，请检查代理服务", "Cannot connect to proxy; check the proxy service"),
+    PROXY_AUTH_REQUIRED: words("代理要求身份验证", "Proxy authentication required"),
+    CONNECTION_FAILED: words("无法连接额度服务", "Cannot connect to the quota service"),
+    DNS_FAILED: words("域名解析失败，请检查网络", "DNS lookup failed; check the network"),
+    TLS_FAILED: words("安全连接失败，请检查证书或代理", "Secure connection failed; check certificates or proxy"),
+    ACCESS_DENIED: words("额度服务拒绝访问", "Quota service denied access"),
+    NETWORK_ERROR: words("网络请求失败，可重试", "Network request failed; retry"),
+    INVALID_RESPONSE: words("额度响应无效，可重试", "Invalid quota response; retry"),
+  };
+  const networkSources = {
+    default: words("默认设置", "Default setting"), explicit: words("用户设置", "User setting"),
+    "legacy-process-https": words("已迁移：进程 HTTPS 代理", "Migrated: process HTTPS proxy"),
+    "legacy-user-https": words("已迁移：用户 HTTPS 代理", "Migrated: user HTTPS proxy"),
+    "legacy-process-http": words("已迁移：进程 HTTP 代理", "Migrated: process HTTP proxy"),
+    "legacy-user-http": words("已迁移：用户 HTTP 代理", "Migrated: user HTTP proxy"),
+    "legacy-file": words("已迁移：旧代理文件", "Migrated: legacy proxy file"),
+    "legacy-default": words("已迁移：旧默认代理", "Migrated: legacy default proxy"),
+    unknown: words("未知", "Unknown"),
+  };
+  const sanitizeNetworkDiagnosis = (value) => {
+    if (!value || !["system", "proxy", "unknown"].includes(value.NetworkMode) ||
+        typeof value.ProxySource !== "string" || !Object.hasOwn(networkSources, value.ProxySource) ||
+        (value.LastRequestError != null && (typeof value.LastRequestError !== "string" || !Object.hasOwn(requestErrorReasons, value.LastRequestError))) ||
+        typeof value.NetworkCheckedAt !== "string" ||
+        !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,7})?(?:Z|\+00:00)$/.test(value.NetworkCheckedAt) ||
+        !Number.isFinite(Date.parse(value.NetworkCheckedAt)) ||
+        new Date(value.NetworkCheckedAt).toISOString().slice(0, 19) !== value.NetworkCheckedAt.slice(0, 19)) return null;
+    let endpoint = null;
+    if (value.NetworkMode === "proxy" && value.ProxyEndpoint !== null) {
+      if (typeof value.ProxyEndpoint !== "string") return null;
+      try {
+        const url = new URL(value.ProxyEndpoint);
+        if (url.protocol !== "http:" || !url.hostname) return null;
+        endpoint = `${url.protocol}//${url.hostname}:${url.port || "80"}`;
+      } catch { return null; }
+    }
+    return {NetworkMode: value.NetworkMode, ProxySource: value.ProxySource, ProxyEndpoint: endpoint,
+      LastRequestError: value.LastRequestError ?? null, NetworkCheckedAt: new Date(value.NetworkCheckedAt).toISOString()};
+  };
   const officialTitle = (fiveHour = false) => fiveHour ? copy.fiveHourTitle : copy.weeklyTitle;
   const thresholds = () => [...new Set(preferences.thresholds.split(",").map(Number))]
     .filter(value => Number.isFinite(value) && value > 0 && value < 100).sort((a, b) => b - a);
@@ -287,32 +338,195 @@
       for (const button of refreshFeedbackTimers.keys()) if (card.contains(button)) clearRefreshFeedback(button);
     }
   };
-  const announceQuota = (message) => {
-    let notice = document.getElementById("cq-notice");
-    if (!notice) {
-      notice = document.createElement("div");
-      notice.id = "cq-notice";
-      notice.setAttribute("role", "status");
-      const text = document.createElement("span");
-      const close = document.createElement("button");
-      close.type = "button";
-      close.textContent = words("关闭", "Dismiss");
-      close.onclick = () => {
-        notice.cqDismissed = true;
-        move(notice, {opacity: 0, transform: "translateY(4px)"}, {duration: .14}, () => { if (notice.cqDismissed) notice.remove(); });
-      };
-      pressFeedback(close);
-      notice.append(text, close);
-      document.body.append(notice);
-      notice.style.opacity = "0";
-      notice.style.transform = "translateY(6px)";
+  let inlineAlert = null;
+  const inlineQueue = [];
+  const pauseInlineTimer = () => {
+    if (!inlineAlert) return;
+    if (inlineAlert.started != null) inlineAlert.remaining = Math.max(0, inlineAlert.remaining - (performance.now() - inlineAlert.started));
+    clearTimeout(inlineAlert.timer);
+    inlineAlert.started = null;
+  };
+  const clearInlineVisual = () => {
+    const trigger = document.getElementById("codex-quota-trigger");
+    const visual = inlineAlert?.visual;
+    for (const animation of visual?.animations || []) { animation.onfinish = null; animation.cancel(); }
+    if (inlineAlert) inlineAlert.visual = null;
+    trigger?.removeAttribute("data-cq-alert-visible");
+    const layer = trigger?.querySelector(".cq-inline-alert");
+    if (layer) { layer.hidden = true; layer.querySelector(".cq-inline-source")?.remove(); }
+    const surface = trigger?.querySelector(".cq-inline-surface");
+    if (surface) { surface.hidden = true; surface.style.removeProperty("opacity"); }
+  };
+  const captureInlineAlert = () => {
+    const visual = inlineAlert?.visual, trigger = document.getElementById("codex-quota-trigger");
+    if (!visual || reducedMotion.matches || document.visibilityState !== "visible") return null;
+    const layer = trigger.querySelector(".cq-inline-alert"), surface = trigger.querySelector(".cq-inline-surface");
+    const clone = layer.cloneNode(true);
+    const originals = [layer, ...layer.querySelectorAll("*")], copies = [clone, ...clone.querySelectorAll("*")];
+    // Freeze only our small owned layer, including the current WAAPI presentation frame.
+    originals.forEach((node, index) => {
+      const css = getComputedStyle(node), copy = copies[index];
+      for (const name of ["display", "position", "left", "top", "right", "bottom", "width", "height", "box-sizing", "padding", "margin", "gap", "align-items", "justify-content", "flex", "font-family", "font-size", "font-weight", "font-style", "line-height", "font-variant-numeric", "font-feature-settings", "letter-spacing", "white-space", "color", "background", "border", "border-radius", "opacity", "transform", "transform-origin", "overflow", "visibility", "fill", "stroke", "stroke-width", "stroke-dasharray", "stroke-dashoffset"]) copy.style.setProperty(name, css.getPropertyValue(name));
+      copy.removeAttribute("id");
+      copy.style.transition = "none";
+      copy.style.pointerEvents = "none";
+    });
+    const rect = layer.getBoundingClientRect(), css = getComputedStyle(surface);
+    Object.assign(clone.style, {left: "0", top: "0", transformOrigin: "0 0", transform: `scale(${rect.width / layer.offsetWidth})`});
+    const elapsed = Number(visual.animations?.[0]?.currentTime || 0);
+    return {clone, rect, color: css.backgroundColor, border: css.borderColor, opacity: Number(css.opacity),
+      progress: visual.generator ? visual.generator.next(elapsed).value : visual.initial,
+      velocity: visual.generator ? visual.generator.velocity(elapsed) : 0};
+  };
+  const suspendInlineAlert = () => { pauseInlineTimer(); clearInlineVisual(); };
+  const removeNotice = () => {
+    suspendInlineAlert();
+    inlineAlert = null;
+    inlineQueue.length = 0;
+    const trigger = document.getElementById("codex-quota-trigger");
+    trigger?.removeAttribute("data-cq-alert");
+    if (trigger?.cqBaseLabel) { trigger.setAttribute("aria-label", trigger.cqBaseLabel); trigger.title = trigger.cqBaseTitle; }
+    const announcement = document.getElementById("cq-inline-announcement");
+    if (announcement) announcement.textContent = "";
+  };
+  // Also disposes reminders from the previous UI revision during hot injection.
+  globalThis.__codexQuotaNoticeCleanup = removeNotice;
+  const nextInlineAlert = () => {
+    suspendInlineAlert();
+    inlineAlert = null;
+    const next = inlineQueue.shift();
+    if (next) inlineAlert = {item: next, remaining: 6000, started: null, visual: null, leaving: false};
+    syncInlineAlert();
+  };
+  const updateInlineTimer = () => {
+    pauseInlineTimer();
+    const state = inlineAlert, trigger = document.getElementById("codex-quota-trigger");
+    if (!state || state.leaving || !trigger || !visible(trigger) || document.visibilityState !== "visible" ||
+        trigger.matches(":hover") || trigger.contains(document.activeElement) ||
+        trigger.getAttribute("aria-expanded") === "true" || quotaShell?.popup.matches(":popover-open") || sharedPopover || paneMotion ||
+        state.visual?.animations?.length) return;
+    state.started = performance.now();
+    state.timer = setTimeout(() => {
+      pauseInlineTimer();
+      if (inlineAlert !== state) return;
+      state.leaving = true;
+      animateInlineAlert(0);
+    }, state.remaining);
+  };
+  const animateInlineAlert = target => {
+    const state = inlineAlert, visual = state?.visual;
+    if (!state) return;
+    if (!visual) { if (!target) nextInlineAlert(); else updateInlineTimer(); return; }
+    pauseInlineTimer();
+    visual.target = target;
+    const complete = () => {
+      if (inlineAlert !== state || state.visual !== visual) return;
+      for (const animation of visual.animations || []) { animation.onfinish = null; animation.cancel(); }
+      visual.animations = [];
+      visual.generator = null;
+      visual.initial = target;
+      for (const [node, frame] of visual.framesAt(target)) finalStyle(node, frame);
+      if (!target) nextInlineAlert(); else updateInlineTimer();
+    };
+    if (reducedMotion.matches || document.visibilityState !== "visible") complete();
+    else playSpring(visual, target, complete);
+  };
+  const syncInlineAlert = () => {
+    const trigger = document.getElementById("codex-quota-trigger");
+    if (!trigger || disposed) return;
+    const state = inlineAlert;
+    if (!state) {
+      trigger.removeAttribute("data-cq-alert");
+      if (trigger.cqBaseLabel) { trigger.setAttribute("aria-label", trigger.cqBaseLabel); trigger.title = trigger.cqBaseTitle; }
+      return;
     }
-    notice.cqDismissed = false;
-    move(notice, {opacity: 1, transform: "translateY(0px)"}, {duration: .22, ease: [.2, .8, .2, 1]});
-    notice.firstElementChild.textContent = message;
+    const latest = globalThis.__codexQuotaOfficialPayload?.windows?.find(item => item.label === state.item.window);
+    // Never continue an old reset cycle's reminder with a new cycle's percentage.
+    if (!latest || latest.resetAt !== state.item.resetAt) { nextInlineAlert(); return; }
+    state.item.remaining = 100 - latest.usedPercent;
+    const item = state.item;
+    const label = `${item.label}${words(item.recovered ? "已恢复" : "剩余", item.recovered ? " replenished" : " remaining")}`;
+    const text = `${label} ${formatPercent(item.remaining)}%`;
+    trigger.dataset.cqAlert = item.recovered ? "recovery" : "low";
+    trigger.setAttribute("aria-label", `${trigger.cqBaseLabel || ""} · ${text}`);
+    trigger.title = `${trigger.cqBaseTitle || ""} · ${text}`;
+    const announcement = document.getElementById("cq-inline-announcement");
+    if (announcement && state.announced !== text) { announcement.textContent = text; state.announced = text; }
+    if (!visible(trigger) || trigger.getAttribute("aria-expanded") === "true" || quotaShell?.popup.matches(":popover-open") || sharedPopover || paneMotion) {
+      suspendInlineAlert(); return;
+    }
+    const layer = trigger.querySelector(".cq-inline-alert"), surface = trigger.querySelector(".cq-inline-surface");
+    if (trigger.hasAttribute("data-cq-collapsed")) {
+      clearInlineVisual(); trigger.setAttribute("data-cq-alert-visible", ""); updateInlineTimer(); return;
+    }
+    const normal = trigger.querySelector(trigger.hasAttribute("data-cq-graphical") ? ":scope > .cq-trigger-graphics" : ":scope > .cq-trigger-copy");
+    const box = normal.getBoundingClientRect(), origin = trigger.getBoundingClientRect();
+    const scale = origin.width / trigger.offsetWidth || 1;
+    const width = box.width / scale;
+    const key = [text, box.left, box.top, box.width, box.height, origin.left, origin.top, normal.innerHTML].join("|");
+    if (state.visual?.key === key) { updateInlineTimer(); return; }
+    const old = state.visual;
+    const elapsed = Number(old?.animations?.[0]?.currentTime || 0);
+    const initial = old?.generator ? old.generator.next(elapsed).value : old?.initial ?? state.resume?.progress ?? 0;
+    const velocity = old?.generator ? old.generator.velocity(elapsed) : state.resume?.velocity || 0;
+    state.resume = null;
+    pauseInlineTimer(); clearInlineVisual();
+    layer.hidden = false; surface.hidden = false;
+    layer.style.left = ((box.left - origin.left) / scale - trigger.clientLeft) + "px";
+    layer.style.top = ((trigger.clientHeight - 24) / 2) + "px";
+    layer.style.width = width + "px";
+    layer.querySelector(".cq-inline-label").textContent = label;
+    layer.querySelector(".cq-inline-digits").textContent = formatPercent(item.remaining);
+    const source = normal.cloneNode(true);
+    source.removeAttribute("aria-hidden");
+    source.classList.add("cq-inline-source");
+    source.style.fontFamily = getComputedStyle(normal).fontFamily;
+    layer.prepend(source);
+    const incomingLabel = layer.querySelector(".cq-inline-label"), incomingValue = layer.querySelector(".cq-inline-value");
+    const fromLabel = source.querySelector(item.window === "Weekly" ? ".cq-trigger-week-label" : ".cq-trigger-window-label");
+    const fromValue = [...source.querySelectorAll("[data-cq-window]")].find(node => node.dataset.cqWindow === item.window);
+    const labelX = fromLabel ? (fromLabel.getBoundingClientRect().left - box.left) / scale : 0;
+    const valueX = fromValue ? (fromValue.getBoundingClientRect().left - box.left) / scale : width - incomingValue.offsetWidth;
+    const destinationX = width - incomingValue.offsetWidth;
+    const smooth = (p, start, end) => { const n = Math.max(0, Math.min(1, (p - start) / (end - start))); return n * n * (3 - 2 * n); };
+    const framesAt = progress => {
+      const p = Math.max(0, Math.min(1, progress));
+      const frames = new Map([
+        [surface, {opacity: smooth(p, .02, .85)}],
+        [incomingLabel, {opacity: smooth(p, .15, .85), transform: `translate3d(${labelX * (1-p)}px,0,0)`}],
+        [incomingValue, {opacity: smooth(p, .35, 1), transform: `translate3d(${(valueX-destinationX)*(1-p)}px,0,0) scale(${1-.07*(1-p)})`}],
+      ]);
+      for (const child of source.children.length ? source.children : [source]) {
+        let transform = `translate3d(${-4*p}px,0,0)`;
+        if (child === fromLabel) transform = `translate3d(${-labelX*p}px,0,0)`;
+        if (child === fromValue) transform = `translate3d(${(destinationX-valueX)*p}px,0,0) scale(${1+.07*p})`;
+        if (child.classList.contains("cq-trigger-weekly-bar")) transform = `scaleX(${1-p})`;
+        frames.set(child, {opacity: 1-smooth(p, 0, .65), transform});
+      }
+      return frames;
+    };
+    state.visual = {key, initial, velocity, framesAt, target: state.leaving ? 0 : 1};
+    trigger.setAttribute("data-cq-alert-visible", "");
+    if (initial === 1 && !state.leaving) {
+      for (const [node, frame] of framesAt(1)) finalStyle(node, frame);
+      updateInlineTimer();
+    } else animateInlineAlert(state.leaving ? 0 : 1);
+  };
+  const announceQuota = (message, details) => {
+    for (const detail of details) {
+      for (let i = inlineQueue.length - 1; i >= 0; i--) if (inlineQueue[i].window === detail.window) inlineQueue.splice(i, 1);
+      if (inlineAlert?.item.window === detail.window) {
+        inlineAlert.item = detail;
+        inlineAlert.remaining = 6000;
+        inlineAlert.started = null;
+        inlineAlert.leaving = false;
+        if (inlineAlert.visual) inlineAlert.visual.key = "";
+      } else inlineQueue.push(detail);
+    }
+    if (!inlineAlert) nextInlineAlert(); else syncInlineAlert();
     if (preferences.system && typeof Notification !== "undefined" && Notification.permission === "granted") {
       try { new Notification("Codex Usage Card", {body: message, tag: "codex-usage-card", silent: true}); }
-      catch { /* The in-app notice remains available when the host blocks system notifications. */ }
+      catch { /* The entry reminder remains available when the host blocks system notifications. */ }
     }
   };
 
@@ -330,9 +544,12 @@
       catch { return; } // Shared storage is required to guarantee cross-window deduplication.
       const records = stored?.scope === scope && stored.records ? stored.records : {};
       const messages = [];
+      const details = [];
       for (const item of windows || []) {
         if (!Number.isFinite(item.usedPercent) || item.usedPercent < 0 || item.usedPercent > 100) continue;
         const remaining = 100 - item.usedPercent;
+        const label = item.label === "Weekly" ? words("本周", "Weekly") : item.label === "5h" ? words("5 小时", "5h") : item.label;
+        const detail = {label, window: item.label, remaining, resetAt: item.resetAt};
         const previous = records[item.label];
         const replenished = previous && remaining > previous.remaining &&
           item.resetAt > previous.resetAt;
@@ -340,17 +557,19 @@
         const sent = cycleChanged || replenished ? [] : previous?.sent || [];
         if (preferences.recovery && replenished && previous.remaining <= Math.max(...thresholds(), 0)) {
           messages.push(`${item.label}: ${words("额度已恢复，剩余", "Quota replenished, remaining")} ${formatPercent(remaining)}%`);
+          details.push({...detail, recovered: true});
         }
         const crossed = preferences.alerts ? thresholds().filter(limit => remaining <= limit && !sent.includes(limit)) : [];
         if (crossed.length) {
           messages.push(`${item.label}: ${words("额度偏低，剩余", "Low quota, remaining")} ${formatPercent(remaining)}%`);
+          details.push(detail);
           sent.push(...crossed);
         }
         records[item.label] = {remaining, resetAt: item.resetAt, sent};
       }
       try { localStorage.setItem(key, JSON.stringify({scope, records})); }
       catch { return; }
-      if (messages.length) announceQuota(messages.join(" · "));
+      if (messages.length) announceQuota(messages.join(" · "), details);
     };
     // Web Locks serialize the read/write across Codex windows without another timer.
     if (navigator.locks) await navigator.locks.request("codex-usage-card.alerts", run);
@@ -366,10 +585,20 @@
     }
     const labels = {TaskActionMatches: words("启动任务", "Startup task"), HelperWindowless: words("无窗口 Helper", "Windowless helper"),
       CdpEndpointFound: words("调试连接", "Debug connection"), MainPageFound: words("主页面", "Main page"), CardVisible: words("入口可见", "Entry visible")};
+    const network = sanitizeNetworkDiagnosis(data);
+    const unknown = words("未记录", "Not recorded");
+    const networkLines = [
+      [words("网络模式", "Network mode"), network?.NetworkMode === "system" ? words("系统网络", "System network") : network?.NetworkMode === "proxy" ? words("指定代理", "Explicit proxy") : unknown],
+      [words("代理来源", "Proxy source"), network ? networkSources[network.ProxySource] : unknown],
+      [words("代理地址", "Proxy endpoint"), network?.ProxyEndpoint || (network?.NetworkMode === "system" ? words("由 Windows 决定", "Managed by Windows") : unknown)],
+      [words("最近请求错误", "Last request error"), network?.LastRequestError ? requestErrorReasons[network.LastRequestError] : network ? words("无", "None") : unknown],
+      [words("网络记录时间", "Network checked at"), network ? new Date(network.NetworkCheckedAt).toLocaleString(navigator.language, {hour12: preferences.hour12}) : unknown],
+    ];
     output.textContent = Object.entries(labels).map(([key, label]) => `${label}: ${data[key] === true
       ? words("正常", "OK") : data[key] === false ? words("未就绪", "Not ready") : words("未检查", "Not checked")}`).join("\n") +
       (Number.isInteger(data.WindowCount) ? `\n${words("可见入口／主窗口", "Visible entries / main windows")}: ${data.VisibleCardCount} / ${data.WindowCount}${data.UninspectedWindowCount ? ` (${words("未检查", "not checked")}: ${data.UninspectedWindowCount})` : ""}` : "") +
-      (Array.isArray(data.StageCodes) && data.StageCodes.length ? "\n" + data.StageCodes.join(", ") : "");
+      (Array.isArray(data.StageCodes) && data.StageCodes.length ? "\n" + data.StageCodes.join(", ") : "") +
+      "\n" + networkLines.map(([label, value]) => `${label}: ${value}`).join("\n");
   };
 
   const openSettings = (opener) => {
@@ -584,8 +813,8 @@
       #codex-quota-trigger .cq-gauge-needle[hidden] { display: none; }
       #codex-quota-trigger[data-cq-instant] .cq-gauge-needle { transition: none; }
       #codex-quota-trigger[data-cq-collapsed] :is(.cq-trigger-plan,.cq-trigger-copy,.cq-trigger-graphics,.cq-trigger-chevron) { display: none; }
-      #codex-quota-trigger[data-cq-low]::after { content: ""; flex: none; width: 4px; height: 4px; border-radius: 50%; background: currentColor; }
-      #codex-quota-trigger[data-cq-collapsed][data-cq-low]::after { position: absolute; margin: 23px 0 0 22px; }
+      #codex-quota-trigger[data-cq-low]::after { content: ""; position: absolute; right: 3px; top: 3px; width: 4px; height: 4px; border-radius: 50%; background: currentColor; }
+      #codex-quota-trigger[data-cq-collapsed][data-cq-low]::after { right: auto; top: auto; margin: 23px 0 0 22px; }
       #codex-quota-popover { position: fixed; inset: auto; margin: 0; padding: 8px 0 8px 8px; max-width: none; max-height: calc(100dvh - 24px); overflow: auto; overscroll-behavior: contain; scrollbar-width: none; border: .8px solid var(--cq-border); border-radius: var(--radius-sm, 6px); background: var(--cq-solid); box-shadow: 0 4px 12px #302c2212, 0 16px 32px #302c2207; opacity: 0; transition: display 700ms allow-discrete, overlay 700ms allow-discrete; }
       @supports (backdrop-filter: blur(1px)) { #codex-quota-popover { background: color-mix(in srgb, var(--cq-solid) 90%, transparent); backdrop-filter: blur(8px); border: 0; } }
       #codex-quota-popover:not([data-cq-inplace]) { transition-duration: 180ms; }
@@ -711,8 +940,25 @@
       #cq-settings .cq-tools :is(button,a) { display: inline-flex; align-items: center; min-height: 24px; padding: 0; border-radius: 4px; text-decoration: none; }
       #cq-settings pre { white-space: pre-wrap; overflow-wrap: anywhere; font: 11px/1.5 var(--default-font-family, sans-serif); margin: 8px 16px 0 8px; user-select: text; }
       #cq-settings pre:empty { display: none; }
-      #cq-notice { position: fixed; bottom: 20px; right: 20px; z-index: 2147483647; display: flex; align-items: center; gap: 16px; max-width: min(460px, calc(100vw - 40px)); padding: 12px 16px; border: 1px solid ButtonBorder; border-radius: 8px; background: Canvas; color: CanvasText; font: 13px/1.4 var(--default-font-family, sans-serif); }
-      #cq-notice button { padding: 6px; color: inherit; background: transparent; border: 1px solid ButtonBorder; border-radius: 4px; }
+      #codex-quota-trigger { position: relative; gap: 8px; font-variant-numeric: tabular-nums; --cq-alert-ink: #b42318; --cq-alert-label: #8f453e; --cq-alert-surface: #fbe4e1; --cq-alert-border: #dca29b; }
+      #codex-quota-trigger[data-cq-dark] { --cq-alert-ink: #ff958c; --cq-alert-label: #e0aaa4; --cq-alert-surface: #4a2929; --cq-alert-border: #965654; }
+      #codex-quota-trigger[data-cq-alert="recovery"] { --cq-alert-ink: var(--cq-ink); --cq-alert-label: var(--cq-muted); --cq-alert-surface: var(--cq-solid); --cq-alert-border: var(--cq-border); }
+      #codex-quota-trigger > :is(.cq-trigger-plan,.cq-trigger-chevron,.cq-trigger-icon) { position: relative; z-index: 1; }
+      :is(#codex-quota-trigger,#codex-quota-popover) .cq-plan-badge:is([data-cq-tier="pro"],[data-cq-tier="plus"]) { width: 30px; padding-inline: 0; text-align: center; }
+      #codex-quota-trigger .cq-inline-surface { position: absolute; inset: -1px; border: 1px solid var(--cq-alert-border); border-radius: inherit; background: var(--cq-alert-surface); pointer-events: none; }
+      #codex-quota-trigger .cq-inline-alert { position: absolute; height: 24px; display: flex; align-items: baseline; justify-content: space-between; overflow: hidden; pointer-events: none; z-index: 1; font-family: "Noto Sans SC", "Microsoft YaHei UI", "Segoe UI", sans-serif; line-height: 24px; white-space: nowrap; }
+      #codex-quota-trigger .cq-inline-alert > :is(.cq-inline-label,.cq-inline-value) { position: relative; transform-origin: left center; }
+      #codex-quota-trigger .cq-inline-label { font-size: 12px; font-weight: 400; color: var(--cq-alert-label); }
+      #codex-quota-trigger .cq-inline-value { font-size: 14px; font-weight: 600; color: var(--cq-alert-ink); }
+      #codex-quota-trigger .cq-inline-percent { margin-left: 1px; font-size: 11px; font-weight: 500; }
+      #codex-quota-trigger .cq-inline-source { position: absolute; inset: 0; display: flex; align-items: center; width: 100%; height: 24px; }
+      #codex-quota-trigger .cq-inline-source > * { transform-origin: left center; }
+      #codex-quota-trigger[data-cq-alert-visible] > :is(.cq-trigger-copy,.cq-trigger-graphics) { visibility: hidden; }
+      #codex-quota-trigger[data-cq-alert-visible]:not([data-cq-collapsed])::after { visibility: hidden; }
+      #codex-quota-trigger[data-cq-collapsed][data-cq-alert-visible] { color: var(--cq-alert-ink); }
+      #codex-quota-trigger :is(.cq-inline-alert,.cq-inline-surface)[hidden] { display: none; }
+      #cq-inline-announcement { position: fixed; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; pointer-events: none; }
+      @media (forced-colors: active) { #codex-quota-trigger[data-cq-alert] { --cq-alert-ink: CanvasText; --cq-alert-label: CanvasText; --cq-alert-surface: Canvas; --cq-alert-border: Highlight; } }
       #cq-refresh-message { position: fixed; inset: auto; margin: 0; width: max-content; max-width: min(280px, calc(100vw - 24px)); box-sizing: border-box; padding: 8px 10px; border: 1px solid var(--cq-border, ButtonBorder); border-radius: 8px; background: var(--cq-solid, Canvas); color: var(--cq-ink, CanvasText); font: 12px/1.5 var(--default-font-family, sans-serif); pointer-events: none; overflow-wrap: anywhere; }
       @media (prefers-reduced-motion: reduce) { #codex-quota-popover, #codex-quota-popover:popover-open, #codex-quota-trigger { transition: none; transform: none; } }
       @media (prefers-reduced-motion: reduce) { #codex-quota-trigger .cq-trigger-plan, #codex-quota-trigger .cq-trigger-copy, #codex-quota-trigger .cq-trigger-graphics, #codex-quota-trigger .cq-trigger-graphics > *, #codex-quota-trigger .cq-trigger-chevron { transition: none !important; } }
@@ -802,9 +1048,7 @@
     if (globalThis.__codexQuotaAwaitingFreshSession && !data) return {busy: false, text: words("暂不可用，等待账户连接", "Unavailable; awaiting account connection")};
     if (needsData) return {busy: true, text: copy.refreshing};
     if (errorCode) {
-      const reason = errorCode === "AUTH_REQUIRED" ? words("请重新登录", "Sign in again")
-        : errorCode === "RATE_LIMITED" ? words("服务端限流", "Rate limited")
-        : errorCode === "REQUEST_TIMEOUT" ? words("刷新超时，可重试", "Refresh timed out; retry") : "";
+      const reason = Object.hasOwn(requestErrorReasons, errorCode) ? requestErrorReasons[errorCode] : "";
       const previous = lastSuccessAt ? `${words("上次成功", "Last success")} ${new Date(lastSuccessAt).toLocaleString(navigator.language, {hour12: preferences.hour12})}`
         : words("上次成功时间未知", "Last success time unavailable");
       const retry = cooldownUntil > Date.now() ? ` · ${words("重试时间", "Retry at")} ${formatStatusTime(cooldownUntil)}` : "";
@@ -1137,6 +1381,8 @@
       if (state.text) description += ` · ${state.text}`;
       trigger.setAttribute("aria-label", description + (low ? words("，额度偏低", ", low quota") : ""));
       trigger.title = description;
+      trigger.cqBaseLabel = trigger.getAttribute("aria-label");
+      trigger.cqBaseTitle = description;
     }
     mountShell();
   };
@@ -1310,6 +1556,7 @@
 
   globalThis.__codexQuotaUpdateOfficial = (data, requestId) => {
     if (!acceptQuotaResponse("official", requestId)) return;
+    if (data && Object.hasOwn(data, "network")) globalThis.__codexQuotaNetworkDiagnosis = sanitizeNetworkDiagnosis(data.network);
     const awaitingSession = globalThis.__codexQuotaAwaitingFreshSession;
     globalThis.__codexQuotaOfficialNeedsData = false;
     globalThis.__codexQuotaOfficialLoaded = true;
@@ -1398,7 +1645,7 @@
   const positionPopover = () => {
     const popup = document.getElementById("codex-quota-popover");
     const trigger = document.getElementById("codex-quota-trigger");
-    if (sharedPopover || paneMotion || !popup?.matches(":popover-open") || !visible(trigger)) return;
+    if (sharedPopover || paneMotion || !popup?.matches(":popover-open") || !visible(trigger)) { syncInlineAlert(); return; }
     const rect = trigger.getBoundingClientRect();
     const column = anchors?.column && visible(anchors.column) ? anchors.column.getBoundingClientRect() : null;
     const leftEdge = column ? Math.max(12, column.left + 8) : 12;
@@ -1422,6 +1669,7 @@
     if (heading?.getClientRects().length) popup.style.setProperty("--cq-control-right",
       (heading.getBoundingClientRect().right - box.left - popup.clientLeft - controlLeft - 24) + "px");
     collapse.style.top = (column ? arrow.top + arrow.height / 2 - box.top - popup.clientTop + popup.scrollTop - 12 : popup.scrollTop + popup.clientHeight - 30) + "px";
+    syncInlineAlert();
   };
   const finishSharedPopover = () => {
     const state = sharedPopover;
@@ -1440,11 +1688,12 @@
     popup.removeAttribute("data-cq-rail-motion");
     collapse.firstElementChild.style.removeProperty("transform");
     const open = popup.matches(":popover-open");
+    if (!open && inlineAlert && state.inlineSnapshot) inlineAlert.resume = state.inlineSnapshot;
     trigger.toggleAttribute("data-cq-replaced", open && !trigger.hasAttribute("data-cq-collapsed"));
     trigger.tabIndex = trigger.getAttribute("aria-expanded") === "true" && trigger.hasAttribute("data-cq-replaced") ? -1 : 0;
     collapse.setAttribute("aria-label", open ? words("收起额度", "Collapse quota") : words("展开额度", "Expand quota"));
     collapse.title = collapse.getAttribute("aria-label");
-    if (open) positionPopover();
+    positionPopover();
   };
 
   const animateSharedPopover = (open) => {
@@ -1530,9 +1779,22 @@
           }
         }
       }
-      const state = {initial: open ? 0 : 1, actors, layer, surface, content, column: anchors.column,
+      const inlineSnapshot = open ? inlineAlert?.opening : null;
+      if (inlineAlert) inlineAlert.opening = null;
+      const state = {initial: open ? 0 : 1, actors, layer, surface, content, column: anchors.column, inlineSnapshot,
         signature: JSON.stringify((globalThis.__codexQuotaOfficialPayload || nativeSnapshot) || null)};
       const offsetX = rect.left + popup.clientLeft, offsetY = rect.top + popup.clientTop;
+      let inlineTint, inlineHandoff;
+      if (inlineSnapshot) {
+        inlineTint = document.createElement("div");
+        Object.assign(inlineTint.style, {position: "absolute", inset: "0", borderRadius: "inherit", background: inlineSnapshot.color, border: `1px solid ${inlineSnapshot.border}`});
+        surface.append(inlineTint);
+        inlineHandoff = document.createElement("div");
+        inlineHandoff.className = "cq-inline-handoff";
+        Object.assign(inlineHandoff.style, {position: "absolute", left: "0", top: "0", width: inlineSnapshot.rect.width + "px", height: inlineSnapshot.rect.height + "px"});
+        inlineHandoff.append(inlineSnapshot.clone);
+        layer.prepend(inlineHandoff);
+      }
       const startRadius = parseFloat(triggerStyle.borderTopLeftRadius) * origin.height / trigger.offsetHeight;
       const endRadius = parseFloat(surfaceStyle.borderTopLeftRadius);
       const mix = (a, b, p) => a + (b - a) * p;
@@ -1541,6 +1803,11 @@
         const frames = new Map();
         const frame = (element, style) => frames.set(element, {...frames.get(element), ...style});
         const p = Math.max(0, Math.min(1, value));
+        const reveal = Math.min(1, p / .6);
+        if (inlineSnapshot) {
+          frame(inlineTint, {opacity: inlineSnapshot.opacity * (1-reveal)});
+          frame(inlineHandoff, {opacity: 1-reveal, transform: `translate3d(${inlineSnapshot.rect.left-offsetX}px,${inlineSnapshot.rect.top-offsetY-8*p}px,0)`});
+        }
         const edges = {left: mix(origin.left, rect.left, p), top: mix(origin.top, rect.top, 1 - (1 - p) ** 3),
           right: mix(origin.right, rect.right, p), bottom: mix(origin.bottom, rect.bottom, p)};
         const scaleX = (edges.right - edges.left) / (union.right - union.left);
@@ -1551,6 +1818,7 @@
           borderRadius: `${radius / scaleX}px / ${radius / scaleY}px`});
         for (const actor of actors) {
           const {key, node, clone, a, b, fill, fillWidth, minFill} = actor;
+          if (inlineSnapshot && key !== "plan") frame(node, {opacity: reveal});
           const numeric = number && (key === "weekly-digits" || key === "weekly-percent");
           // The number lifts over the growing line before settling into its focal position.
           const shift = numeric ? (number.b.left - number.a.left) * (p * p - p) : 0;
@@ -1779,6 +2047,23 @@
     graphics.className = "cq-trigger-graphics";
     graphics.setAttribute("aria-hidden", "true");
     trigger.append(graphics, icon(ChevronUp, "cq-trigger-chevron"));
+    const alertLayer = document.createElement("span");
+    alertLayer.className = "cq-inline-alert";
+    alertLayer.hidden = true;
+    alertLayer.setAttribute("aria-hidden", "true");
+    alertLayer.innerHTML = '<span class="cq-inline-label"></span><span class="cq-inline-value"><span class="cq-inline-digits"></span><span class="cq-inline-percent">%</span></span>';
+    const alertSurface = document.createElement("span");
+    alertSurface.className = "cq-inline-surface";
+    alertSurface.hidden = true;
+    alertSurface.setAttribute("aria-hidden", "true");
+    trigger.append(alertSurface, alertLayer);
+    const announcement = document.createElement("span");
+    announcement.id = "cq-inline-announcement";
+    announcement.setAttribute("role", "status");
+    announcement.setAttribute("aria-atomic", "true");
+    document.body.append(announcement);
+    for (const event of ["pointerenter", "pointerleave", "focusin"]) trigger.addEventListener(event, updateInlineTimer);
+    trigger.addEventListener("focusout", () => queueMicrotask(updateInlineTimer));
     const popup = document.createElement("div");
     popup.id = "codex-quota-popover";
     popup.popover = "auto";
@@ -1821,6 +2106,10 @@
     trigger.addEventListener("keydown", escape);
     popup.addEventListener("beforetoggle", event => {
       const open = event.newState === "open";
+      if (open) {
+        if (inlineAlert && !sharedPopover && !paneMotion) inlineAlert.opening = captureInlineAlert();
+        suspendInlineAlert();
+      }
       focusFromTrigger = open && document.activeElement === trigger;
       for (const node of [trigger, popup]) node.toggleAttribute("data-cq-instant", document.visibilityState !== "visible");
       trigger.setAttribute("aria-expanded", String(open));
@@ -1870,7 +2159,7 @@
     const {footer, popup} = quotaShell;
     trigger.hidden = !anchors;
     footer.hidden = !anchors?.column;
-    if (!anchors) { if (popup.matches(":popover-open")) popup.hidePopover(); return false; }
+    if (!anchors) { if (popup.matches(":popover-open")) popup.hidePopover(); syncInlineAlert(); return false; }
     const {column, avatar, rail, stack} = anchors;
     if (sharedPopover && sharedPopover.column !== column) finishSharedPopover();
     if (paneMotion && paneMotion.column !== column) finishPaneMotion();
@@ -1944,6 +2233,7 @@
 
   globalThis.__codexQuotaResetSession = () => {
     alertGeneration++;
+    delete globalThis.__codexQuotaNetworkDiagnosis;
     finishMotion();
     manualRefresh = null;
     clearQuotaRequest("official");
@@ -1954,7 +2244,7 @@
         delete globalThis[`__codexQuota${kind}${suffix}`];
       }
     }
-    document.getElementById("cq-notice")?.remove();
+    removeNotice();
     nativeSnapshot = null;
     removeOfficialCard();
     const popup = document.getElementById("codex-quota-popover");
@@ -1994,7 +2284,7 @@
     globalThis.__codexQuotaThemeCleanup?.();
     let scheduled = false;
     const observed = new Map();
-    const owned = '#codex-quota-footer, #codex-quota-trigger, #codex-quota-popover, #cq-refresh-message, #cq-notice';
+    const owned = '#codex-quota-footer, #codex-quota-trigger, #codex-quota-popover, #cq-refresh-message, #cq-inline-announcement';
     const hostSelector = `${railSelector}, ${columnSelector}, [role='status'].rounded-2xl`;
     const schedule = () => {
       if (scheduled || disposed) return;
@@ -2060,6 +2350,7 @@
     const media = matchMedia("(prefers-color-scheme: dark)");
     const onStylesheetLoad = event => { if (event.target instanceof HTMLLinkElement && event.target.relList.contains("stylesheet")) schedule(); };
     window.addEventListener("resize", onGeometryChange);
+    document.fonts?.ready.then(() => { if (!disposed) schedule(); });
     media.addEventListener("change", schedule);
     document.addEventListener("load", onStylesheetLoad, true);
     globalThis.__codexQuotaGeometryCleanup = () => {

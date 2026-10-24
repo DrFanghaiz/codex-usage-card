@@ -37,9 +37,9 @@ async function pageFor(data=officialPayload(),viewport={width:1024,height:720},o
   const errors=[];page.on('pageerror',e=>errors.push(e.message));page.errors=errors;
   await page.setContent(shell);await setup(page,data);return page;
 }
-async function sharedPages(count=1) {
-  const context=await browser.newContext({reducedMotion:'reduce',locale:'zh-CN'});
-  await context.route('https://quota.test/**',route=>route.fulfill({contentType:'text/html',body:shell}));
+async function sharedPages(count=1,options={}) {
+  const context=await browser.newContext({reducedMotion:'reduce',locale:'zh-CN',...options});
+  await context.route('https://quota.test/**',route=>route.fulfill({contentType:'text/html; charset=utf-8',body:shell}));
   const pages=[];
   for(let i=0;i<count;i++){const page=await context.newPage();await page.goto('https://quota.test/');await setup(page,null);pages.push(page);}
   return {context,pages};
@@ -820,6 +820,72 @@ test('request deadlines, cooldown, late responses and reinjection keep existing 
   }finally{await close(page);}
 });
 
+test('network diagnosis accepts only current responses, redacts endpoints and clears with session or reinjection',async()=>{
+  const page=await pageFor();try{
+    await open(page);
+    const network={NetworkMode:'proxy',ProxySource:'explicit',ProxyEndpoint:'http://private-user:private-pass@proxy.test:8080/private-path?secret=yes#fragment',LastRequestError:null,NetworkCheckedAt:'2026-10-22T01:02:03.0000000Z'};
+    await update(page,{...officialPayload(),network});
+    const clean={...network,ProxyEndpoint:'http://proxy.test:8080',NetworkCheckedAt:'2026-10-22T01:02:03.000Z'};
+    assert.deepEqual(await page.evaluate(()=>__codexQuotaNetworkDiagnosis),clean);
+    await page.locator('.cq-refresh').click();
+    const requestId=await page.evaluate(()=>__codexQuotaOfficialRequestId);
+    await page.evaluate(network=>__codexQuotaUpdateOfficial({errorCode:'DNS_FAILED',network},'stale-request'),{...network,NetworkCheckedAt:'2026-10-22T03:02:03Z'});
+    assert.deepEqual(await page.evaluate(()=>__codexQuotaNetworkDiagnosis),clean,'late metadata must not overwrite the current request');
+    await update(page,{errorCode:'PROXY_CONNECTION_FAILED',network:{...network,LastRequestError:'PROXY_CONNECTION_FAILED',NetworkCheckedAt:'2026-10-22T02:02:03+00:00'}});
+    assert.deepEqual((await page.locator('.cq-value-digits').allTextContents()).sort(),['28','63'],'network failure retains last successful quota');
+    assert.equal(await page.evaluate(()=>__codexQuotaNetworkDiagnosis.LastRequestError),'PROXY_CONNECTION_FAILED');
+    await page.locator('.cq-settings-button').click();
+    await page.evaluate(()=>__codexQuotaUpdateDiagnosis({...__codexQuotaNetworkDiagnosis,CardVisible:true}));
+    const diagnosis=await page.locator('#cq-diagnosis').innerText();
+    assert.match(diagnosis,/网络模式: 指定代理/);assert.match(diagnosis,/代理来源: 用户设置/);assert.match(diagnosis,/无法连接代理/);assert.match(diagnosis,/http:\/\/proxy.test:8080/);assert.doesNotMatch(diagnosis,/private-|secret|fragment/);
+    await page.evaluate(()=>__codexQuotaResetSession());
+    assert.equal(await page.evaluate(()=>globalThis.__codexQuotaNetworkDiagnosis),undefined);
+    await page.evaluate(({network,requestId})=>__codexQuotaUpdateOfficial({errorCode:'DNS_FAILED',network},requestId),{network,requestId});
+    assert.equal(await page.evaluate(()=>globalThis.__codexQuotaNetworkDiagnosis),undefined,'old-session response cannot restore diagnosis');
+    await update(page,{...officialPayload(),network});
+    await page.evaluate(source);
+    assert.equal(await page.evaluate(()=>globalThis.__codexQuotaNetworkDiagnosis),undefined,'reinjection does not revive cached account metadata');
+    await update(page,officialPayload());
+    assert.equal(await page.evaluate(()=>globalThis.__codexQuotaNetworkDiagnosis),undefined,'legacy payload remains supported');
+  }finally{await close(page);}
+});
+
+test('network metadata validates enums, UTC time and proxy protocol without leaking unsupported fields',async()=>{
+  const page=await pageFor();try{
+    const network={NetworkMode:'proxy',ProxySource:'explicit',ProxyEndpoint:'http://[::1]:7897',LastRequestError:null,NetworkCheckedAt:'2026-10-22T01:02:03Z'};
+    await update(page,{...officialPayload(),network});
+    assert.equal(await page.evaluate(()=>__codexQuotaNetworkDiagnosis.ProxyEndpoint),'http://[::1]:7897');
+    for(const change of [{ProxySource:'private-value'},{ProxySource:['explicit']},{ProxySource:'__proto__'},{NetworkMode:'direct'},{LastRequestError:'private-error'},{LastRequestError:['DNS_FAILED']},{NetworkCheckedAt:'2026-02-30T01:02:03Z'},{NetworkCheckedAt:'2026-10-22T01:02:03+08:00'},{ProxyEndpoint:'https://proxy.test:8080'},{ProxyEndpoint:['http://proxy.test:8080']},{ProxyEndpoint:'not-a-url'}]){
+      await update(page,{...officialPayload(),network:{...network,...change}});
+      assert.equal(await page.evaluate(()=>globalThis.__codexQuotaNetworkDiagnosis),null,JSON.stringify(change));
+    }
+    await update(page,{...officialPayload(),network:{...network,NetworkMode:'system',ProxySource:'default',ProxyEndpoint:'private-system-address'}});
+    assert.equal(await page.evaluate(()=>__codexQuotaNetworkDiagnosis.ProxyEndpoint),null);
+    await open(page);await page.locator('.cq-settings-button').click();
+    for(const [mode,errorCode,message] of [['proxy','NETWORK_CONFIG_INVALID','网络配置无效'],['unknown','AUTH_REQUIRED','请重新登录']]){
+      await update(page,{errorCode,network:{...network,NetworkMode:mode,ProxyEndpoint:null,LastRequestError:errorCode}});
+      assert.equal(await page.evaluate(()=>__codexQuotaNetworkDiagnosis.NetworkMode),mode);
+      assert.equal(await page.evaluate(()=>__codexQuotaNetworkDiagnosis.ProxyEndpoint),null);
+      await page.evaluate(()=>__codexQuotaUpdateDiagnosis({...__codexQuotaNetworkDiagnosis,CardVisible:true}));
+      const diagnosis=await page.locator('#cq-diagnosis').innerText();
+      assert.match(diagnosis,new RegExp(`最近请求错误: ${message}`));assert.match(diagnosis,/代理地址: 未记录/);
+    }
+  }finally{await close(page);}
+});
+
+test('specific network errors keep successful quota and the existing fixed-height status presentation',async()=>{
+  const page=await pageFor();try{
+    await open(page);const height=(await geometry(page)).popup.height;
+    const reasons={NETWORK_CONFIG_INVALID:'网络配置无效',NETWORK_CONFIG_UNREADABLE:'无法读取网络配置',PROXY_CONNECTION_FAILED:'无法连接代理',PROXY_AUTH_REQUIRED:'代理要求身份验证',CONNECTION_FAILED:'无法连接额度服务',DNS_FAILED:'域名解析失败',TLS_FAILED:'安全连接失败',ACCESS_DENIED:'额度服务拒绝访问',NETWORK_ERROR:'网络请求失败',INVALID_RESPONSE:'额度响应无效'};
+    for(const [errorCode,reason] of Object.entries(reasons)){
+      await update(page,{errorCode});
+      assert.match(await page.locator('.cq-refresh').getAttribute('aria-label'),new RegExp(`更新失败.*${reason}.*上次成功`));
+      assert.deepEqual((await page.locator('.cq-value-digits').allTextContents()).sort(),['28','63']);
+      assert.equal((await geometry(page)).popup.height,height,'error details do not add a visible status row');
+    }
+  }finally{await close(page);}
+});
+
 test('long official cooldowns keep the server deadline without overflowing browser timers',async()=>{
   const page=await pageFor();try{
     const scheduled=await page.evaluate(()=>{
@@ -1036,77 +1102,271 @@ test('synthetic desktop and narrow captures for visual review',async()=>{
   }
 });
 
+const alertPayload = (used=85,reset=1900000000) => ({planName:'pro',windows:[{label:'Weekly',usedPercent:used,resetAt:reset}]});
+const inlineAlert = '#codex-quota-trigger[data-cq-alert]';
+async function showLowQuotaAlert(page,used=85){
+  await update(page,alertPayload(used));
+  await page.waitForFunction(()=>document.querySelector('#codex-quota-trigger')?.dataset.cqAlert==='low');
+}
+async function expireInlineAlert(page){
+  await page.evaluate(()=>document.activeElement?.blur());await page.mouse.move(500,5);
+  await page.clock.runFor(6500);
+  assert.equal(await page.locator(inlineAlert).count(),0);
+}
+async function inlineGeometry(page){return page.evaluate(()=>{
+  const rect=el=>{const r=el.getBoundingClientRect();return {left:r.left,right:r.right,top:r.top,bottom:r.bottom,width:r.width,height:r.height};};
+  const trigger=document.getElementById('codex-quota-trigger');
+  return {trigger:rect(trigger),badge:rect(trigger.querySelector('.cq-trigger-plan')),arrow:rect(trigger.querySelector('.cq-trigger-chevron')),
+    label:rect(trigger.querySelector('.cq-inline-label')),value:rect(trigger.querySelector('.cq-inline-value')),
+    overflow:document.documentElement.scrollWidth>innerWidth};
+});}
+
+test('inline alert expires after six visible seconds and pauses for hover, keyboard focus and a hidden document',async()=>{
+  for(const pause of ['hover','focus','hidden']){
+    const {context,pages:[page]}=await sharedPages();try{
+      await page.clock.install();await page.clock.pauseAt(new Date());
+      await showLowQuotaAlert(page);
+      assert.equal(await page.locator('#cq-notice').count(),0,'the alert must never create an independent popup');
+      assert.equal(await page.locator('#cq-inline-announcement[role=status]').count(),1);
+      assert.equal(await page.locator('#codex-quota-trigger').evaluate(el=>el.contains(document.activeElement)),false,'automatic alert must not steal focus');
+      await page.clock.runFor(3000);
+      if(pause==='hover')await page.locator('#codex-quota-trigger').hover();
+      else if(pause==='focus')await page.locator('#codex-quota-trigger').focus();
+      else await page.evaluate(()=>{Object.defineProperty(document,'hidden',{configurable:true,value:true});Object.defineProperty(document,'visibilityState',{configurable:true,value:'hidden'});document.dispatchEvent(new Event('visibilitychange'));});
+      await page.clock.runFor(12000);
+      assert.equal(await page.locator(inlineAlert).count(),1,`${pause} pauses the remaining lifetime`);
+      if(pause==='hover')await page.mouse.move(500,5);
+      else if(pause==='focus')await page.locator('#outside').focus();
+      else await page.evaluate(()=>{delete document.hidden;delete document.visibilityState;document.dispatchEvent(new Event('visibilitychange'));});
+      await page.clock.runFor(2800);assert.equal(await page.locator(inlineAlert).count(),1);
+      await page.clock.runFor(300);assert.equal(await page.locator(inlineAlert).count(),0,`${pause} resumes the remaining lifetime rather than a new six seconds`);
+    }finally{await context.close();}
+  }
+});
+
+test('inline alert keeps live values, retains last success on failure and disposes timers on reset or reinjection',async()=>{
+  const {context,pages:[page]}=await sharedPages();try{
+    await page.clock.install();await page.clock.pauseAt(new Date());
+    await showLowQuotaAlert(page);await page.clock.runFor(3000);
+    await update(page,alertPayload(86));
+    assert.equal((await page.locator('.cq-inline-value').innerText()).replace(/\s/g,''),'14%');
+    await update(page,{errorCode:'REQUEST_TIMEOUT'});
+    assert.equal((await page.locator('.cq-inline-value').innerText()).replace(/\s/g,''),'14%','network failure cannot manufacture a new percentage');
+    await page.clock.runFor(3100);assert.equal(await page.locator(inlineAlert).count(),0,'same-threshold refresh does not extend a reminder');
+    await showLowQuotaAlert(page,95);
+    assert.equal((await page.locator('.cq-inline-value').innerText()).replace(/\s/g,''),'5%');
+    await page.clock.runFor(5900);assert.equal(await page.locator(inlineAlert).count(),1);
+    await page.clock.runFor(200);assert.equal(await page.locator(inlineAlert).count(),0);
+  }finally{await context.close();}
+  for(const interruption of ['reset','reinjection']){
+    const {context,pages:[page]}=await sharedPages();try{
+      await page.clock.install();await page.clock.pauseAt(new Date());await showLowQuotaAlert(page);
+      if(interruption==='reset')await page.evaluate(()=>__codexQuotaResetSession());else await page.evaluate(source);
+      assert.equal(await page.locator(inlineAlert).count(),0,`${interruption} removes the current alert`);
+      await page.clock.runFor(10000);assert.equal(await page.locator(inlineAlert).count(),0);
+      assert.equal(await page.locator('#codex-quota-trigger').count(),1);assert.equal(await page.locator('#cq-notice').count(),0);
+      assert.equal(await page.locator('#cq-inline-announcement').count(),1);
+    }finally{await context.close();}
+  }
+});
+
+test('inline alert remains an operable quota entry and pauses while detail or settings are open',async()=>{
+  const {context,pages:[page]}=await sharedPages();try{
+    await page.clock.install();await page.clock.pauseAt(new Date());await showLowQuotaAlert(page);
+    await page.clock.runFor(3000);
+    await page.locator('#codex-quota-trigger').evaluate(el=>el.click());await page.clock.runFor(100);
+    assert.equal(await page.locator('#codex-quota-popover').isVisible(),true);
+    await page.clock.runFor(8000);
+    await page.locator('.cq-settings-button').evaluate(el=>el.click());await page.clock.runFor(8000);
+    assert.equal(await page.locator('#cq-settings').isVisible(),true);
+    await page.locator('.cq-collapse-button').evaluate(el=>el.click());await page.clock.runFor(100);
+    await page.locator('#outside').focus();await page.mouse.move(500,5);
+    assert.equal(await page.locator(inlineAlert).count(),1,'closing details restores the pending reminder');
+    await page.clock.runFor(2700);assert.equal(await page.locator(inlineAlert).count(),1);
+    await page.clock.runFor(400);assert.equal(await page.locator(inlineAlert).count(),0);
+  }finally{await context.close();}
+});
+
+test('inline alert preserves Pro/Plus geometry and narrows to a rail warning without adding a popup',async()=>{
+  for(const plan of ['pro','plus']){
+    const {context,pages:[page]}=await sharedPages(1,{viewport:{width:320,height:480},deviceScaleFactor:1.25});try{
+      const payload=used=>({planName:plan,windows:plan==='pro'?[{label:'Weekly',usedPercent:used,resetAt:1900000000}]:[{label:'5h',usedPercent:28,resetAt:1899990000},{label:'Weekly',usedPercent:used,resetAt:1900000000}]});
+      await update(page,payload(42));await settle(page);
+      const before=await inlineGeometry(page);await update(page,payload(85));await settle(page);
+      await page.locator('#codex-quota-trigger').hover();const after=await inlineGeometry(page);
+      for(const key of ['trigger','badge','arrow'])assert.deepEqual(after[key],before[key],`${plan} ${key} stays fixed`);
+      assert.ok(after.label.right<=after.value.left,'label and percentage occupy separate columns');
+      assert.ok(after.value.right<=after.arrow.left,'percentage leaves room for the fixed chevron');assert.equal(after.overflow,false);
+      assert.equal(await page.locator('#cq-notice').count(),0);assert.equal(await page.locator('[popover]:popover-open').count(),0);
+      await page.locator('#collapse').click();await settle(page);
+      const trigger=page.locator('#codex-quota-trigger');assert.equal(await trigger.getAttribute('data-cq-collapsed'),'');
+      assert.equal(await page.locator('.cq-inline-alert').isVisible(),false,'rail warning stays within the gauge');
+      assert.match(await trigger.getAttribute('aria-label'),/15/);
+      const rail=await geometry(page);assert.ok(rail.trigger.left>=rail.rail.left&&rail.trigger.right<=rail.rail.right);assert.equal(rail.overflow,false);
+      await open(page);assert.equal(await page.locator('#codex-quota-popover').isVisible(),true);
+      assert.equal(await page.locator('#cq-notice').count(),0);
+    }finally{await context.close();}
+  }
+});
+
+test('inline alert queues quota windows sequentially and replaces stale values with the latest success',async()=>{
+  const {context,pages:[page]}=await sharedPages();try{
+    await page.clock.install();await page.clock.pauseAt(new Date());
+    await update(page,{planName:'plus',windows:[{label:'5h',usedPercent:85,resetAt:1899990000},{label:'Weekly',usedPercent:95,resetAt:1900000000}]});
+    await page.waitForFunction(()=>document.querySelector('#codex-quota-trigger')?.hasAttribute('data-cq-alert'));
+    assert.match(await page.locator('.cq-inline-label').innerText(),/5/);assert.equal((await page.locator('.cq-inline-value').innerText()).replace(/\s/g,''),'15%');
+    await page.clock.runFor(6100);
+    assert.match(await page.locator('.cq-inline-label').innerText(),/本周/);assert.equal((await page.locator('.cq-inline-value').innerText()).replace(/\s/g,''),'5%');
+    await page.clock.runFor(6100);assert.equal(await page.locator(inlineAlert).count(),0);
+  }finally{await context.close();}
+});
+
+test('inline alert motion remains composited and the entry is clickable during transition reversals',async()=>{
+  const {context,pages:[page]}=await sharedPages(1,{reducedMotion:'no-preference'});try{
+    await showLowQuotaAlert(page);
+    const motion=await page.locator('#codex-quota-trigger').evaluate(el=>el.getAnimations({subtree:true}).map(a=>a.effect.getKeyframes()));
+    assert.ok(motion.length>0,'motion-enabled inline alert must animate');
+    for(const frames of motion)for(const frame of frames)for(const key of ['height','width','left','top','filter','backdropFilter'])assert.equal(key in frame,false,`${key} must not be animated`);
+    await page.locator('#codex-quota-trigger').evaluate(el=>el.click());await page.waitForTimeout(60);
+    assert.equal(await page.locator('#codex-quota-popover').isVisible(),true);
+    await page.locator('.cq-collapse-button').evaluate(el=>el.click());await page.waitForTimeout(60);
+    await page.locator('.cq-collapse-button').evaluate(el=>el.click());await finishAnimations(page);
+    assert.equal(await page.locator('#codex-quota-popover').isVisible(),true,'reversal during close must reopen');
+    await page.keyboard.press('Escape');await finishAnimations(page);
+    assert.equal(await page.locator(inlineAlert).count(),1,'alert survives the interrupted detail animation');
+    assert.equal(await page.locator('#cq-notice').count(),0);assert.equal(await page.locator('#codex-quota-trigger').count(),1);
+  }finally{await context.close();}
+});
+
+test('inline alert hands its exact visible frame to shared opening and survives a quick reversal',async()=>{
+  for(const phase of ['stable','entering','leaving']){
+    const {context,pages:[page]}=await sharedPages(1,{reducedMotion:'no-preference'});try{
+      await showLowQuotaAlert(page);
+      if(phase!=='entering')await page.waitForFunction(()=>{
+        const trigger=document.getElementById('codex-quota-trigger');
+        return !trigger.getAnimations({subtree:true}).length&&Number(getComputedStyle(trigger.querySelector('.cq-inline-value')).opacity)>.999;
+      });
+      if(phase==='leaving')await page.waitForFunction(()=>document.querySelector('.cq-inline-surface').getAnimations().length>0,null,{timeout:8000});
+      const sample=await page.evaluate(async phase=>{
+        const trigger=document.getElementById('codex-quota-trigger');
+        if(phase!=='stable')for(const animation of trigger.getAnimations({subtree:true})){animation.pause();animation.currentTime=100;}
+        const pose=el=>{const r=el.getBoundingClientRect(),s=getComputedStyle(el),percent=getComputedStyle(el.querySelector('.cq-inline-percent'));const typography=style=>({family:style.fontFamily,size:style.fontSize,weight:style.fontWeight,numeric:style.fontVariantNumeric});return {x:r.x,y:r.y,width:r.width,height:r.height,opacity:Number(s.opacity),color:s.color,text:el.textContent.replace(/\s/g,''),type:typography(s),percentType:typography(percent)};};
+        const before=pose(trigger.querySelector('.cq-inline-value'));
+        const surfaceOpacity=Number(getComputedStyle(trigger.querySelector('.cq-inline-surface')).opacity);
+        trigger.click();await Promise.resolve();
+        const popup=document.getElementById('codex-quota-popover');
+        for(const animation of popup.getAnimations({subtree:true})){animation.pause();animation.currentTime=0;}
+        const handoff=popup.querySelector('.cq-inline-handoff');
+        return {before,after:handoff?pose(handoff.querySelector('.cq-inline-value')):null,surfaceOpacity,handoffCount:popup.querySelectorAll('.cq-inline-handoff').length,
+          used:Number(globalThis.__codexQuotaOfficialPayload.windows[0].usedPercent),ordinaryActorOpacity:Number(getComputedStyle(popup.querySelector('[data-cq-shared-key="weekly-digits"]')).opacity)};
+      },phase);
+      assert.equal(sample.handoffCount,1,`${phase} opening carries the visible reminder frame`);
+      assert.equal(sample.before.text,'15%');assert.equal(sample.after.text,'15%');assert.equal(sample.used,85,'remaining presentation must never overwrite official used quota');
+      for(const key of ['x','y','width','height'])assert.ok(Math.abs(sample.before[key]-sample.after[key])<1.5,`${phase} handoff preserves ${key}`);
+      assert.ok(Math.abs(sample.before.opacity-sample.after.opacity)<.015,`${phase} handoff preserves text opacity`);assert.equal(sample.before.color,sample.after.color);
+      assert.deepEqual(sample.after.type,sample.before.type,`${phase} handoff preserves numeric font longhands`);assert.deepEqual(sample.after.percentType,sample.before.percentType,`${phase} handoff preserves percent font longhands`);
+      assert.equal(sample.before.type.size,'14px');assert.equal(sample.before.percentType.size,'11px');assert.match(sample.before.type.family,/Noto Sans SC/);
+      assert.equal(sample.ordinaryActorOpacity,0,'the hidden used value must not flash over the remaining percentage on the opening frame');
+      if(phase!=='stable')assert.ok(sample.surfaceOpacity>0&&sample.surfaceOpacity<1,`${phase} interrupts an actual partial warning frame`);
+      if(phase==='stable'){
+        const dir=join(__dirname,'../.runtime-test/inline-production-20261023');mkdirSync(dir,{recursive:true});
+        const box=await page.locator('#codex-quota-popover').boundingBox(),clip={x:Math.max(0,box.x-12),y:Math.max(0,box.y-12),width:box.width+24,height:Math.min(720-Math.max(0,box.y-12),box.height+24)};
+        await page.screenshot({path:join(dir,'handoff-start.png'),clip});
+        await page.evaluate(()=>{for(const animation of document.getElementById('codex-quota-popover').getAnimations({subtree:true}))animation.currentTime=60;});
+        await page.screenshot({path:join(dir,'handoff-60ms.png'),clip});
+      }
+      await page.evaluate(()=>{
+        const popup=document.getElementById('codex-quota-popover');
+        for(const animation of popup.getAnimations({subtree:true}))animation.currentTime=100;
+        document.querySelector('.cq-collapse-button').click();
+      });
+      await finishAnimations(page);assert.equal(await page.locator('#codex-quota-popover').isVisible(),false);
+      assert.equal(await page.locator('.cq-inline-handoff,.cq-shared-layer').count(),0);await assertMotionClean(page);
+      await page.waitForFunction(()=>!document.getElementById('codex-quota-trigger').getAnimations({subtree:true}).length);
+      assert.equal(await page.evaluate(()=>__codexQuotaOfficialPayload.windows[0].usedPercent),85);
+      if(phase!=='leaving'){
+        assert.equal(await page.locator(inlineAlert).getAttribute('data-cq-alert'),'low');
+        assert.equal((await page.locator('.cq-inline-value').innerText()).replace(/\s/g,''),'15%');
+        await open(page);await finishAnimations(page);await assertMotionClean(page);
+        assert.equal(await page.locator('.cq-inline-handoff').count(),0,'completed opening disposes the frozen reminder');
+        assert.equal(await page.locator('.cq-quota-row[data-cq-window="Weekly"] .cq-value-digits').innerText(),'85');
+      }
+      assert.equal(await page.locator('#cq-notice').count(),0);
+    }finally{await context.close();}
+  }
+});
+
+test('inline alert typography, focus, themes and reduced motion match the approved entry',async()=>{
+  const dir=join(__dirname,'../.runtime-test/inline-production-20261023');mkdirSync(dir,{recursive:true});
+  for(const theme of ['light','dark','forced']){
+    const {context,pages:[page]}=await sharedPages(1,{viewport:{width:1024,height:720},deviceScaleFactor:1.25});try{
+      if(theme==='dark')await page.addStyleTag({content:':root{color-scheme:dark;--color-surface-elevated-secondary:#272a23;--color-text:#f1f3e8;--color-text-secondary:#c7cbbb;--color-border:#42473a}body{background:#1c1e1a}.sidebar-navigation,nav[data-app-navigation-rail]{background:#23251f}'});
+      if(theme==='forced')await page.emulateMedia({forcedColors:'active'});
+      await showLowQuotaAlert(page);await page.locator('#codex-quota-trigger').focus();
+      const style=await page.locator('#codex-quota-trigger').evaluate(el=>{const s=getComputedStyle(el),label=getComputedStyle(el.querySelector('.cq-inline-label')),value=getComputedStyle(el.querySelector('.cq-inline-value'));return {color:value.color,background:s.backgroundColor,focus:s.outlineStyle,animations:el.getAnimations({subtree:true}).length,labelSize:parseFloat(label.fontSize),valueSize:parseFloat(value.fontSize),font:label.fontFamily};});
+      assert.notEqual(style.color,style.background);assert.notEqual(style.focus,'none');assert.equal(style.animations,0);
+      assert.ok(style.valueSize>=style.labelSize,'number has stronger hierarchy than the label');assert.ok(style.labelSize>=11,'compact labels remain legible');
+      assert.equal(await page.locator('#cq-inline-announcement[role=status]').count(),1);assert.match(await page.locator('#cq-inline-announcement').textContent(),/15/);
+      assert.equal(await page.locator('#cq-notice').count(),0);
+      const g=await inlineGeometry(page);assert.ok(g.trigger.height<=32);assert.equal(g.overflow,false);
+      await page.screenshot({path:join(dir,`${theme}-entry.png`)});
+      if(theme!=='forced'){const x=Math.max(0,g.trigger.left-16),y=Math.max(0,g.trigger.top-16);await page.screenshot({path:join(dir,`${theme}-preview.png`),clip:{x,y,width:g.trigger.width+32,height:Math.min(720-y,g.trigger.height+32)}});}
+      await open(page);await page.screenshot({path:join(dir,`${theme}-expanded.png`)});
+    }finally{await context.close();}
+  }
+});
+
 test('simultaneous windows alert once per threshold and only confirm real replenishment', async () => {
-  const {context, pages} = await sharedPages(2);
+  const {context,pages}=await sharedPages(2);
   try {
-    const update = (page, used, reset = 1900000000) => page.evaluate(({used, reset}) => __codexQuotaUpdateOfficial({planName: 'pro', windows: [{label: 'Weekly', usedPercent: used, resetAt: reset}]}, globalThis.__codexQuotaOfficialRequestId), {used, reset});
-    await Promise.all(pages.map(page => update(page, 85)));
-    await pages[0].waitForTimeout(80);
-    assert.equal((await Promise.all(pages.map(page => page.locator('#cq-notice').count()))).reduce((a, b) => a + b), 1);
-    await Promise.all(pages.map(page => page.evaluate(() => document.getElementById('cq-notice')?.remove())));
-    await Promise.all(pages.map(page => update(page, 86)));
-    await pages[0].waitForTimeout(50);
-    assert.equal((await Promise.all(pages.map(page => page.locator('#cq-notice').count()))).reduce((a, b) => a + b), 0);
-    await update(pages[0], 95);
-    await pages[0].waitForTimeout(50);
-    assert.match(await pages[0].locator('#cq-notice').innerText(), /5%/);
-    await pages[0].evaluate(() => document.getElementById('cq-notice').remove());
-    await update(pages[0], 95, 1900600000);
-    await pages[0].waitForTimeout(50);
-    assert.doesNotMatch(await pages[0].locator('#cq-notice').innerText(), /replenished|已恢复/);
-    await update(pages[0], 5, 1901200000);
-    await pages[0].waitForTimeout(50);
-    assert.match(await pages[0].locator('#cq-notice').innerText(), /replenished|已恢复/);
+    for(const page of pages){await page.clock.install();await page.clock.pauseAt(new Date());}
+    await Promise.all(pages.map(page=>update(page,alertPayload(85))));await pages[0].waitForTimeout(80);
+    assert.equal((await Promise.all(pages.map(page=>page.locator(inlineAlert).count()))).reduce((a,b)=>a+b),1);
+    for(const page of pages)await expireInlineAlert(page);
+    await Promise.all(pages.map(page=>update(page,alertPayload(86))));await pages[0].waitForTimeout(50);
+    assert.equal((await Promise.all(pages.map(page=>page.locator(inlineAlert).count()))).reduce((a,b)=>a+b),0);
+    await showLowQuotaAlert(pages[0],95);assert.match(await pages[0].locator('#cq-inline-announcement').textContent(),/5%/);await expireInlineAlert(pages[0]);
+    await update(pages[0],alertPayload(95,1900600000));await pages[0].waitForTimeout(50);
+    assert.equal(await pages[0].locator(inlineAlert).getAttribute('data-cq-alert'),'low');await expireInlineAlert(pages[0]);
+    await update(pages[0],alertPayload(5,1901200000));await pages[0].waitForTimeout(50);
+    assert.equal(await pages[0].locator(inlineAlert).getAttribute('data-cq-alert'),'recovery');
+    assert.match(await pages[0].locator('#cq-inline-announcement').textContent(),/replenished|已恢复/);
   } finally { await context.close(); }
 });
 
 test('recovery alerts work independently and queued old-session alerts are discarded', async () => {
-  const {context, pages: [page]} = await sharedPages();
+  const {context,pages:[page]}=await sharedPages();
   try {
-    await open(page);
-    await page.locator('.cq-settings-button').click();
-    await page.locator('input[name=alerts]').uncheck();
-    await page.keyboard.press('Escape');
-    await page.evaluate(() => __codexQuotaUpdateOfficial({planName:'pro',windows:[{label:'Weekly',usedPercent:95,resetAt:1900000000}]}, globalThis.__codexQuotaOfficialRequestId));
-    await page.waitForTimeout(50);
-    assert.equal(await page.locator('#cq-notice').count(), 0);
-    await page.evaluate(() => __codexQuotaUpdateOfficial({planName:'pro',windows:[{label:'Weekly',usedPercent:5,resetAt:1900600000}]}, globalThis.__codexQuotaOfficialRequestId));
-    await page.waitForTimeout(50);
-    assert.match(await page.locator('#cq-notice').innerText(), /replenished|已恢复/);
-    await page.evaluate(() => {
-      document.getElementById('cq-notice').remove();
-      navigator.locks.request('codex-usage-card.alerts', () => new Promise(resolve => { globalThis.releaseQuotaLock = resolve; }));
-    });
-    await page.waitForFunction(() => typeof globalThis.releaseQuotaLock === 'function');
-    await page.evaluate(() => {
-      __codexQuotaUpdateOfficial({planName:'pro',windows:[{label:'Weekly',usedPercent:5,resetAt:1901200000}]}, globalThis.__codexQuotaOfficialRequestId);
-      __codexQuotaSessionScope = 'other-session';
-      __codexQuotaResetSession();
-      releaseQuotaLock();
-    });
-    await page.waitForTimeout(50);
-    assert.equal(await page.locator('#cq-notice').count(), 0);
-    assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem('codex-usage-card.alerts.v2')).records.Weekly.resetAt), 1900600000);
-  } finally { await context.close(); }
+    await open(page);await page.locator('.cq-settings-button').click();await page.locator('input[name=alerts]').uncheck();await page.keyboard.press('Escape');
+    await update(page,alertPayload(95));await page.waitForTimeout(50);assert.equal(await page.locator(inlineAlert).count(),0);
+    await update(page,alertPayload(5,1900600000));await page.waitForTimeout(50);
+    assert.equal(await page.locator(inlineAlert).getAttribute('data-cq-alert'),'recovery');
+    assert.match(await page.locator('#cq-inline-announcement').textContent(),/replenished|已恢复/);
+    await page.evaluate(()=>{navigator.locks.request('codex-usage-card.alerts',()=>new Promise(resolve=>{globalThis.releaseQuotaLock=resolve;}));});
+    await page.waitForFunction(()=>typeof globalThis.releaseQuotaLock==='function');
+    await page.evaluate(()=>{
+      __codexQuotaUpdateOfficial({planName:'pro',windows:[{label:'Weekly',usedPercent:5,resetAt:1901200000}]},globalThis.__codexQuotaOfficialRequestId);
+      __codexQuotaSessionScope='other-session';__codexQuotaResetSession();releaseQuotaLock();
+    });await page.waitForTimeout(50);
+    assert.equal(await page.locator(inlineAlert).count(),0);
+    assert.equal(await page.evaluate(()=>JSON.parse(localStorage.getItem('codex-usage-card.alerts.v2')).records.Weekly.resetAt),1900600000);
+  } finally {await context.close();}
 });
 
 test('queued alerts cannot survive a session reset or UI reinjection',async()=>{
   const {context,pages:[page]}=await sharedPages();try{
     for(const interruption of ['reset','reinjection']){
       await page.evaluate(()=>{
-        localStorage.removeItem('codex-usage-card.alerts.v2');document.getElementById('cq-notice')?.remove();delete globalThis.releaseQuotaLock;
+        localStorage.removeItem('codex-usage-card.alerts.v2');delete globalThis.releaseQuotaLock;
         void navigator.locks.request('codex-usage-card.alerts',()=>new Promise(resolve=>{globalThis.releaseQuotaLock=resolve;}));
-      });
-      await page.waitForFunction(()=>typeof releaseQuotaLock==='function');
-      await update(page,{planName:'pro',windows:[{label:'Weekly',usedPercent:95,resetAt:1900000000}]});
+      });await page.waitForFunction(()=>typeof releaseQuotaLock==='function');
+      await update(page,alertPayload(95));
       if(interruption==='reset'){
-        // Logout can reset the page before the helper supplies a new scope. A fast
-        // success must not make a queued result from the previous lifecycle valid.
-        await page.evaluate(()=>__codexQuotaResetSession());
-        await update(page,{planName:'pro',windows:[{label:'Weekly',usedPercent:42,resetAt:1900000000}]});
+        // Fast login must not validate a queued alert from the previous lifecycle.
+        await page.evaluate(()=>__codexQuotaResetSession());await update(page,alertPayload(42));
       }else await page.evaluate(source);
       await page.evaluate(()=>releaseQuotaLock());await page.waitForTimeout(80);
-      assert.equal(await page.locator('#cq-notice').count(),0,`${interruption} must discard the queued low-quota message`);
+      assert.equal(await page.locator(inlineAlert).count(),0,`${interruption} discards queued low-quota messages`);
       assert.deepEqual(await page.evaluate(()=>JSON.parse(localStorage.getItem('codex-usage-card.alerts.v2')||'{}').records?.Weekly?.sent||[]),[],'discarded results must not mark a threshold as delivered');
     }
   }finally{await context.close();}

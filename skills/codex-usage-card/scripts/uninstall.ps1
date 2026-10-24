@@ -42,12 +42,6 @@ if ($task) {
   }
 }
 
-$officialShortcutRestore = $null
-if (Test-Path -LiteralPath (Join-Path $InstallRoot 'official-shortcuts\state.json') -PathType Leaf) {
-  . (Join-Path $PSScriptRoot 'official_shortcuts.ps1')
-  $officialShortcutRestore = Restore-CodexOfficialShortcuts -InstallRoot $InstallRoot
-}
-
 if ($task) {
   Stop-ScheduledTask -TaskPath '\' -TaskName $TaskName
   Unregister-ScheduledTask -TaskPath '\' -TaskName $TaskName -Confirm:$false
@@ -75,6 +69,19 @@ foreach ($process in $matchingProcesses) {
   }
 }
 
+# Stop the repair monitor before restoring owned shortcut arguments.
+$officialShortcutRestore = $null
+$maintenanceModule = Join-Path $PSScriptRoot 'official_shortcuts.ps1'
+if (-not (Test-Path -LiteralPath $maintenanceModule -PathType Leaf)) {
+  $maintenanceModule = Join-Path $InstallRoot 'scripts\official_shortcuts.ps1'
+}
+if (-not (Test-Path -LiteralPath $maintenanceModule -PathType Leaf)) {
+  throw 'Official shortcut maintenance module is missing; installation files were retained. Restore the module and retry uninstall.'
+}
+. $maintenanceModule
+# The module checks for state while holding the lock, including a first repair still committing it.
+$officialShortcutRestore = Restore-CodexOfficialShortcuts -InstallRoot $InstallRoot
+
 if ($shortcutMatches) { Remove-Item -LiteralPath $ShortcutPath -Force }
 
 foreach ($fileName in @('CodexNativeQuotaPatch.cs', 'CodexNativeQuotaPatch.next.exe', 'native_patch.js')) {
@@ -87,9 +94,11 @@ if ((Test-Path -LiteralPath $installDirectory -PathType Container) -and
     @(Get-ChildItem -LiteralPath $installDirectory -Force).Count -eq 0) {
   Remove-Item -LiteralPath $installDirectory -Force
 }
-$doctorPath = Join-Path $InstallRoot 'scripts\doctor.ps1'
-if (Test-Path -LiteralPath $doctorPath -PathType Leaf) {
-  Remove-Item -LiteralPath $doctorPath -Force
+foreach ($scriptName in @('doctor.ps1', 'configure_network.ps1', 'official_shortcuts.ps1')) {
+  $scriptPath = Join-Path $InstallRoot ('scripts\' + $scriptName)
+  if (Test-Path -LiteralPath $scriptPath -PathType Leaf) {
+    Remove-Item -LiteralPath $scriptPath -Force
+  }
 }
 $scriptsDirectory = Join-Path $InstallRoot 'scripts'
 if ((Test-Path -LiteralPath $scriptsDirectory -PathType Container) -and

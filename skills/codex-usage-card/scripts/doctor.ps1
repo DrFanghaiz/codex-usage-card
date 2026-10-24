@@ -12,6 +12,43 @@ if ($env:OS -ne 'Windows_NT') {
 
 Add-Type -AssemblyName System.Net.Http
 
+$jsonReadOptions = @{}
+if ((Get-Command ConvertFrom-Json).Parameters.ContainsKey('DateKind')) {
+  $jsonReadOptions.DateKind = 'String'
+}
+
+function Select-NetworkDiagnosis($Current, $Candidate) {
+  $sources = @('default', 'explicit', 'legacy-process-https', 'legacy-user-https', 'legacy-process-http', 'legacy-user-http', 'legacy-file', 'legacy-default', 'unknown')
+  $errors = @('NETWORK_CONFIG_INVALID', 'NETWORK_CONFIG_UNREADABLE', 'PROXY_CONNECTION_FAILED', 'PROXY_AUTH_REQUIRED', 'CONNECTION_FAILED', 'DNS_FAILED', 'TLS_FAILED', 'ACCESS_DENIED', 'REQUEST_TIMEOUT', 'AUTH_REQUIRED', 'RATE_LIMITED', 'NETWORK_ERROR', 'INVALID_RESPONSE')
+  if ($null -eq $Candidate -or $Candidate.NetworkMode -isnot [string] -or @('system', 'proxy', 'unknown') -cnotcontains $Candidate.NetworkMode -or
+      $Candidate.ProxySource -isnot [string] -or $sources -cnotcontains $Candidate.ProxySource -or
+      ($null -ne $Candidate.LastRequestError -and ($Candidate.LastRequestError -isnot [string] -or $errors -cnotcontains $Candidate.LastRequestError)) -or
+      $Candidate.NetworkCheckedAt -isnot [string] -or
+      $Candidate.NetworkCheckedAt -cnotmatch '^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,7})?(?:Z|\+00:00)$') { return $Current }
+  $checkedAt = [DateTimeOffset]::MinValue
+  if (-not [DateTimeOffset]::TryParse($Candidate.NetworkCheckedAt, [Globalization.CultureInfo]::InvariantCulture,
+      [Globalization.DateTimeStyles]::None, [ref]$checkedAt)) { return $Current }
+  $endpoint = $null
+  if ($Candidate.NetworkMode -ceq 'proxy') {
+    if ($Candidate.PSObject.Properties.Name -cnotcontains 'ProxyEndpoint') { return $Current }
+    if ($null -ne $Candidate.ProxyEndpoint) {
+      $endpointUri = $null
+      if ($Candidate.ProxyEndpoint -isnot [string] -or
+          -not [Uri]::TryCreate($Candidate.ProxyEndpoint, [UriKind]::Absolute, [ref]$endpointUri) -or
+          $endpointUri.Scheme -cne 'http' -or [string]::IsNullOrEmpty($endpointUri.Host)) { return $Current }
+      $endpoint = '{0}://{1}:{2}' -f $endpointUri.Scheme, $endpointUri.Host, $endpointUri.Port
+    }
+  }
+  if ($Current.NetworkCheckedAt -and $checkedAt -le [DateTimeOffset]::Parse($Current.NetworkCheckedAt, [Globalization.CultureInfo]::InvariantCulture)) { return $Current }
+  [pscustomobject]@{
+    NetworkMode = $Candidate.NetworkMode
+    ProxySource = $Candidate.ProxySource
+    ProxyEndpoint = $endpoint
+    LastRequestError = $Candidate.LastRequestError
+    NetworkCheckedAt = $checkedAt.UtcDateTime.ToString('o', [Globalization.CultureInfo]::InvariantCulture)
+  }
+}
+
 function Test-StartupPromptWindow([int]$ProcessId) {
   if (-not ('CodexUsageCard.DoctorWindowProbe' -as [type])) {
     Add-Type -TypeDefinition @'
@@ -75,6 +112,7 @@ $cardKinds = @()
 $inspectionFailed = $false
 $taskInspectionFailed = $false
 $codexInspectionFailed = $false
+$networkDiagnosis = [pscustomobject]@{ NetworkMode = 'unknown'; ProxySource = 'unknown'; ProxyEndpoint = $null; LastRequestError = $null; NetworkCheckedAt = $null }
 
 try {
   $task = Get-ScheduledTask -TaskPath '\' -TaskName $TaskName -ErrorAction SilentlyContinue
@@ -239,6 +277,7 @@ if (-not $codexInspectionFailed -and -not $codexRunning) {
         $windowCount = $targets.Count
         $expression = @'
 (() => {
+  const result = (visible, kind) => ({visible, kind, network: globalThis.__codexQuotaNetworkDiagnosis || null});
   const trigger = document.getElementById('codex-quota-trigger');
   const triggerVisible = (element) => {
     if (!element.isConnected) return false;
@@ -279,19 +318,19 @@ if (-not $codexInspectionFailed -and -not $codexRunning) {
       trigger.getAttribute('data-cq-kind') === 'official' && triggerVisible(trigger)) {
     const popover = document.getElementById('codex-quota-popover');
     if (popover instanceof HTMLElement && popover.isConnected) {
-      return {visible: true, kind: 'Official'};
+      return result(true, 'Official');
     }
   }
-  if (trigger) return {visible: false, kind: null};
+  if (trigger) return result(false, null);
   const visible = (element) => element instanceof HTMLElement && !element.hidden && element.offsetParent !== null;
   const fallback = document.getElementById('codex-official-usage-host');
   if (visible(fallback) && fallback.querySelector('[data-cq-layout="thread-v2"], [data-cq-layout="thread-v2-fallback"], .cq-compact-fallback')) {
-    return {visible: true, kind: 'Official'};
+    return result(true, 'Official');
   }
   const compact = [...document.querySelectorAll('.codex-native-compact-usage')].find((card) =>
     visible(card) && card.querySelector('[data-cq-layout="thread-v2"]'));
   if (compact) {
-    return {visible: true, kind: 'Official'};
+    return result(true, 'Official');
   }
   const nativeCards = [...document.querySelectorAll('[role="status"]')].filter((card) =>
     visible(card) &&
@@ -300,8 +339,8 @@ if (-not $codexInspectionFailed -and -not $codexRunning) {
     ((card.classList.contains('border') && card.classList.contains('bg-token-main-surface-primary')) ||
       (card.classList.contains('ring-border') && card.classList.contains('bg-surface/80'))));
   return nativeCards.length === 1
-    ? {visible: true, kind: 'Official'}
-    : {visible: false, kind: null};
+    ? result(true, 'Official')
+    : result(false, null);
 })()
 '@
         foreach ($target in $targets) {
@@ -343,7 +382,7 @@ if (-not $codexInspectionFailed -and -not $codexRunning) {
                   }
                   $stream.Write($buffer, 0, $result.Count)
                 } while (-not $result.EndOfMessage)
-                $candidate = ConvertFrom-Json -InputObject ([Text.Encoding]::UTF8.GetString($stream.ToArray()))
+                $candidate = ConvertFrom-Json @jsonReadOptions -InputObject ([Text.Encoding]::UTF8.GetString($stream.ToArray()))
                 if ($candidate.id -eq $requestId) {
                   $message = $candidate
                 }
@@ -360,6 +399,7 @@ if (-not $codexInspectionFailed -and -not $codexRunning) {
               throw 'CDP diagnostic response is invalid.'
             }
             $inspectedWindowCount++
+            $networkDiagnosis = Select-NetworkDiagnosis $networkDiagnosis $value.network
             if ($value.visible) {
               $visibleCardCount++
               $cardKinds += [string]$value.kind
@@ -443,6 +483,11 @@ $activationState = if ($inspectionFailed) {
   MainPageFound = $mainPageFound
   CardVisible = $cardVisible
   CardKind = $cardKind
+  NetworkMode = $networkDiagnosis.NetworkMode
+  ProxySource = $networkDiagnosis.ProxySource
+  ProxyEndpoint = $networkDiagnosis.ProxyEndpoint
+  LastRequestError = $networkDiagnosis.LastRequestError
+  NetworkCheckedAt = $networkDiagnosis.NetworkCheckedAt
   WindowCount = $windowCount
   VisibleCardCount = $visibleCardCount
   UninspectedWindowCount = $uninspectedWindowCount
