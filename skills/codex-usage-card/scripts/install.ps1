@@ -32,7 +32,11 @@ $fileNames = @(
 
 $deploymentFiles = @($fileNames | ForEach-Object {
   @{ Source = (Join-Path $sourceDirectory $_); Relative = ('native-patch\' + $_) }
-}) + @(@{ Source = (Join-Path $PSScriptRoot 'doctor.ps1'); Relative = 'scripts\doctor.ps1' })
+}) + @(
+  @{ Source = (Join-Path $PSScriptRoot 'doctor.ps1'); Relative = 'scripts\doctor.ps1' }
+  @{ Source = (Join-Path $PSScriptRoot 'configure_network.ps1'); Relative = 'scripts\configure_network.ps1' }
+  @{ Source = (Join-Path $PSScriptRoot 'official_shortcuts.ps1'); Relative = 'scripts\official_shortcuts.ps1' }
+)
 foreach ($file in $deploymentFiles) {
   if (-not (Test-Path -LiteralPath $file.Source -PathType Leaf)) {
     throw ('Skill asset is missing: {0}' -f $file.Relative)
@@ -154,11 +158,22 @@ $processesStopped = $false
 $filesChanged = $false
 $shortcutCreated = $false
 $officialShortcutTransaction = $null
+$networkPath = Join-Path $installDirectory 'network-settings.json'
+$legacyProxyPath = Join-Path $installDirectory 'api-proxy.dat'
+$hadHelperBefore = Test-Path -LiteralPath $executable
+$freshNetwork = -not $hadHelperBefore -and -not $legacyTask
+$createdNetworkFiles = @{}
+$maintenanceMutex = $null
+$maintenanceLocked = $false
 try {
   if (-not $SkipTaskRegistration) {
     $processesStopped = $true
     if ($existingTask) { Stop-ScheduledTask -TaskPath '\' -TaskName $TaskName }
     & $stopExactProcesses $executable
+    $maintenanceMutex = [Threading.Mutex]::new($false, 'Local\CodexUsageCard.OfficialShortcuts')
+    try { $maintenanceLocked = $maintenanceMutex.WaitOne(30000) }
+    catch [Threading.AbandonedMutexException] { $maintenanceLocked = $true }
+    if (-not $maintenanceLocked) { throw 'Timed out waiting for official shortcut maintenance.' }
   }
   New-Item -ItemType Directory -Path $installDirectory -Force | Out-Null
   $filesChanged = $true
@@ -166,6 +181,23 @@ try {
     $installedPath = Join-Path $InstallRoot $file.Relative
     New-Item -ItemType Directory -Path (Split-Path -Parent $installedPath) -Force | Out-Null
     Copy-Item -LiteralPath $file.Source -Destination $installedPath -Force
+  }
+
+  if (-not (Test-Path -LiteralPath $networkPath)) {
+    $oldProxyPath = Join-Path $legacyInstallDirectory 'api-proxy.dat'
+    if (-not $hadHelperBefore -and $legacyTask -and -not (Test-Path -LiteralPath $legacyProxyPath) -and (Test-Path -LiteralPath $oldProxyPath -PathType Leaf)) {
+      # Keep the old precedence: the Helper migrates its own environment before this encrypted file.
+      [IO.File]::Copy($oldProxyPath, $legacyProxyPath, $false)
+      $createdNetworkFiles[$legacyProxyPath] = (Get-FileHash -LiteralPath $legacyProxyPath -Algorithm SHA256).Hash
+    }
+    if ($freshNetwork -and -not (Test-Path -LiteralPath $legacyProxyPath)) {
+      $temporaryNetwork = $networkPath + '.' + [Guid]::NewGuid().ToString('N') + '.tmp'
+      try {
+        [IO.File]::WriteAllText($temporaryNetwork, '{"version":1,"mode":"system","source":"default"}', [Text.UTF8Encoding]::new($false))
+        [IO.File]::Move($temporaryNetwork, $networkPath)
+        $createdNetworkFiles[$networkPath] = (Get-FileHash -LiteralPath $networkPath -Algorithm SHA256).Hash
+      } finally { if ([IO.File]::Exists($temporaryNetwork)) { [IO.File]::Delete($temporaryNetwork) } }
+    }
   }
 
   if ($SkipTaskRegistration) {
@@ -255,10 +287,7 @@ try {
 } catch {
   $installFailure = $_
   $officialShortcutRollbackFailure = $null
-  if ($officialShortcutTransaction) {
-    try { Undo-CodexOfficialShortcutInstall -Transaction $officialShortcutTransaction }
-    catch { $officialShortcutRollbackFailure = $_ }
-  }
+  $networkRollbackFailure = $null
   try {
     if ($shortcutCreated -and (Test-Path -LiteralPath $ShortcutPath)) {
       if (-not (& $shortcutMatches ($shortcutShell.CreateShortcut($ShortcutPath)))) {
@@ -276,6 +305,21 @@ try {
       }
       & $stopExactProcesses $executable
     }
+    # Prevent the new monitor from reapplying arguments while rollback restores them.
+    if ($officialShortcutTransaction) {
+      try { Undo-CodexOfficialShortcutInstall -Transaction $officialShortcutTransaction }
+      catch { $officialShortcutRollbackFailure = $_ }
+    }
+    try {
+      foreach ($createdPath in $createdNetworkFiles.Keys) {
+        if (Test-Path -LiteralPath $createdPath -PathType Leaf) {
+          if ((Get-FileHash -LiteralPath $createdPath -Algorithm SHA256).Hash -cne $createdNetworkFiles[$createdPath]) {
+            throw 'Network settings changed during installation; preserving them during rollback.'
+          }
+          Remove-Item -LiteralPath $createdPath -Force
+        }
+      }
+    } catch { $networkRollbackFailure = $_ }
     if ($filesChanged) {
       foreach ($file in $deploymentFiles) {
         $savedPath = Join-Path $backupDirectory $file.Relative
@@ -306,12 +350,18 @@ try {
       if ($legacyTask.State -eq 'Running') { Start-ScheduledTask -TaskPath '\' -TaskName $legacyTaskName }
     }
   } catch {
-    throw ('Installation failed: {0}. Rollback also failed: {1}. Official shortcut rollback: {2}. Backup retained at {3}' -f $installFailure, $_, $officialShortcutRollbackFailure, $backupDirectory)
+    throw ('Installation failed: {0}. Rollback also failed: {1}. Official shortcut rollback: {2}. Network rollback: {3}. Backup retained at {4}' -f $installFailure, $_, $officialShortcutRollbackFailure, $networkRollbackFailure, $backupDirectory)
   }
   if ($officialShortcutRollbackFailure) {
     throw ('Installation failed: {0}. Files and task restored, but official shortcut rollback failed: {1}. Backup: {2}' -f $installFailure, $officialShortcutRollbackFailure, $backupDirectory)
   }
+  if ($networkRollbackFailure) {
+    throw ('Installation failed: {0}. Files and task restored, but network settings were preserved: {1}. Backup: {2}' -f $installFailure, $networkRollbackFailure, $backupDirectory)
+  }
   throw ('Installation failed; previous files and task restored: {0}. Backup: {1}' -f $installFailure, $backupDirectory)
+} finally {
+  if ($maintenanceLocked) { $maintenanceMutex.ReleaseMutex() }
+  if ($maintenanceMutex) { $maintenanceMutex.Dispose() }
 }
 
 [pscustomobject]@{

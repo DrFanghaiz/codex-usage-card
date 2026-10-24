@@ -6,9 +6,9 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$releaseTag = 'v2.4.0'
+$releaseTag = 'v2.5.0'
 $archiveName = 'codex-usage-card.skill.zip'
-$expectedSha256 = '5BBEAC080E9088FF4C40B6A0678B5ADE98CF5FCFB925B1E6472A4DEA8F0FA703'
+$expectedSha256 = 'C0E4734DB629E3382D43B7433BE3B4899B64AE278A90E1A9588F32F3A96455A6'
 $archiveUrl = 'https://github.com/DrFanghaiz/codex-usage-card/releases/download/{0}/{1}' -f $releaseTag, $archiveName
 
 if ($env:OS -ne 'Windows_NT') {
@@ -39,6 +39,7 @@ $relativeFiles = @(
   'agents\openai.yaml',
   'scripts\install.ps1',
   'scripts\doctor.ps1',
+  'scripts\configure_network.ps1',
   'scripts\official_shortcuts.ps1',
   'scripts\uninstall.ps1',
   'assets\native-patch\CodexNativeQuotaPatch.cs',

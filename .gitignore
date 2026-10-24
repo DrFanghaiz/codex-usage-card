@@ -3,6 +3,7 @@ __pycache__/
 *.py[cod]
 native-patch/*.exe
 native-patch/api-proxy.dat
+native-patch/network-settings.json
 auth.json
 config.toml
 api-proxy.dat
@@ -16,3 +17,4 @@ findings.md
 progress.md
 node_modules/
 .runtime-test/
+official-shortcuts/

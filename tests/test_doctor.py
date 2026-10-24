@@ -1,9 +1,11 @@
 import unittest
 import base64
 import json
+import ipaddress
 import shutil
 import subprocess
 from pathlib import Path
+from urllib.parse import urlsplit
 from unittest.mock import MagicMock, patch
 
 from codex_quota.page_injector import card_present
@@ -55,6 +57,97 @@ ConvertTo-Json -Compress -InputObject $results
 
     def test_root_and_skill_doctors_are_exact_mirrors(self):
         self.assertEqual(ROOT_DOCTOR, SKILL_DOCTOR)
+
+    @unittest.skipUnless(shutil.which('powershell.exe') and shutil.which('pwsh'), 'Windows PowerShell and PowerShell 7 required')
+    def test_cdp_json_roundtrip_preserves_network_timestamp_in_both_powershell_versions(self):
+        start = ROOT_DOCTOR.index('$jsonReadOptions = ')
+        end = ROOT_DOCTOR.index('function Test-StartupPromptWindow', start)
+        selection = ROOT_DOCTOR[start:end]
+        decode = next(line.strip() for line in ROOT_DOCTOR.splitlines() if '$candidate = ConvertFrom-Json' in line)
+        network = dict(NetworkMode='system', ProxySource='legacy-default', ProxyEndpoint=None,
+                       LastRequestError=None, NetworkCheckedAt='2026-10-22T12:23:00.123Z')
+        frame = dict(id=1, result=dict(result=dict(value=dict(visible=True, kind='Official', network=network))))
+        encoded = base64.b64encode(json.dumps(frame).encode()).decode('ascii')
+        command = "$ErrorActionPreference = 'Stop'\n" + selection + '''
+$stream = [IO.MemoryStream]::new([Convert]::FromBase64String('__FRAME__'))
+try {
+  __DECODE__
+  $value = $candidate.result.result.value
+  $current = [pscustomobject]@{ NetworkMode='unknown'; ProxySource='unknown'; ProxyEndpoint=$null; LastRequestError=$null; NetworkCheckedAt=$null }
+  $diagnosis = Select-NetworkDiagnosis $current $value.network
+  [pscustomobject]@{ TimestampType=$value.network.NetworkCheckedAt.GetType().FullName; Network=$diagnosis } | ConvertTo-Json -Compress -Depth 4
+} finally { $stream.Dispose() }
+'''.replace('__FRAME__', encoded).replace('__DECODE__', decode)
+        for shell in ('powershell.exe', 'pwsh'):
+            with self.subTest(shell=shell):
+                result = subprocess.run([shell, '-NoProfile', '-Command', command],
+                                        capture_output=True, text=True, check=True, timeout=15)
+                value = json.loads(result.stdout)
+                self.assertEqual(value['TimestampType'], 'System.String')
+                self.assertEqual(value['Network']['NetworkMode'], 'system')
+                self.assertEqual(value['Network']['ProxySource'], 'legacy-default')
+                self.assertEqual(value['Network']['NetworkCheckedAt'], '2026-10-22T12:23:00.1230000Z')
+                self.assertIsNone(value['Network']['LastRequestError'])
+
+    @unittest.skipUnless(shutil.which('powershell.exe'), 'Windows PowerShell required')
+    def test_network_diagnosis_selects_latest_valid_window_and_redacts_proxy(self):
+        start = ROOT_DOCTOR.index('function Select-NetworkDiagnosis')
+        end = ROOT_DOCTOR.index('function Test-StartupPromptWindow', start)
+        select_network = ROOT_DOCTOR[start:end]
+        proxy = dict(NetworkMode='proxy', ProxySource='explicit',
+                     ProxyEndpoint='http://private-user:private-pass@proxy.test:8080/private-path?secret=yes#fragment',
+                     LastRequestError='PROXY_CONNECTION_FAILED', NetworkCheckedAt='2026-10-22T01:02:03Z')
+        system = dict(proxy, NetworkMode='system', ProxySource='default', ProxyEndpoint='private-address',
+                      LastRequestError=None, NetworkCheckedAt='2026-10-22T02:02:03.0000000+00:00')
+        invalid = [dict(proxy, **change) for change in (
+            {'NetworkMode': 'arbitrary'}, {'ProxySource': 'private-source'}, {'ProxySource': ['explicit']},
+            {'LastRequestError': 'private-error'}, {'NetworkCheckedAt': '2026-02-30T01:02:03Z'},
+            {'NetworkCheckedAt': '2026-10-22T04:02:03+08:00'}, {'ProxyEndpoint': 'https://proxy.test:8080'},
+            {'ProxyEndpoint': 'not-a-url'},
+        )]
+        invalid.append({key: value for key, value in proxy.items() if key != 'ProxyEndpoint'})
+        cases = [[proxy], [proxy, system], [system, proxy], [proxy, *invalid], invalid,
+                 [dict(proxy, ProxyEndpoint='http://[::1]:7897')],
+                 [dict(proxy, ProxyEndpoint='http://proxy.test')],
+                 [dict(proxy, ProxyEndpoint=None, LastRequestError='NETWORK_CONFIG_INVALID')],
+                 [dict(proxy, NetworkMode='unknown', ProxyEndpoint=None, LastRequestError='AUTH_REQUIRED')]]
+        encoded = base64.b64encode(json.dumps(cases).encode()).decode('ascii')
+        command = "$ErrorActionPreference = 'Stop'\n" + select_network + '''
+$cases = ConvertFrom-Json ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('__CASES__')))
+$results = @(foreach ($case in $cases) {
+  $current = [pscustomobject]@{ NetworkMode='unknown'; ProxySource='unknown'; ProxyEndpoint=$null; LastRequestError=$null; NetworkCheckedAt=$null }
+  foreach ($candidate in $case) { $current = Select-NetworkDiagnosis $current $candidate }
+  $current
+})
+ConvertTo-Json -Compress -Depth 4 -InputObject $results
+'''.replace('__CASES__', encoded)
+        result = subprocess.run(['powershell.exe', '-NoProfile', '-Command', command],
+                                capture_output=True, text=True, check=True, timeout=15)
+        values = json.loads(result.stdout)
+        self.assertEqual(values[0]['ProxyEndpoint'], 'http://proxy.test:8080')
+        self.assertEqual(values[0]['LastRequestError'], 'PROXY_CONNECTION_FAILED')
+        self.assertEqual(values[1], values[2], 'window enumeration order must not replace a newer record')
+        self.assertEqual(values[1]['NetworkMode'], 'system')
+        self.assertIsNone(values[1]['ProxyEndpoint'])
+        self.assertIsNone(values[1]['LastRequestError'])
+        self.assertEqual(values[3], values[0], 'invalid records must not replace the latest verified record')
+        self.assertEqual(values[4]['NetworkMode'], 'unknown')
+        self.assertIsNone(values[4]['NetworkCheckedAt'])
+        ipv6 = urlsplit(values[5]['ProxyEndpoint'])
+        self.assertEqual(str(ipaddress.ip_address(ipv6.hostname)), '::1')
+        self.assertEqual(ipv6.port, 7897)
+        self.assertEqual(values[6]['ProxyEndpoint'], 'http://proxy.test:80')
+        self.assertEqual(values[7]['NetworkMode'], 'proxy')
+        self.assertIsNone(values[7]['ProxyEndpoint'])
+        self.assertEqual(values[7]['LastRequestError'], 'NETWORK_CONFIG_INVALID')
+        self.assertEqual(values[8]['NetworkMode'], 'unknown')
+        self.assertEqual(values[8]['LastRequestError'], 'AUTH_REQUIRED')
+        self.assertNotIn('private-', result.stdout)
+        self.assertNotIn('secret', result.stdout)
+        self.assertIn('globalThis.__codexQuotaNetworkDiagnosis', ROOT_DOCTOR)
+        self.assertIn('$networkDiagnosis = Select-NetworkDiagnosis $networkDiagnosis $value.network', ROOT_DOCTOR)
+        for field in proxy:
+            self.assertIn(f'{field} = $networkDiagnosis.{field}', ROOT_DOCTOR)
 
     @unittest.skipUnless(shutil.which('powershell.exe'), 'Windows PowerShell required')
     def test_startup_prompt_is_expected_but_other_helper_windows_are_errors(self):

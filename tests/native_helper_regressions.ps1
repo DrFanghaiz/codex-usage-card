@@ -51,6 +51,9 @@ $httpMethods = $source.Substring($start, $end - $start).Replace('FetchOfficialPa
 $start = $source.IndexOf('    private static bool NumberValue(')
 $end = $source.IndexOf('    private static void LaunchCodex()', $start)
 $httpMethods += $source.Substring($start, $end - $start)
+$start = $source.IndexOf('    private static IWebProxy QuotaProxy()')
+$end = $source.IndexOf('    private static bool NumberValue(', $start)
+$networkMethods = $source.Substring($start, $end - $start).Replace('QuotaProxy()', 'QuotaProxyReal()')
 if ($source -notmatch 'private const int IoDeadlineMilliseconds = 15000;') { throw 'Production I/O deadline changed; review test timing.' }
 $backoff = [regex]::Match($source, 'retrySeconds = Math\.Min\(retrySeconds \* 2, \d+\);').Value
 if (-not $backoff -or $source -notmatch 'if \(await sessions\.Ready\.Task\) retrySeconds = 1;') {
@@ -93,9 +96,10 @@ public static class NativeHelperRegressions
     private static DateTimeOffset CachedPayloadExpiresAt;
     private static int FetchCount;
     private static bool FetchLimited;
+    private static bool LoginMissing;
     private static string CurrentAccountId = "account-a";
     private static Action DuringFetch;
-    private static OfficialConfiguration LoadOfficialConfiguration() { return new OfficialConfiguration { AccountId = CurrentAccountId }; }
+    private static OfficialConfiguration LoadOfficialConfiguration() { return LoginMissing ? null : new OfficialConfiguration { AccountId = CurrentAccountId }; }
     private static Dictionary<string, object> FetchOfficialPayload(OfficialConfiguration ignored)
     {
         Interlocked.Increment(ref FetchCount);
@@ -144,6 +148,7 @@ __PUBLISH_METHODS__
         return new Dictionary<string, object> { { "result", new Dictionary<string, object> { { "value", socket.PageState } } } };
     }
     private static IWebProxy QuotaProxy() { return null; }
+__NETWORK_METHODS__
 __HTTP_METHODS__
     private static void CheckSlowBody()
     {
@@ -453,11 +458,19 @@ __HTTP_METHODS__
         }
         var now = new DateTimeOffset(2026, 9, 8, 0, 0, 0, TimeSpan.Zero);
         Check((string)HttpErrorPayload(401, null, now)["errorCode"] == "AUTH_REQUIRED", "401 must require login");
-        Check((string)HttpErrorPayload(403, null, now)["errorCode"] == "AUTH_REQUIRED", "403 must require login");
+        Check((string)HttpErrorPayload(403, null, now)["errorCode"] == "ACCESS_DENIED", "403 must not masquerade as expired login");
+        Check((string)HttpErrorPayload(407, null, now)["errorCode"] == "PROXY_AUTH_REQUIRED", "407 requires proxy credentials");
         Check((string)HttpErrorPayload(500, "30", now)["errorCode"] == "NETWORK_ERROR", "500 classification");
         Check((string)WebErrorPayload(new WebException("synthetic", WebExceptionStatus.Timeout))["errorCode"] == "REQUEST_TIMEOUT", "Transport timeout classification");
         Check((string)WebErrorPayload(new WebException("synthetic", WebExceptionStatus.RequestCanceled))["errorCode"] == "NETWORK_ERROR", "Unrelated cancellation is not a timeout");
-        Check((string)WebErrorPayload(new WebException("synthetic", WebExceptionStatus.ConnectFailure))["errorCode"] == "NETWORK_ERROR", "Connection failure is not a timeout");
+        Check((string)WebErrorPayload(new WebException("synthetic", WebExceptionStatus.ConnectFailure))["errorCode"] == "CONNECTION_FAILED", "Unknown system route cannot be blamed on a proxy");
+        CurrentNetworkDiagnosis = new Dictionary<string, object> { { "NetworkMode", "proxy" } };
+        Check((string)WebErrorPayload(new WebException("synthetic", WebExceptionStatus.ConnectFailure))["errorCode"] == "PROXY_CONNECTION_FAILED", "Explicit proxy connection failure");
+        CurrentNetworkDiagnosis = null;
+        Check((string)WebErrorPayload(new WebException("synthetic", WebExceptionStatus.ProxyNameResolutionFailure))["errorCode"] == "PROXY_CONNECTION_FAILED", "Proxy DNS failure");
+        Check((string)WebErrorPayload(new WebException("synthetic", WebExceptionStatus.NameResolutionFailure))["errorCode"] == "DNS_FAILED", "Target DNS failure");
+        Check((string)WebErrorPayload(new WebException("synthetic", WebExceptionStatus.TrustFailure))["errorCode"] == "TLS_FAILED", "Certificate validation failure");
+        Check((string)WebErrorPayload(new WebException("synthetic", WebExceptionStatus.SecureChannelFailure))["errorCode"] == "TLS_FAILED", "TLS negotiation failure");
         Check((int)HttpErrorPayload(429, "30", now)["retryAfterSeconds"] == 30, "Retry-After seconds");
         Check((int)HttpErrorPayload(429, now.AddSeconds(45).ToString("r"), now)["retryAfterSeconds"] == 45, "Retry-After date");
         Check((int)HttpErrorPayload(429, "0", now)["retryAfterSeconds"] == 1, "Retry-After zero must not spin");
@@ -500,6 +513,18 @@ __HTTP_METHODS__
         var safe = SanitizeDiagnosis(diagnosis);
         Check((string)safe["ActivationState"] == "Active" && (int)safe["HelperProcessCount"] == 1, "Doctor valid values preserved");
         Check(!Json.Serialize(safe).Contains("secret"), "Doctor must not expose arbitrary values");
+        diagnosis["NetworkMode"] = "proxy";
+        diagnosis["ProxySource"] = "explicit";
+        diagnosis["ProxyEndpoint"] = "http://127.0.0.1:7890";
+        diagnosis["LastRequestError"] = "PROXY_AUTH_REQUIRED";
+        diagnosis["NetworkCheckedAt"] = "2026-10-22T10:00:00.0000000Z";
+        safe = SanitizeDiagnosis(diagnosis);
+        Check((string)safe["ProxyEndpoint"] == "http://127.0.0.1:7890" && (string)safe["LastRequestError"] == "PROXY_AUTH_REQUIRED" &&
+            (string)safe["NetworkCheckedAt"] == "2026-10-22T10:00:00.0000000Z", "Network diagnosis safe fields survive");
+        diagnosis["ProxyEndpoint"] = "http://user:secret@127.0.0.1:7890";
+        diagnosis["LastRequestError"] = "secret";
+        diagnosis["NetworkCheckedAt"] = "secret";
+        Check(!Json.Serialize(SanitizeDiagnosis(diagnosis)).Contains("secret"), "Network diagnosis strips credentials and arbitrary errors");
         diagnosis["StartupPromptVisible"] = true;
         diagnosis["ActivationState"] = "AwaitingStartupDecision";
         diagnosis["StageCodes"] = new object[] { "STARTUP_CONFIRMATION_PENDING", "secret" };
@@ -575,6 +600,16 @@ __HTTP_METHODS__
         Check((string)SharedPayload(SessionScope, SessionGeneration)["errorCode"] == "RATE_LIMITED" && FetchCount == afterStaleLimit,
             "Same-account token rewrite during request must preserve Retry-After without another fetch");
         FetchLimited = false;
+        CachedPayload = null;
+        LoginMissing = true;
+        var unavailable = SharedPayload(SessionScope, SessionGeneration);
+        var network = (Dictionary<string, object>)unavailable["network"];
+        Check((string)unavailable["errorCode"] == "AUTH_REQUIRED" && (string)network["NetworkMode"] == "unknown" &&
+            (string)network["LastRequestError"] == "AUTH_REQUIRED" && ((string)network["NetworkCheckedAt"]).EndsWith("Z"),
+            "Missing login exposes safe attempt diagnostics without inventing a selected route");
+        var cachedNetwork = (Dictionary<string, object>)SharedPayload(SessionScope, SessionGeneration)["network"];
+        Check((string)cachedNetwork["NetworkCheckedAt"] == (string)network["NetworkCheckedAt"], "Cached responses preserve original network attempt time");
+        LoginMissing = false;
         CachedPayload = null;
         using (var pages = new PageSessions())
         {
@@ -653,7 +688,7 @@ __SHARED_PAYLOAD__
 __PAGE_SESSIONS__
 }
 '@
-$harness = $harness.Replace('__BACKOFF__', $backoff).Replace('__DISCOVERY__', $discovery).Replace('__WATCHER__', $watcher).Replace('__LOGIN_WAIT__', $loginWait).Replace('__CONFIG_ROOT__', $configRoot).Replace('__CONFIG_LOADERS__', $configLoaders).Replace('__LOGIN_SELECTOR__', $loginSelector).Replace('__PAYLOAD_METHODS__', $payloadMethods).Replace('__TARGET_EVENTS__', $targetEvents).Replace('__SHARED_PAYLOAD__', $sharedPayload).Replace('__PAGE_SESSIONS__', $pageSessions).Replace('__SEND_COMMAND__', $sendCommand).Replace('__PUBLISH_METHODS__', $publishMethods).Replace('__HTTP_METHODS__', $httpMethods)
-Add-Type -TypeDefinition $harness -ReferencedAssemblies System.dll, System.Core.dll, System.Web.Extensions.dll
+$harness = $harness.Replace('__BACKOFF__', $backoff).Replace('__DISCOVERY__', $discovery).Replace('__WATCHER__', $watcher).Replace('__LOGIN_WAIT__', $loginWait).Replace('__CONFIG_ROOT__', $configRoot).Replace('__CONFIG_LOADERS__', $configLoaders).Replace('__LOGIN_SELECTOR__', $loginSelector).Replace('__PAYLOAD_METHODS__', $payloadMethods).Replace('__TARGET_EVENTS__', $targetEvents).Replace('__SHARED_PAYLOAD__', $sharedPayload).Replace('__PAGE_SESSIONS__', $pageSessions).Replace('__SEND_COMMAND__', $sendCommand).Replace('__PUBLISH_METHODS__', $publishMethods).Replace('__HTTP_METHODS__', $httpMethods).Replace('__NETWORK_METHODS__', $networkMethods)
+Add-Type -TypeDefinition $harness -ReferencedAssemblies System.dll, System.Core.dll, System.Security.dll, System.Web.Extensions.dll
 [NativeHelperRegressions]::Run()
 'Native helper regressions: 24 groups passed, 0 failed (backoff, watcher cleanup, login rename boundaries, CODEX_HOME isolation and directory events, official-only login and obsolete API markers, 5 discovery cases, HTTP errors, console requests, diagnosis sanitization, invalid diagnosis, new window events, shared fetch/cache/cooldown, account change race and in-flight invalidation, strict quota number/window types, page session scheduling, console history replay, request IDs, bootstrap and reply correlation, CDP deadline, HTTP whole-body deadlines)'
