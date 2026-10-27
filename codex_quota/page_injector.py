@@ -264,7 +264,8 @@ def card_present(port: int, target: dict[str, Any] | None = None) -> bool:
                   }
                   if (right <= left || bottom <= top) return false;
                 }
-                return true;
+                // A positive subpixel sliver is not a visible quota entry.
+                return right - left >= 1 && bottom - top >= 1;
               };
               if (trigger && trigger instanceof HTMLButtonElement &&
                   trigger.getAttribute('aria-controls') === 'codex-quota-popover' &&

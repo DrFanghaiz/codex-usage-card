@@ -776,7 +776,7 @@
         --cq-warning: var(--color-text-warning-surface, #e2bb78);
       }
       #codex-quota-footer { flex: none; box-sizing: border-box; padding: 0 8px; }
-      #codex-quota-trigger { display: flex; align-items: center; gap: 6px; width: 100%; height: 30px; margin: 0; padding: 0 8px; border: 1px solid var(--cq-border); border-radius: var(--radius-sm, 6px); background: var(--cq-solid); box-shadow: 0 1px 3px #00000006; text-align: left; cursor: pointer; transition: background 110ms, border-color 110ms; }
+      #codex-quota-trigger { --cq-entry-border-width: 1px; display: flex; align-items: center; gap: 6px; width: 100%; height: 30px; margin: 0; padding: 0 8px; border: var(--cq-entry-border-width) solid var(--cq-border); border-radius: var(--radius-sm, 6px); background: var(--cq-solid); box-shadow: 0 1px 3px #00000006; text-align: left; cursor: pointer; transition: background 110ms, border-color 110ms; }
       #codex-quota-trigger:is(:hover,[aria-expanded="true"]) { background: color-mix(in srgb, var(--cq-solid) 94%, var(--cq-ink)); border-color: var(--color-border-strong, var(--cq-border)); }
       @supports (backdrop-filter: blur(1px)) { #codex-quota-trigger { background: color-mix(in srgb, var(--cq-solid) 82%, transparent); backdrop-filter: blur(18px); } }
       #codex-quota-trigger .cq-trigger-icon { display: none; }
@@ -1601,15 +1601,15 @@
   let quotaShell = null;
   let nativeSnapshot = null;
   const clipsOverflow = value => /^(hidden|clip|scroll|auto)$/.test(value);
-  const visible = (node) => {
-    if (!(node instanceof Element) || !node.isConnected || !node.getClientRects().length) return false;
+  const visibleRect = (node) => {
+    if (!(node instanceof Element) || !node.isConnected || !node.getClientRects().length) return null;
     const rect = node.getBoundingClientRect();
-    if (rect.width <= 0 || rect.height <= 0 || rect.right <= 0 || rect.bottom <= 0 || rect.left >= innerWidth || rect.top >= innerHeight) return false;
+    if (rect.width <= 0 || rect.height <= 0 || rect.right <= 0 || rect.bottom <= 0 || rect.left >= innerWidth || rect.top >= innerHeight) return null;
     let left = Math.max(0, rect.left), right = Math.min(innerWidth, rect.right);
     let top = Math.max(0, rect.top), bottom = Math.min(innerHeight, rect.bottom);
     for (let parent = node; parent; parent = parent.parentElement) {
       const style = getComputedStyle(parent);
-      if (parent.hidden || parent.inert || style.display === "none" || style.visibility !== "visible" || Number(style.opacity) === 0) return false;
+      if (parent.hidden || parent.inert || style.display === "none" || style.visibility !== "visible" || Number(style.opacity) === 0) return null;
       // The host can collapse by clipping a still full-width sidebar.
       if (parent !== node && style.display !== "contents" && (clipsOverflow(style.overflowX) || clipsOverflow(style.overflowY))) {
         const box = parent.getBoundingClientRect();
@@ -1623,10 +1623,29 @@
           const edge = box.top + parent.clientTop * scaleY;
           top = Math.max(top, edge); bottom = Math.min(bottom, edge + parent.clientHeight * scaleY);
         }
-        if (right <= left || bottom <= top) return false;
+        if (right - left < 1 || bottom - top < 1) return null;
       }
     }
-    return true;
+    return right - left >= 1 && bottom - top >= 1 ? {left, right, top, bottom, width: right - left, height: bottom - top} : null;
+  };
+  const visible = node => Boolean(visibleRect(node));
+  const columnEntrySpace = (column, minimumWidth) => {
+    const area = visibleRect(column);
+    if (!area) return null;
+    const rect = column.getBoundingClientRect(), style = getComputedStyle(column);
+    const footer = getComputedStyle(quotaShell.footer);
+    const scale = column.offsetWidth ? rect.width / column.offsetWidth : 1;
+    const trigger = quotaShell.trigger, entry = getComputedStyle(trigger);
+    const fixed = [...trigger.querySelectorAll(':scope > .cq-trigger-plan, :scope > .cq-trigger-chevron')].filter(node => !node.hidden);
+    const fixedWidth = fixed.reduce((width, node) => width + (parseFloat(getComputedStyle(node).width) || node.getBoundingClientRect().width / scale), 0);
+    // The badge and arrow cannot shrink with the central text, including while the rail hides them.
+    const minimumEntry = (fixedWidth + fixed.length * parseFloat(entry.columnGap) + parseFloat(entry.paddingLeft) + parseFloat(entry.paddingRight) + 2 * parseFloat(entry.getPropertyValue('--cq-entry-border-width'))) * scale;
+    const contentLeft = rect.left + (column.clientLeft + parseFloat(style.paddingLeft)) * scale;
+    const contentRight = rect.left + (column.clientLeft + column.clientWidth - parseFloat(style.paddingRight)) * scale;
+    const left = Math.max(contentLeft, area.left), right = Math.min(contentRight, area.right);
+    // A sliver cannot host an entry. Wider partial columns can use their actual visible space.
+    if (right - left - (parseFloat(footer.paddingLeft) + parseFloat(footer.paddingRight)) * scale < Math.max(minimumWidth, minimumEntry)) return null;
+    return {marginLeft: (left - contentLeft) / scale, marginRight: (contentRight - right) / scale};
   };
   const findAnchors = () => {
     const rail = [...document.querySelectorAll(railSelector)].find(visible);
@@ -1639,15 +1658,17 @@
     const avatar = [...profiles[0].querySelectorAll('img.rounded-full, span.rounded-full')].find(visible)
       || [...profiles[0].querySelectorAll('svg')].find(visible);
     if (!avatar) return null;
-    const column = [...document.querySelectorAll(columnSelector)].find(visible) || null;
-    return {rail, avatar, stack, column};
+    const minimumWidth = profiles[0].getBoundingClientRect().width;
+    let entrySpace = null;
+    const column = [...document.querySelectorAll(columnSelector)].find(node => (entrySpace = columnEntrySpace(node, minimumWidth))) || null;
+    return {rail, avatar, stack, column, entrySpace};
   };
   const positionPopover = () => {
     const popup = document.getElementById("codex-quota-popover");
     const trigger = document.getElementById("codex-quota-trigger");
     if (sharedPopover || paneMotion || !popup?.matches(":popover-open") || !visible(trigger)) { syncInlineAlert(); return; }
     const rect = trigger.getBoundingClientRect();
-    const column = anchors?.column && visible(anchors.column) ? anchors.column.getBoundingClientRect() : null;
+    const column = anchors?.column ? visibleRect(anchors.column) : null;
     const leftEdge = column ? Math.max(12, column.left + 8) : 12;
     const rightEdge = column ? Math.min(innerWidth - 12, column.right - 8) : innerWidth - 12;
     const width = Math.max(0, Math.min(272, column ? column.width - 16 : 272, rightEdge - leftEdge));
@@ -2154,11 +2175,13 @@
     return trigger;
   };
   const mountShell = () => {
-    anchors = findAnchors();
     const trigger = ensureShell();
+    anchors = findAnchors();
     const {footer, popup} = quotaShell;
     trigger.hidden = !anchors;
     footer.hidden = !anchors?.column;
+    footer.style.marginLeft = anchors?.column ? anchors.entrySpace.marginLeft + "px" : "";
+    footer.style.marginRight = anchors?.column ? anchors.entrySpace.marginRight + "px" : "";
     if (!anchors) { if (popup.matches(":popover-open")) popup.hidePopover(); syncInlineAlert(); return false; }
     const {column, avatar, rail, stack} = anchors;
     if (sharedPopover && sharedPopover.column !== column) finishSharedPopover();
@@ -2298,7 +2321,10 @@
     };
     const observeAnchors = () => {
       const current = new Set(anchors ? [anchors.rail, anchors.stack, anchors.avatar, anchors.column].filter(Boolean) : []);
-      for (const anchor of [anchors?.rail, anchors?.column]) {
+      const columns = [...document.querySelectorAll(columnSelector)];
+      // Hidden/narrow candidates must still wake layout when their own width animates open.
+      for (const column of columns) current.add(column);
+      for (const anchor of [anchors?.rail, ...columns]) {
         for (let node = anchor?.parentElement; node; node = node.parentElement) {
           const style = getComputedStyle(node);
           if (style.display !== "contents" && (clipsOverflow(style.overflowX) || clipsOverflow(style.overflowY))) current.add(node);

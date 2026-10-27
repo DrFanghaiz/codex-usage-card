@@ -9,7 +9,7 @@ Codex Usage Card 在 Codex 桌面端列表侧栏底部提供一行额度入口�
 在 PowerShell 7 中运行：
 
 ```powershell
-$installer = Join-Path $env:TEMP 'install-codex-usage-card.ps1'; Invoke-WebRequest 'https://raw.githubusercontent.com/DrFanghaiz/codex-usage-card/v2.5.0/install.ps1' -OutFile $installer; Unblock-File -LiteralPath $installer; & $installer
+$installer = Join-Path $env:TEMP 'install-codex-usage-card.ps1'; Invoke-WebRequest 'https://raw.githubusercontent.com/DrFanghaiz/codex-usage-card/v2.5.1/install.ps1' -OutFile $installer; Unblock-File -LiteralPath $installer; & $installer
 ```
 
 安装器会校验发布包的 SHA-256，把 Skill 安装到 `$CODEX_HOME\skills`（未设置时为 `$env:USERPROFILE\.codex\skills`），把无窗口修复器部署到 `$env:LOCALAPPDATA\CodexUsageCard`，并注册当前用户的计划任务 `Codex Usage Card`。从旧版升级时，只迁移路径与动作完全匹配的旧任务。安装完成后会输出 `ActivationState`、`StageCodes` 和 `CardVisible` 等只读验收结果；Codex 未运行时显示等待状态，不把已完成安装误报为失败。
@@ -22,6 +22,12 @@ python "$env:USERPROFILE\.codex\skills\.system\skill-installer\scripts\install-s
 
 安装后重新启动 Codex，使新 Skill 出现在可用 Skill 列表中。
 
+## v2.5.1 兼容性修复
+
+- 修复折叠后残留约 0.009px 可见宽度，导致额度入口留在被裁切列表栏的问题。按祖先裁切与视口的交集判断，并测量徽标、箭头、间距和宿主按钮所需空间；不足时移入头像上方图标栏。
+- 部分可见但空间足够的列表栏继续保留入口与头像对齐，入口及弹层在实际可见列宽内自适应收窄。持续观察隐藏或窄列，支持列表栏自身宽度动画恢复。
+- 同步自检与 Python 探针，排除亚像素假可见。覆盖 DPR 1–2、CSS 缩放 80%–200%、窄窗口和 Pro/Plus 极窄列；详见 [v2.5.1 验证记录](docs/releases/v2.5.1.md)。
+
 ## v2.5.0 更新
 
 - 低额度提醒改为入口原位红色提示，保留固定徽标/箭头和可打断动画；与展开详情连续交接，恢复提醒使用中性色。
@@ -30,7 +36,7 @@ python "$env:USERPROFILE\.codex\skills\.system\skill-installer\scripts\install-s
 
 ## 工作方式
 
-- 新版界面的初始数据和几何契约见 [`spec.md`](docs/quota-sidebar-v3/spec.md)，后续已确认的外观与动画以[当前设计方案](docs/codex-bar-proposal-20260926.html)为准；发布验证见 [v2.5.0 验证记录](docs/releases/v2.5.0.md)。官方模式沿用 Helper 校验后的真实额度窗口；原生单窗口数据仍可作为回退来源，未知窗口逐条呈现。
+- 新版界面的初始数据和几何契约见 [`spec.md`](docs/quota-sidebar-v3/spec.md)，后续已确认的外观与动画以[当前设计方案](docs/codex-bar-proposal-20260926.html)为准；发布验证见 [v2.5.1 验证记录](docs/releases/v2.5.1.md)。官方模式沿用 Helper 校验后的真实额度窗口；原生单窗口数据仍可作为回退来源，未知窗口逐条呈现。
 - 入口上沿按宿主头像实际矩形对齐，兼容宿主自身缩放；footer 在 `.sidebar-navigation` 中正常留位。弹层打开时按实测列表列宽取 `min(272px, 列宽 − 16px)`，不越出列表列，矮窗口可内部滚动。官方横线表示已用，高 2px，L2 方案填充至少 3px。浅色轨道 `#E2D8C4`、填充 `#8E4617`，额度数字字重 600；时间环为 10px/描边 2.75。深色填充结合宿主前景调亮，表面与文字优先使用宿主 token。
 - 折叠侧栏入口使用 20px 自绘仪表，1.33px 轮廓、三枚轻刻度与轴心，背景和图标色与宿主导航一致。指针显示官方剩余额度：左 0%、上 50%、右 100%；多窗口采用剩余最少者，悬停说明窗口。随现有刷新回包更新并平滑转动，不额外轮询；失败保留上次值，无数据隐藏指针。
 - 页面可见时使用唯一的自适应单次计时器：最近聚焦 5 分钟内每 2 分钟、聚焦后 5 分钟至 1 小时每 5 分钟、闲置 1–4 小时每 15 分钟、超过 4 小时每 30 分钟；若额度值刚发生变化则维持 5 分钟档。页面隐藏时立即停表，恢复可见或重新聚焦时按新鲜度补刷新。失败重试继续服从至少 60 秒及服务端 `Retry-After` 冷却，不监听键盘、不扫描进程或会话文件。

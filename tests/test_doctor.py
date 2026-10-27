@@ -387,6 +387,15 @@ cases.push(
   ['scaled border clips', ({ancestor, trigger}) => { clipBox(ancestor, 0, 0, 12, 100, 1.25, 1); clipBox(trigger, 14, 20, 3, 30); ancestor.style.overflowX = 'hidden'; }, false],
   ['nested clips intersect', ({ancestor}) => { clipBox(ancestor, 0, 0, 25, 100); ancestor.style.overflowX = 'hidden'; const outer = new HTMLElement(); clipBox(outer, 30, 0, 100, 100); outer.style.overflowX = 'hidden'; ancestor.parentElement = outer; }, false],
 );
+for (const extent of [0, .009, .5, .999, 1, 1.25]) for (const axis of ['x', 'y']) {
+  cases.push([`viewport ${axis} intersection ${extent}px`, ({trigger}) => {
+    clipBox(trigger, axis === 'x' ? -30 + extent : 10, axis === 'y' ? -30 + extent : 20, 30, 30);
+  }, extent >= 1]);
+  cases.push([`ancestor ${axis} intersection ${extent}px`, ({ancestor}) => {
+    clipBox(ancestor, 0, 0, axis === 'x' ? 10 + extent : 100, axis === 'y' ? 20 + extent : 100);
+    ancestor.style[axis === 'x' ? 'overflowX' : 'overflowY'] = 'hidden';
+  }, extent >= 1]);
+}
 for (const target of ['trigger', 'ancestor']) {
   for (const attribute of ['hidden', 'inert']) {
     cases.push([`${target} ${attribute}`, (state) => { state[target][attribute] = true; }, false]);
@@ -441,10 +450,10 @@ const {chromium} = require('playwright');
   const browser = await chromium.launch({headless: true, channel: 'msedge'});
   try {
     const page = await browser.newPage();
-    const check = async expected => {
+    const check = async (expected, target = page, context = '') => {
       for (const [name, expression] of Object.entries(probes)) {
-        const actual = await page.evaluate(expression);
-        assert.equal(name === 'doctor' ? actual.visible : actual, expected, name);
+        const actual = await target.evaluate(expression);
+        assert.equal(name === 'doctor' ? actual.visible : actual, expected, `${name}: ${context}`);
       }
     };
     for (const overflow of ['hidden', 'clip', 'auto', 'scroll']) for (const zoom of [1, 1.25]) {
@@ -460,6 +469,31 @@ const {chromium} = require('playwright');
     await page.locator('#column').evaluate(el => el.append(document.getElementById('codex-quota-trigger')));
     await page.locator('#clip').evaluate(el => el.style.display = 'contents');
     await check(true);
+    for (const dpr of [1, 1.25, 2]) {
+      const boundaryPage = await browser.newPage({deviceScaleFactor: dpr, viewport: {width: 800, height: 600}});
+      try {
+        for (const zoom of [1, 1.25, 2]) for (const clipping of ['viewport', 'ancestor']) {
+          await boundaryPage.setContent(`<style>body{margin:0;overflow:hidden}#clip{position:absolute;inset:0 auto auto 0;width:64px;height:64px;overflow:${clipping === 'ancestor' ? 'hidden' : 'visible'}}#position{position:absolute;left:0;top:0}#zoom{zoom:${zoom}}button{display:block;box-sizing:border-box;width:32px;height:32px;margin:0;padding:0;border:0}</style><div id="clip"><div id="position"><div id="zoom"><button id="codex-quota-trigger" data-cq-kind="official" aria-controls="codex-quota-popover">Quota</button></div></div></div><div id="codex-quota-popover" hidden></div>`);
+          for (const axis of ['x', 'y']) for (const extent of [0, .009, .5, .999, 1, 1.25]) {
+            const actualExtent = await boundaryPage.evaluate(({axis, extent, clipping}) => {
+              const position = document.getElementById('position');
+              position.style.transform = 'none';
+              const trigger = document.getElementById('codex-quota-trigger');
+              const origin = trigger.getBoundingClientRect(), clip = document.getElementById('clip').getBoundingClientRect();
+              const amount = clipping === 'ancestor' ? 64 - extent : extent - (axis === 'x' ? origin.width : origin.height);
+              position.style.transform = `translate(${axis === 'x' ? amount : 0}px,${axis === 'y' ? amount : 0}px)`;
+              const box = trigger.getBoundingClientRect();
+              return axis === 'x'
+                ? (clipping === 'ancestor' ? clip.right - box.left : box.right)
+                : (clipping === 'ancestor' ? clip.bottom - box.top : box.bottom);
+            }, {axis, extent, clipping});
+            const context = `${clipping} ${axis} extent=${extent} DPR=${dpr} zoom=${zoom}`;
+            assert.ok(Math.abs(actualExtent - extent) < .00001, `${context}: browser geometry does not exercise the intended boundary`);
+            await check(extent >= 1, boundaryPage, context);
+          }
+        }
+      } finally { await boundaryPage.close(); }
+    }
   } finally { await browser.close(); }
 })().catch(error => { console.error(error); process.exitCode = 1; });
 """], input=json.dumps(probes), text=True, capture_output=True, check=False, timeout=40)

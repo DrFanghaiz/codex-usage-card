@@ -134,7 +134,7 @@ test('alignment follows different avatar sizes, bottom gaps, column resize and s
       assert.ok(await page.locator('.cq-trigger-graphics').evaluate(el=>el.scrollWidth<=el.clientWidth),'graphical content must fit at host zoom');
     }
     await page.setViewportSize({width:320,height:180});await settle(page);
-    g=await geometry(page);assert.ok(Math.abs(g.trigger.top-g.avatar.top)<=1);assert.ok(g.popup.top>=12&&g.popup.bottom<=180);assert.ok(Math.abs(g.popup.bottom-g.trigger.bottom)<1);
+    g=await geometry(page);assert.ok(Math.abs(g.trigger.top-g.avatar.top)<=1);assert.ok(g.trigger.right<=320);assert.ok(g.popup.top>=12&&g.popup.bottom<=180);assert.ok(Math.abs(g.popup.bottom-g.trigger.bottom)<1);
     await page.locator('.cq-settings-button').click();assert.ok(await page.locator('#codex-quota-popover').evaluate(el=>el.scrollHeight>el.clientHeight));g=await geometry(page);assert.ok(g.popup.top>=12&&Math.abs(g.popup.bottom-g.trigger.bottom)<1);
   }finally{await close(page);}
 });
@@ -976,6 +976,135 @@ test('clipped host sidebar mounts the gauge on cold start and after animated cli
       }
       const scans=await page.evaluate(()=>layoutScans);await settle(page);
       assert.equal(await page.evaluate(()=>layoutScans),scans,'clipping observation must settle without a render loop');
+    }finally{await close(page);}
+  }
+});
+
+test('fractional clipped columns keep a clickable rail entry across DPR and CSS zoom',async()=>{
+  for(const dpr of [1,1.25,1.5,2])for(const zoom of [.8,1,1.25,1.5,2]){
+    const page=await browser.newPage({reducedMotion:'reduce',locale:'zh-CN',viewport:{width:1024,height:720},deviceScaleFactor:dpr});
+    page.errors=[];page.on('pageerror',e=>page.errors.push(e.message));
+    try{
+      await page.setContent(shell);
+      await page.evaluate(zoom=>{
+        const clip=document.createElement('div'),inner=document.createElement('div');
+        clip.id='fractional-clip';inner.id='fractional-inner';
+        clip.style.cssText=`display:flex;flex:none;overflow:hidden;width:51px;zoom:${zoom};height:${720/zoom}px`;
+        inner.style.cssText='display:flex;flex:none;width:289px;min-width:289px;height:100%';
+        inner.style.transform=`translateX(${-0.009/zoom}px)`;
+        document.body.prepend(clip);clip.append(inner);
+        inner.append(document.querySelector('[data-app-navigation-rail]'),document.querySelector('.sidebar-navigation'));
+      },zoom);
+      await setup(page);
+      const trigger=page.locator('#codex-quota-trigger'),identity=await trigger.elementHandle();
+      const verify=async rail=>{
+        assert.equal(await trigger.evaluate(el=>el.hasAttribute('data-cq-collapsed')),rail,`DPR ${dpr}, zoom ${zoom}`);
+        assert.equal(await identity.evaluate(el=>el.isConnected),true);
+        assert.equal(await trigger.count(),1);
+        assert.equal(await trigger.evaluate(el=>{const r=el.getBoundingClientRect();return el.contains(document.elementFromPoint(r.x+r.width/2,r.y+r.height/2))}),true);
+        assert.equal((await geometry(page)).overflow,false);
+      };
+      await verify(true);
+      for(const extent of [0,.009,.5,.999,1,4]){
+        const measured=await page.evaluate(({extent,zoom})=>{
+          document.getElementById('fractional-inner').style.transform=`translateX(${-extent/zoom}px)`;
+          const column=document.querySelector('.sidebar-navigation').getBoundingClientRect(),clip=document.getElementById('fractional-clip').getBoundingClientRect();
+          return clip.right-column.left;
+        },{extent,zoom});
+        assert.ok(Math.abs(measured-extent)<.0001,`fixture must retain ${extent}px, measured ${measured}`);
+        await settle(page);await verify(true);
+      }
+      await page.evaluate(()=>{document.getElementById('fractional-inner').style.transform='none';document.getElementById('fractional-clip').style.width='231px'});
+      await settle(page);await verify(false);
+      const clipped=await page.locator('#fractional-clip').boundingBox();
+      let partial=await geometry(page);assert.ok(partial.trigger.right<=clipped.x+clipped.width+.01);
+      await open(page);partial=await geometry(page);
+      assert.ok(partial.popup.left>=partial.column.left&&partial.popup.right<=clipped.x+clipped.width+.01,'popover must use the actually visible column');
+      await page.keyboard.press('Escape');await settle(page);
+      await page.evaluate(()=>document.getElementById('fractional-clip').style.width='289px');
+      await settle(page);await verify(false);
+      const g=await geometry(page);assert.ok(Math.abs(g.trigger.top-g.avatar.top)<1);
+      await open(page);const opened=await geometry(page);
+      assert.ok(opened.popup.left>=opened.column.left&&opened.popup.right<=opened.column.right+.01);
+      await page.keyboard.press('Escape');await settle(page);
+      await page.evaluate(async zoom=>{
+        const clip=document.getElementById('fractional-clip');
+        await clip.animate([{width:'289px'},{width:'51px'}],{duration:80,fill:'forwards'}).finished;
+        document.getElementById('fractional-inner').style.transform=`translateX(${-0.009/zoom}px)`;
+      },zoom);
+      await settle(page);await verify(true);
+      await page.setViewportSize({width:640,height:720});await settle(page);await verify(true);
+      const scans=await page.evaluate(()=>layoutScans);await settle(page);
+      assert.equal(await page.evaluate(()=>layoutScans),scans,'fractional geometry must settle without an observer loop');
+    }finally{await close(page);}
+  }
+});
+
+test('compact columns reserve the measured plan and arrow space for Pro and Plus',async()=>{
+  for(const plan of ['pro','plus'])for(const zoom of [.8,1,1.25,2]){
+    const page=await browser.newPage({reducedMotion:'reduce',locale:'zh-CN',viewport:{width:1024,height:720},deviceScaleFactor:1.25});
+    page.errors=[];page.on('pageerror',e=>page.errors.push(e.message));
+    try{
+      await page.setContent(shell);
+      await page.evaluate(zoom=>{
+        const clip=document.createElement('div'),inner=document.createElement('div');clip.id='compact-clip';
+        clip.style.cssText=`display:flex;flex:none;overflow:hidden;width:103px;zoom:${zoom};height:${720/zoom}px`;
+        inner.style.cssText='display:flex;flex:none;width:289px;height:100%';
+        document.body.prepend(clip);clip.append(inner);inner.append(document.querySelector('[data-app-navigation-rail]'),document.querySelector('.sidebar-navigation'));
+      },zoom);
+      const payload=used=>({planName:plan,windows:[...(plan==='plus'?[{label:'5h',usedPercent:28,resetAt:1900000000}]:[]),{label:'Weekly',usedPercent:used,resetAt:1900000000}]});
+      await setup(page,payload(42));
+      for(const used of [42,85]){
+        await update(page,payload(used));
+        for(const width of [52,60,80,92,96,180,238]){
+          await page.locator('#compact-clip').evaluate((el,width)=>el.style.width=(51+width)+'px',width);await settle(page);
+          const trigger=page.locator('#codex-quota-trigger'),collapsed=await trigger.evaluate(el=>el.hasAttribute('data-cq-collapsed'));
+          if(width<92)assert.equal(collapsed,true,`${plan} ${used}% width ${width}, zoom ${zoom}`);
+          if(width>=96)assert.equal(collapsed,false,`${plan} ${used}% width ${width}, zoom ${zoom}`);
+          const hit=collapsed?trigger:page.locator('.cq-trigger-chevron');
+          assert.equal(await hit.evaluate(el=>{const r=el.getBoundingClientRect(),target=document.elementFromPoint(r.x+r.width/2,r.y+r.height/2);return Boolean(target&&document.getElementById('codex-quota-trigger').contains(target))}),true,'fixed expand control must remain clickable');
+          const rect=await trigger.boundingBox(),clip=await page.locator('#compact-clip').boundingBox();
+          assert.ok(rect.x+rect.width<=clip.x+clip.width+.01);
+        }
+      }
+    }finally{await close(page);}
+  }
+});
+
+test('narrow columns remain observed while their own width animates open and closed',async()=>{
+  for(const zoom of [.8,1,1.25,2]){
+    const page=await browser.newPage({reducedMotion:'reduce',locale:'zh-CN',viewport:{width:1024,height:720},deviceScaleFactor:1.25});
+    page.errors=[];page.on('pageerror',e=>page.errors.push(e.message));
+    try{
+      await page.setContent(shell);
+      await page.evaluate(zoom=>{
+        const wrapper=document.createElement('div');wrapper.id='scaled-host';
+        wrapper.style.cssText=`display:flex;flex:none;zoom:${zoom};width:${1024/zoom}px;height:${720/zoom}px`;
+        document.body.prepend(wrapper);
+        wrapper.append(document.querySelector('[data-app-navigation-rail]'),document.querySelector('.sidebar-navigation'),document.querySelector('main'));
+        document.querySelector('.sidebar-navigation').style.width='.009px';
+      },zoom);
+      await setup(page);
+      const trigger=page.locator('#codex-quota-trigger');
+      const verify=async collapsed=>{
+        assert.equal(await trigger.evaluate(el=>el.hasAttribute('data-cq-collapsed')),collapsed,`zoom ${zoom}`);
+        assert.equal(await trigger.evaluate(el=>{const r=el.getBoundingClientRect();return el.contains(document.elementFromPoint(r.x+r.width/2,r.y+r.height/2))}),true);
+      };
+      await verify(true);
+      for(const width of [.5,.999,1,16,24]){
+        await page.locator('.sidebar-navigation').evaluate((el,width)=>el.style.width=width+'px',width);
+        await settle(page);await verify(true);
+      }
+      for(const width of [238,.009,238]){
+        await page.locator('.sidebar-navigation').evaluate(async(el,width)=>{
+          const before=el.getBoundingClientRect().width/(parseFloat(getComputedStyle(document.getElementById('scaled-host')).zoom)||1);
+          el.getAnimations().forEach(a=>a.cancel());
+          await el.animate([{width:before+'px'},{width:width+'px'}],{duration:80,fill:'forwards'}).finished;
+        },width);
+        await settle(page);await verify(width<1);
+      }
+      assert.equal(await trigger.count(),1);
+      const scans=await page.evaluate(()=>layoutScans);await settle(page);assert.equal(await page.evaluate(()=>layoutScans),scans);
     }finally{await close(page);}
   }
 });
