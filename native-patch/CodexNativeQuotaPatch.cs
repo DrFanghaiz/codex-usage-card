@@ -21,6 +21,7 @@ internal static class CodexNativeQuotaPatch
     private static string NativeScript;
     private static int NextCommandId;
     private const int IoDeadlineMilliseconds = 15000;
+    private const string ProductVersion = "2.6.0";
     private static volatile string SessionScope = Guid.NewGuid().ToString("N");
     private static string LoginFingerprint;
     private static int SessionGeneration;
@@ -68,6 +69,692 @@ internal static class CodexNativeQuotaPatch
                 MessageBox(IntPtr.Zero, "无法启动 Codex。请确认当前用户已安装 Codex，并可从原入口正常打开。", "Codex（额度卡）", 0x10);
             }
             Environment.ExitCode = 1;
+        }
+    }
+
+    private static void PublishRelease(CdpSocket socket, string requestId)
+    {
+        if (!ValidRequestId(requestId)) return;
+        var target = socket.Endpoint;
+        var scope = socket.Scope;
+        var generation = socket.Generation;
+        Task.Run(() => {
+            var payload = ReleaseUpdates.Check(AppDomain.CurrentDomain.BaseDirectory, DateTimeOffset.UtcNow, ReleaseUpdates.Fetch);
+            if (scope != SessionScope || generation != Volatile.Read(ref SessionGeneration)) return;
+            try
+            {
+                using (var reply = new CdpSocket(target))
+                {
+                    reply.Connect();
+                    Evaluate(reply, "if(globalThis.__codexQuotaSessionScope===" + Json.Serialize(scope) +
+                        " && typeof globalThis.__codexQuotaUpdateRelease==='function') globalThis.__codexQuotaUpdateRelease(" +
+                        Json.Serialize(payload) + "," + Json.Serialize(requestId) + ")");
+                }
+            }
+            catch { /* A page may close while the independent release check is running. */ }
+        });
+    }
+
+    private static class ReleaseUpdates
+    {
+        private const string ReleaseRoot = "https://github.com/DrFanghaiz/codex-usage-card/releases/tag/v";
+        private const string Endpoint = "https://api.github.com/repos/DrFanghaiz/codex-usage-card/releases/latest";
+        private const int MaximumResponse = 262144;
+        private static readonly object Gate = new object();
+
+        public static bool ValidVersion(string text)
+        {
+            Version version;
+            return text != null && text.Length <= 32 && Regex.IsMatch(text, @"\A(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\z") &&
+                Version.TryParse(text, out version) && version.Revision == -1;
+        }
+
+        private static DateTimeOffset? Stamp(object value, DateTimeOffset now)
+        {
+            DateTimeOffset stamp;
+            return value is string && DateTimeOffset.TryParseExact((string)value, "o", CultureInfo.InvariantCulture, DateTimeStyles.None, out stamp) &&
+                stamp <= now.AddMinutes(5) ? (DateTimeOffset?)stamp : null;
+        }
+
+        private static Dictionary<string, object> Empty()
+        {
+            return new Dictionary<string, object> { { "currentVersion", ProductVersion }, { "latestVersion", null }, { "releaseUrl", null },
+                { "lastSuccessAt", null }, { "lastAttemptAt", null }, { "errorCode", null } };
+        }
+
+        private static Dictionary<string, object> Load(string path, DateTimeOffset now)
+        {
+            var state = Empty();
+            if (!File.Exists(path)) return state;
+            if (new FileInfo(path).Length > MaximumResponse) return state;
+            Dictionary<string, object> saved;
+            try { saved = Json.DeserializeObject(File.ReadAllText(path, Encoding.UTF8)) as Dictionary<string, object>; }
+            catch (ArgumentException) { return state; }
+            catch (InvalidOperationException) { return state; }
+            if (saved == null) return state;
+            foreach (var key in new[] { "lastAttemptAt", "lastSuccessAt" })
+            {
+                object raw;
+                var stamp = saved.TryGetValue(key, out raw) ? Stamp(raw, now) : null;
+                if (stamp.HasValue) state[key] = stamp.Value.ToString("o", CultureInfo.InvariantCulture);
+            }
+            var version = StringValue(saved, "latestVersion");
+            if (state["lastSuccessAt"] != null && ValidVersion(version) && StringValue(saved, "releaseUrl") == ReleaseRoot + version)
+            {
+                state["latestVersion"] = version; state["releaseUrl"] = ReleaseRoot + version;
+            }
+            else state["lastSuccessAt"] = null;
+            if (StringValue(saved, "errorCode") == "UPDATE_CHECK_FAILED") state["errorCode"] = "UPDATE_CHECK_FAILED";
+            return state;
+        }
+
+        private static void Save(string path, Dictionary<string, object> state)
+        {
+            var temporary = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+            try
+            {
+                File.WriteAllText(temporary, Json.Serialize(state), new UTF8Encoding(false));
+                if (File.Exists(path)) File.Replace(temporary, path, null); else File.Move(temporary, path);
+            }
+            finally { if (File.Exists(temporary)) File.Delete(temporary); }
+        }
+
+        public static Dictionary<string, object> Parse(Dictionary<string, object> release)
+        {
+            object draft, prerelease;
+            var tag = release == null ? null : StringValue(release, "tag_name");
+            var version = tag != null && tag.StartsWith("v", StringComparison.Ordinal) ? tag.Substring(1) : null;
+            if (release == null || !release.TryGetValue("draft", out draft) || !(draft is bool) || (bool)draft ||
+                !release.TryGetValue("prerelease", out prerelease) || !(prerelease is bool) || (bool)prerelease ||
+                !ValidVersion(version) || StringValue(release, "html_url") != ReleaseRoot + version)
+                throw new InvalidDataException("Invalid stable release");
+            return new Dictionary<string, object> { { "latestVersion", version }, { "releaseUrl", ReleaseRoot + version } };
+        }
+
+        public static Dictionary<string, object> Fetch()
+        {
+            var request = (HttpWebRequest)WebRequest.Create(Endpoint);
+            request.Method = "GET"; request.AllowAutoRedirect = false;
+            request.Proxy = SettingsProxy(ReadNetworkSettings(), null);
+            request.Timeout = 10000; request.ReadWriteTimeout = 10000;
+            request.UserAgent = "CodexUsageCard/" + ProductVersion;
+            request.Accept = "application/vnd.github+json";
+            request.Headers["X-GitHub-Api-Version"] = "2022-11-28";
+            request.AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate;
+            using (var deadline = new CancellationTokenSource(IoDeadlineMilliseconds))
+            using (deadline.Token.Register(request.Abort))
+            using (var response = (HttpWebResponse)request.GetResponse())
+            using (var reader = new StreamReader(response.GetResponseStream(), Encoding.UTF8))
+            {
+                if (response.StatusCode != HttpStatusCode.OK) throw new InvalidDataException("Release request failed");
+                var buffer = new char[4096]; var text = new StringBuilder(); int count;
+                while ((count = reader.Read(buffer, 0, buffer.Length)) > 0)
+                {
+                    if (text.Length + count > MaximumResponse) throw new InvalidDataException("Release response too large");
+                    text.Append(buffer, 0, count);
+                }
+                return Json.DeserializeObject(text.ToString()) as Dictionary<string, object>;
+            }
+        }
+
+        public static Dictionary<string, object> Check(string root, DateTimeOffset now, Func<Dictionary<string, object>> fetch)
+        {
+            lock (Gate)
+            {
+                var path = Path.Combine(root, "release-state.json");
+                var state = Empty();
+                try
+                {
+                    state = Load(path, now);
+                    var attempt = Stamp(state["lastAttemptAt"], now);
+                    if (!attempt.HasValue || now >= attempt.Value.AddDays(1))
+                    {
+                        state["lastAttemptAt"] = now.ToString("o", CultureInfo.InvariantCulture);
+                        state["errorCode"] = "UPDATE_CHECK_FAILED";
+                        // Persist the attempt before HTTP so restarts and failures cannot bypass the daily limit.
+                        Save(path, state);
+                        var release = Parse(fetch());
+                        var successful = new Dictionary<string, object>(state);
+                        successful["latestVersion"] = release["latestVersion"]; successful["releaseUrl"] = release["releaseUrl"];
+                        successful["lastSuccessAt"] = now.ToString("o", CultureInfo.InvariantCulture); successful["errorCode"] = null;
+                        Save(path, successful); state = successful;
+                    }
+                }
+                catch (Exception error)
+                {
+                    if (!(error is WebException || error is IOException || error is UnauthorizedAccessException ||
+                        error is ArgumentException || error is FormatException || error is InvalidOperationException || error is CryptographicException ||
+                        error is System.Security.SecurityException || error is NetworkConfigurationException)) throw;
+                    state["errorCode"] = "UPDATE_CHECK_FAILED";
+                    if (state["lastAttemptAt"] == null) state["lastAttemptAt"] = now.ToString("o", CultureInfo.InvariantCulture);
+                }
+                state["nextCheckAt"] = (Stamp(state["lastAttemptAt"], now) ?? now).AddDays(1).ToString("o", CultureInfo.InvariantCulture);
+                return state;
+            }
+        }
+    }
+
+    private static void PublishLocalUsage(CdpSocket socket, string requestId)
+    {
+        if (!ValidRequestId(requestId)) return;
+        var response = Evaluate(socket, "globalThis.__codexQuotaLocalUsageRange ?? null");
+        var remote = response.ContainsKey("result") ? response["result"] as Dictionary<string, object> : null;
+        var range = remote != null && remote.ContainsKey("value") ? remote["value"] as Dictionary<string, object> : null;
+        var start = range == null ? null : StringValue(range, "start");
+        var end = range == null ? null : StringValue(range, "end");
+        var target = socket.Endpoint;
+        var scope = socket.Scope;
+        var generation = socket.Generation;
+        Task.Run(() => {
+            Dictionary<string, object> payload;
+            try { payload = LocalUsage.Read(ConfigurationRoot(), start, end); }
+            catch { payload = new Dictionary<string, object> { { "errorCode", "LOCAL_USAGE_UNAVAILABLE" } }; }
+            if (scope != SessionScope || generation != Volatile.Read(ref SessionGeneration)) return;
+            try
+            {
+                // The disk scan and its reply use a separate CDP connection, leaving official requests responsive.
+                using (var reply = new CdpSocket(target))
+                {
+                    reply.Connect();
+                    Evaluate(reply, "if(globalThis.__codexQuotaSessionScope===" + Json.Serialize(scope) +
+                        " && typeof globalThis.__codexQuotaUpdateLocalUsage==='function') globalThis.__codexQuotaUpdateLocalUsage(" +
+                        Json.Serialize(payload) + "," + Json.Serialize(requestId) + ")");
+                }
+            }
+            catch { /* The requesting page may have closed; no disk data or error detail leaves the helper. */ }
+        });
+    }
+
+    private static class LocalUsage
+    {
+        private sealed class Counts
+        {
+            public long Input, Cached, Written, Output;
+            public bool WriteKnown = true;
+            public long Total { get { return checked(Input + Output); } }
+            public static Counts Parse(object raw)
+            {
+                var value = raw as Dictionary<string, object>;
+                if (value == null) return null;
+                var result = new Counts();
+                if (!Counter(value, "input_tokens", out result.Input) || !Counter(value, "cached_input_tokens", out result.Cached) ||
+                    !Counter(value, "output_tokens", out result.Output) || result.Cached > result.Input ||
+                    result.Input > 9007199254740991L - result.Output) return null;
+                result.WriteKnown = value.ContainsKey("cache_write_input_tokens");
+                if (result.WriteKnown && (!Counter(value, "cache_write_input_tokens", out result.Written) || result.Written > result.Input - result.Cached)) return null;
+                return result;
+            }
+            private static bool Counter(Dictionary<string, object> value, string key, out long number)
+            {
+                number = 0;
+                object raw;
+                if (!value.TryGetValue(key, out raw) || !(raw is int || raw is long || raw is decimal || raw is double)) return false;
+                return Int64.TryParse(Convert.ToString(raw, CultureInfo.InvariantCulture), NumberStyles.None, CultureInfo.InvariantCulture, out number) &&
+                    number >= 0 && number <= 9007199254740991L;
+            }
+            public static string Fingerprint(object raw)
+            {
+                var data = raw as Dictionary<string, object>;
+                if (data == null) return null;
+                var builder = new StringBuilder();
+                foreach (var field in new[] { "input_tokens", "cached_input_tokens", "cache_write_input_tokens", "output_tokens", "reasoning_output_tokens", "total_tokens" })
+                {
+                    long count;
+                    if (!Counter(data, field, out count)) return null;
+                    builder.Append(count.ToString(CultureInfo.InvariantCulture)).Append('/');
+                }
+                var parsed = Parse(raw);
+                long reported, reasoning;
+                if (parsed == null || !Counter(data, "total_tokens", out reported) || reported != parsed.Total ||
+                    !Counter(data, "reasoning_output_tokens", out reasoning) || reasoning > parsed.Output) return null;
+                return builder.ToString();
+            }
+            public string Key { get { return Input + "/" + Cached + "/" + Output; } }
+        }
+        private sealed class Entry
+        {
+            public DateTime Day;
+            public string Model, Key;
+            public Counts Usage;
+            public bool HasBaseline;
+        }
+        private sealed class Snapshot
+        {
+            public string Session, Thread, Parent, Key, EventKey, Fingerprint;
+            public DateTimeOffset At;
+            public bool Startup, ConfirmedConsumption;
+        }
+        private sealed class Issue
+        {
+            public DateTime? Day;
+            public string Code, Key, Session, BaselineKey;
+            public DateTimeOffset At;
+            public long? Missing;
+            public bool Before, AffectsTotals = true, NeedsBaseline;
+            public int Line;
+        }
+        private sealed class Log
+        {
+            public long Offset;
+            public byte[] Anchor;
+            public DateTime Written, Created;
+            public string Model = "unknown", Provider, Session, Thread, Parent, FileKey;
+            public int HistoryStart;
+            public bool Subagent, SeenCounts, NewRequestSeen;
+            public DateTimeOffset? MetadataAt;
+            public Counts Previous;
+            public int Line;
+            public Issue Tail;
+            public readonly List<Entry> Entries = new List<Entry>();
+            public readonly List<Issue> Issues = new List<Issue>();
+            public readonly List<Snapshot> Snapshots = new List<Snapshot>();
+        }
+        private sealed class Bucket
+        {
+            private readonly SortedDictionary<string, Counts> models = new SortedDictionary<string, Counts>(StringComparer.Ordinal);
+            private readonly SortedDictionary<string, Dictionary<string, object>> issues = new SortedDictionary<string, Dictionary<string, object>>(StringComparer.Ordinal);
+            private int events;
+            private bool partial;
+            public void Add(Entry entry)
+            {
+                Counts sum;
+                if (!models.TryGetValue(entry.Model, out sum)) { sum = new Counts(); models[entry.Model] = sum; }
+                checked { sum.Input += entry.Usage.Input; sum.Cached += entry.Usage.Cached; sum.Written += entry.Usage.Written; sum.Output += entry.Usage.Output; }
+                sum.WriteKnown &= entry.Usage.WriteKnown;
+                events++;
+            }
+            public void Add(Issue issue)
+            {
+                Dictionary<string, object> row;
+                if (!issues.TryGetValue(issue.Code, out row))
+                {
+                    row = new Dictionary<string, object> { { "code", issue.Code }, { "count", 0 }, { "missingTokens", 0L },
+                        { "affectsTotals", issue.AffectsTotals }, { "dateUnknown", false } };
+                    issues.Add(issue.Code, row);
+                }
+                row["count"] = (int)row["count"] + 1;
+                if (!issue.Missing.HasValue || issue.Before || !issue.Day.HasValue) row["missingTokens"] = null;
+                else if (row["missingTokens"] != null) row["missingTokens"] = checked((long)row["missingTokens"] + issue.Missing.Value);
+                row["dateUnknown"] = (bool)row["dateUnknown"] || !issue.Day.HasValue || issue.Before;
+                partial |= issue.AffectsTotals;
+            }
+            public Dictionary<string, object> Payload()
+            {
+                var rows = new List<Dictionary<string, object>>();
+                long grandTotal = 0;
+                foreach (var model in models)
+                {
+                    var count = model.Value;
+                    checked { grandTotal += count.Total; }
+                    if (grandTotal > 9007199254740991L) throw new InvalidDataException("Usage exceeds safe numeric range");
+                    rows.Add(new Dictionary<string, object> { { "model", model.Key }, { "inputTokens", count.Input },
+                        { "cachedInputTokens", count.Cached }, { "cacheWriteInputTokens", count.Written }, { "cacheWriteKnown", count.WriteKnown },
+                        { "outputTokens", count.Output }, { "totalTokens", count.Total } });
+                }
+                return new Dictionary<string, object> { { "models", rows }, { "eventCount", events }, { "partial", partial },
+                    { "issues", new List<Dictionary<string, object>>(issues.Values) } };
+            }
+        }
+        private static Bucket DayBucket(SortedDictionary<DateTime, Bucket> days, DateTime date)
+        {
+            Bucket bucket;
+            if (!days.TryGetValue(date, out bucket)) { bucket = new Bucket(); days[date] = bucket; }
+            return bucket;
+        }
+        private static readonly object Gate = new object();
+        private static string Root;
+        private static readonly Dictionary<string, Log> Logs = new Dictionary<string, Log>(StringComparer.OrdinalIgnoreCase);
+        private static DateTime Date(string value)
+        {
+            DateTime result;
+            if (value == null || !Regex.IsMatch(value, @"\A\d{4}-\d{2}-\d{2}\z") ||
+                !DateTime.TryParseExact(value, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out result))
+                throw new ArgumentException("Invalid usage date");
+            return result;
+        }
+        public static Dictionary<string, object> Read(string root, string start, string end)
+        {
+            var first = Date(start);
+            var last = Date(end);
+            if (last < first || last > DateTime.Today || first.Year < 2022) throw new ArgumentException("Invalid usage range");
+            lock (Gate)
+            {
+                root = Path.GetFullPath(root);
+                if (!Directory.Exists(root)) throw new DirectoryNotFoundException();
+                if (!String.Equals(Root, root, StringComparison.OrdinalIgnoreCase)) { Logs.Clear(); Root = root; }
+                var present = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                var queryIssues = new List<Issue>();
+                foreach (var directory in new[] { "sessions", "archived_sessions" })
+                {
+                    var path = Path.Combine(root, directory);
+                    if (!Directory.Exists(path)) continue;
+                    try
+                    {
+                        foreach (var file in Directory.EnumerateFiles(path, "*.jsonl", SearchOption.AllDirectories))
+                        {
+                            present.Add(file);
+                            Log log;
+                            if (!Logs.TryGetValue(file, out log)) { log = new Log { FileKey = file }; Logs[file] = log; }
+                            try { Update(file, log); }
+                            catch (IOException) { queryIssues.Add(new Issue { Code = "FILE_UNREADABLE", Key = file }); }
+                            catch (UnauthorizedAccessException) { queryIssues.Add(new Issue { Code = "FILE_UNREADABLE", Key = file }); }
+                        }
+                    }
+                    catch (IOException) { queryIssues.Add(new Issue { Code = "FILE_UNREADABLE", Key = path }); }
+                    catch (UnauthorizedAccessException) { queryIssues.Add(new Issue { Code = "FILE_UNREADABLE", Key = path }); }
+                }
+                var removed = new List<string>();
+                foreach (var file in Logs.Keys) if (!present.Contains(file)) removed.Add(file);
+                foreach (var file in removed) Logs.Remove(file);
+                var selected = new Dictionary<string, Entry>();
+                var snapshots = new Dictionary<string, DateTimeOffset>();
+                var allSnapshots = new List<Snapshot>();
+                foreach (var file in present)
+                {
+                    Log log;
+                    if (!Logs.TryGetValue(file, out log)) continue;
+                    queryIssues.AddRange(log.Issues);
+                    allSnapshots.AddRange(log.Snapshots);
+                    foreach (var snapshot in log.Snapshots)
+                    {
+                        if (String.IsNullOrEmpty(snapshot.Session)) continue;
+                        var key = snapshot.Session + "/" + snapshot.Key;
+                        DateTimeOffset earliest;
+                        if (!snapshots.TryGetValue(key, out earliest) || snapshot.At < earliest) snapshots[key] = snapshot.At;
+                    }
+                    if (log.Tail != null) queryIssues.Add(log.Tail);
+                    foreach (var entry in log.Entries)
+                    {
+                        Entry existing;
+                        if (!selected.TryGetValue(entry.Key, out existing) || (!existing.HasBaseline && entry.HasBaseline) ||
+                            (existing.HasBaseline == entry.HasBaseline && existing.Model == "unknown" && entry.Model != "unknown" && existing.Usage.Key == entry.Usage.Key) ||
+                            (existing.HasBaseline == entry.HasBaseline && !existing.Usage.WriteKnown && entry.Usage.WriteKnown && existing.Usage.Key == entry.Usage.Key))
+                            selected[entry.Key] = entry;
+                    }
+                }
+                var confirmed = new Dictionary<string, List<Snapshot>>();
+                foreach (var snapshot in allSnapshots)
+                {
+                    if (!snapshot.ConfirmedConsumption || snapshot.Startup || snapshot.Fingerprint == null) continue;
+                    List<Snapshot> matching;
+                    if (!confirmed.TryGetValue(snapshot.Fingerprint, out matching)) { matching = new List<Snapshot>(); confirmed[snapshot.Fingerprint] = matching; }
+                    matching.Add(snapshot);
+                }
+                var inherited = new HashSet<string>();
+                foreach (var snapshot in allSnapshots)
+                {
+                    if (!snapshot.Startup || snapshot.Fingerprint == null) continue;
+                    List<Snapshot> matching;
+                    if (!confirmed.TryGetValue(snapshot.Fingerprint, out matching)) continue;
+                    foreach (var prior in matching)
+                    {
+                        if (prior.At < snapshot.At && (prior.Thread == snapshot.Parent || prior.Parent == snapshot.Parent))
+                        { inherited.Add(snapshot.EventKey); break; }
+                    }
+                }
+                var overall = new Bucket();
+                var days = new SortedDictionary<DateTime, Bucket>();
+                foreach (var entry in selected.Values)
+                {
+                    if (entry.Day < first || entry.Day > last || inherited.Contains(entry.Key)) continue;
+                    overall.Add(entry);
+                    DayBucket(days, entry.Day).Add(entry);
+                    if (!entry.Usage.WriteKnown) queryIssues.Add(new Issue { Code = "CACHE_WRITE_UNRECORDED", Key = entry.Key,
+                        Day = entry.Day, Missing = 0, AffectsTotals = false });
+                }
+                var issueKeys = new HashSet<string>();
+                foreach (var issue in queryIssues)
+                {
+                    if (issue.Day.HasValue && (issue.Day.Value < first || (!issue.Before && issue.Day.Value > last))) continue;
+                    if (inherited.Contains(issue.Key)) continue;
+                    Entry entry;
+                    DateTimeOffset predecessor;
+                    if (issue.NeedsBaseline && !String.IsNullOrEmpty(issue.Session) && issue.BaselineKey != null &&
+                        snapshots.TryGetValue(issue.Session + "/" + issue.BaselineKey, out predecessor) && predecessor < issue.At) continue;
+                    if (issue.NeedsBaseline && selected.TryGetValue(issue.Key, out entry) && entry.HasBaseline) continue;
+                    if (issue.Code == "SOURCE_UNCONFIRMED" && selected.ContainsKey(issue.Key)) continue;
+                    if (!issueKeys.Add(issue.Code + "/" + issue.Key)) continue;
+                    overall.Add(issue);
+                    var issueFirst = issue.Day.HasValue && !issue.Before ? issue.Day.Value : first;
+                    var issueLast = issue.Day.HasValue ? (issue.Day.Value < last ? issue.Day.Value : last) : last;
+                    // Unknown dates affect every possibly covered day; issue-only days are never represented as confirmed zeroes.
+                    for (var day = issueFirst; day <= issueLast; day = day.AddDays(1)) DayBucket(days, day).Add(issue);
+                }
+                var daily = new List<Dictionary<string, object>>();
+                foreach (var day in days)
+                {
+                    var bucket = day.Value.Payload();
+                    bucket["date"] = day.Key.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+                    daily.Add(bucket);
+                }
+                var payload = overall.Payload();
+                payload["start"] = start;
+                payload["end"] = end;
+                payload["daily"] = daily;
+                payload["hasLogs"] = present.Count > 0;
+                payload["scannedAt"] = DateTimeOffset.UtcNow.ToString("o", CultureInfo.InvariantCulture);
+                return payload;
+            }
+        }
+        private static void Update(string path, Log log)
+        {
+            var file = new FileInfo(path);
+            if (file.Length < log.Offset || !AnchorMatches(path, log) || (log.Offset == file.Length && log.Written != file.LastWriteTimeUtc) ||
+                (log.Created != default(DateTime) && log.Created != file.CreationTimeUtc))
+            {
+                log.Offset = 0; log.Anchor = null; log.Entries.Clear(); log.Issues.Clear(); log.Snapshots.Clear(); log.Previous = null;
+                log.Model = "unknown"; log.Provider = null; log.Session = null; log.Thread = null; log.Parent = null; log.HistoryStart = 0; log.Subagent = false; log.SeenCounts = false; log.NewRequestSeen = false; log.MetadataAt = null; log.Line = 0;
+            }
+            log.Tail = null;
+            log.Created = file.CreationTimeUtc;
+            log.Written = file.LastWriteTimeUtc;
+            using (var input = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+            {
+                input.Seek(log.Offset, SeekOrigin.Begin);
+                var buffer = new byte[65536];
+                using (var line = new MemoryStream())
+                {
+                    int read;
+                    long position = log.Offset;
+                    var oversized = false;
+                    string oversizedPrefix = null;
+                    while ((read = input.Read(buffer, 0, buffer.Length)) > 0)
+                    {
+                        var index = 0;
+                        while (index < read)
+                        {
+                            var newline = Array.IndexOf(buffer, (byte)10, index, read - index);
+                            var count = (newline < 0 ? read : newline) - index;
+                            if (!oversized && line.Length + count > 16777216)
+                            {
+                                oversized = true;
+                                oversizedPrefix = Encoding.UTF8.GetString(line.GetBuffer(), 0, (int)Math.Min(2048, line.Length));
+                                line.SetLength(0);
+                            }
+                            if (!oversized) line.Write(buffer, index, count);
+                            position += count;
+                            if (newline < 0) break;
+                            position++;
+                            log.Line++;
+                            if (oversized)
+                            {
+                                if (IsTokenLine(oversizedPrefix)) log.Issues.Add(ParseIssue(oversizedPrefix, log, "INVALID_TOKEN_EVENT"));
+                            }
+                            else if (line.Length > 0)
+                                Consume(Encoding.UTF8.GetString(line.GetBuffer(), 0, (int)line.Length).TrimStart('\uFEFF'), log);
+                            line.SetLength(0);
+                            oversized = false;
+                            log.Offset = position;
+                            index = newline + 1;
+                        }
+                    }
+                    // Only an unfinished token event affects usage; a chat/tool line cannot change token totals.
+                    if (line.Length != 0)
+                    {
+                        var text = Encoding.UTF8.GetString(line.GetBuffer(), 0, (int)line.Length);
+                        if (IsTokenLine(text)) log.Tail = ParseIssue(text, log, "INVALID_TOKEN_EVENT");
+                    }
+                    log.Anchor = new byte[(int)Math.Min(64, log.Offset)];
+                    input.Seek(log.Offset - log.Anchor.Length, SeekOrigin.Begin);
+                    if (input.Read(log.Anchor, 0, log.Anchor.Length) != log.Anchor.Length) throw new IOException("Usage file changed during scan");
+                }
+            }
+        }
+        private static bool AnchorMatches(string path, Log log)
+        {
+            if (log.Anchor == null || log.Offset == 0) return true;
+            using (var file = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+            {
+                if (file.Length < log.Offset) return false;
+                file.Seek(log.Offset - log.Anchor.Length, SeekOrigin.Begin);
+                foreach (var value in log.Anchor) if (file.ReadByte() != value) return false;
+                return true;
+            }
+        }
+        private static bool IsTokenLine(string line)
+        {
+            return line != null && Regex.IsMatch(line, @"\A\s*\{[^\r\n]{0,256}""type""\s*:\s*""event_msg""") &&
+                Regex.IsMatch(line, @"""payload""\s*:\s*\{\s*""type""\s*:\s*""token_count""");
+        }
+        private static DateTime? EventDay(string text)
+        {
+            DateTimeOffset time;
+            return DateTimeOffset.TryParse(text, CultureInfo.InvariantCulture, DateTimeStyles.None, out time) ? (DateTime?)time.LocalDateTime.Date : null;
+        }
+        private static Issue ParseIssue(string line, Log log, string code)
+        {
+            var match = Regex.Match(line ?? "", @"""timestamp""\s*:\s*""([^""]+)""");
+            var day = match.Success ? EventDay(match.Groups[1].Value) : null;
+            return new Issue { Code = code, Key = (log.Session ?? log.FileKey) + "/" + log.Line.ToString(CultureInfo.InvariantCulture) + "/" + (match.Success ? match.Groups[1].Value : "unknown"),
+                Day = day, Line = log.Line };
+        }
+        private static bool OfficialWindow(object raw)
+        {
+            var window = raw as Dictionary<string, object>;
+            if (window == null) return false;
+            double used, minutes, reset;
+            return Number(window, "used_percent", out used) && used >= 0 && used <= 100 &&
+                Number(window, "window_minutes", out minutes) && (minutes == 300 || minutes == 10080) &&
+                Number(window, "resets_at", out reset) && reset > 0;
+        }
+        private static bool Number(Dictionary<string, object> data, string key, out double value)
+        {
+            value = 0;
+            object raw;
+            if (!data.TryGetValue(key, out raw) || !(raw is int || raw is long || raw is decimal || raw is double)) return false;
+            value = Convert.ToDouble(raw, CultureInfo.InvariantCulture);
+            return !Double.IsNaN(value) && !Double.IsInfinity(value);
+        }
+        private static bool OfficialEvent(Log log, Dictionary<string, object> data, out bool excluded)
+        {
+            excluded = false;
+            if (!String.IsNullOrEmpty(log.Provider) && log.Provider != "openai") { excluded = true; return false; }
+            if (log.Provider != "openai") return false;
+            object raw;
+            var limits = data.TryGetValue("rate_limits", out raw) ? raw as Dictionary<string, object> : null;
+            var plan = limits == null ? "" : StringValue(limits, "plan_type");
+            if (plan == "api" || plan == "apikey") { excluded = true; return false; }
+            if (Regex.IsMatch(plan, @"\A(?:free|go|plus|pro|team|business|enterprise|edu)\z")) return true;
+            // plan_type can be null while the same event still carries an explicit official Codex quota window.
+            if (!String.IsNullOrEmpty(plan) || limits == null || StringValue(limits, "limit_id") != "codex") return false;
+            return (limits.TryGetValue("primary", out raw) && OfficialWindow(raw)) ||
+                (limits.TryGetValue("secondary", out raw) && OfficialWindow(raw));
+        }
+        private static void Consume(string line, Log log)
+        {
+            if (line.IndexOf("\"session_meta\"", StringComparison.Ordinal) < 0 &&
+                line.IndexOf("\"turn_context\"", StringComparison.Ordinal) < 0 &&
+                line.IndexOf("\"token_count\"", StringComparison.Ordinal) < 0 &&
+                (log.SeenCounts || (line.IndexOf("\"task_started\"", StringComparison.Ordinal) < 0 && line.IndexOf("\"turn_started\"", StringComparison.Ordinal) < 0))) return;
+            try
+            {
+                var root = new JavaScriptSerializer { MaxJsonLength = 16777216 }.DeserializeObject(line) as Dictionary<string, object>;
+                if (root == null) return;
+                object raw;
+                var data = root.TryGetValue("payload", out raw) ? raw as Dictionary<string, object> : null;
+                if (data == null) return;
+                var type = StringValue(root, "type");
+                if (type == "session_meta")
+                {
+                    log.Provider = StringValue(data, "model_provider");
+                    DateTimeOffset created;
+                    log.MetadataAt = DateTimeOffset.TryParse(StringValue(data, "timestamp"), CultureInfo.InvariantCulture, DateTimeStyles.None, out created) ? (DateTimeOffset?)created : null;
+                    var session = StringValue(data, "session_id");
+                    if (String.IsNullOrEmpty(session)) session = StringValue(data, "id");
+                    log.Session = Regex.IsMatch(session, @"\A[A-Za-z0-9-]{1,80}\z") ? session : null;
+                    var thread = StringValue(data, "id");
+                    log.Thread = Regex.IsMatch(thread, @"\A[A-Za-z0-9-]{1,80}\z") ? thread : log.Session;
+                    var parent = StringValue(data, "parent_thread_id");
+                    log.Parent = Regex.IsMatch(parent, @"\A[A-Za-z0-9-]{1,80}\z") ? parent : null;
+                    var source = data.TryGetValue("source", out raw) ? raw as Dictionary<string, object> : null;
+                    log.Subagent = source != null && source.TryGetValue("subagent", out raw) && (raw is string || raw is Dictionary<string, object>);
+                    double ordinal;
+                    log.HistoryStart = Number(data, "subagent_history_start_ordinal", out ordinal) && ordinal >= 1 && ordinal <= Int32.MaxValue && ordinal == Math.Truncate(ordinal) ? (int)ordinal : 0;
+                    return;
+                }
+                if (type == "turn_context")
+                {
+                    var model = StringValue(data, "model");
+                    log.Model = Regex.IsMatch(model, @"\A[A-Za-z0-9._:-]{1,100}\z") ? model : "unknown";
+                    return;
+                }
+                if (type == "event_msg" && (StringValue(data, "type") == "task_started" || StringValue(data, "type") == "turn_started"))
+                {
+                    DateTimeOffset started;
+                    if (log.MetadataAt.HasValue && DateTimeOffset.TryParse(StringValue(root, "timestamp"), CultureInfo.InvariantCulture, DateTimeStyles.None, out started) && started >= log.MetadataAt.Value)
+                        log.NewRequestSeen = true;
+                    return;
+                }
+                if (type != "event_msg" || StringValue(data, "type") != "token_count") return;
+                var info = data.TryGetValue("info", out raw) ? raw as Dictionary<string, object> : null;
+                if (info == null) return; // A limit-only update reports no token consumption.
+                var day = EventDay(StringValue(root, "timestamp"));
+                var total = Counts.Parse(info.TryGetValue("total_token_usage", out raw) ? raw : null);
+                var current = Counts.Parse(info.TryGetValue("last_token_usage", out raw) ? raw : null);
+                var previous = log.Previous;
+                if (total == null) { log.Issues.Add(ParseIssue(line, log, "INVALID_TOKEN_EVENT")); return; }
+                DateTimeOffset stamp;
+                var hasStamp = DateTimeOffset.TryParse(StringValue(root, "timestamp"), CultureInfo.InvariantCulture, DateTimeStyles.None, out stamp);
+                var eventKey = StringValue(root, "timestamp") + "/" + total.Key;
+                var fingerprintTotal = Counts.Fingerprint(info.TryGetValue("total_token_usage", out raw) ? raw : null);
+                var fingerprintLast = Counts.Fingerprint(info.TryGetValue("last_token_usage", out raw) ? raw : null);
+                var snapshot = new Snapshot { Session = log.Session, Thread = log.Thread, Parent = log.Parent, Key = total.Key, At = stamp, EventKey = eventKey,
+                    Fingerprint = fingerprintTotal != null && fingerprintLast != null ? fingerprintTotal + fingerprintLast : null,
+                    Startup = !log.SeenCounts && !log.NewRequestSeen && log.MetadataAt.HasValue && log.Thread != null && log.Parent != null && log.Parent != log.Thread && log.Subagent && log.HistoryStart >= log.Line };
+                log.SeenCounts = true;
+                if (hasStamp) log.Snapshots.Add(snapshot);
+                log.Previous = total;
+                if (previous != null && total.Key == previous.Key) return;
+                var hasBaseline = previous != null && total.Input >= previous.Input && total.Cached >= previous.Cached && total.Output >= previous.Output;
+                Counts delta;
+                if (hasBaseline)
+                    delta = new Counts { Input = total.Input - previous.Input, Cached = total.Cached - previous.Cached, Output = total.Output - previous.Output,
+                        Written = total.WriteKnown && previous.WriteKnown && total.Written >= previous.Written ? total.Written - previous.Written : 0,
+                        WriteKnown = total.WriteKnown && previous.WriteKnown && total.Written >= previous.Written };
+                else if (current != null) delta = current;
+                else { log.Issues.Add(ParseIssue(line, log, "INVALID_TOKEN_EVENT")); return; }
+                if (!delta.WriteKnown && current != null && current.WriteKnown && current.Key == delta.Key)
+                { delta.Written = current.Written; delta.WriteKnown = true; }
+                if (delta.Cached > delta.Input || delta.Written > delta.Input - delta.Cached) { log.Issues.Add(ParseIssue(line, log, "INVALID_TOKEN_EVENT")); return; }
+                if (delta.Total == 0) return;
+                var key = eventKey;
+                bool excluded;
+                if (!OfficialEvent(log, data, out excluded))
+                {
+                    if (!excluded) log.Issues.Add(new Issue { Code = "SOURCE_UNCONFIRMED", Key = key, Day = day, Missing = delta.Total, Line = log.Line });
+                    return;
+                }
+                if (!day.HasValue) { log.Issues.Add(ParseIssue(line, log, "INVALID_TIMESTAMP")); return; }
+                if (!hasBaseline && (current == null || total.Key != current.Key))
+                    log.Issues.Add(new Issue { Code = "BASELINE_MISSING", Key = key, Day = day, Before = true, NeedsBaseline = true, Line = log.Line,
+                        Missing = current == null ? (long?)null : Math.Max(0, total.Total - current.Total), Session = log.Session, At = stamp,
+                        BaselineKey = current != null && total.Input >= current.Input && total.Cached >= current.Cached && total.Output >= current.Output ?
+                            new Counts { Input = total.Input - current.Input, Cached = total.Cached - current.Cached, Output = total.Output - current.Output }.Key : null });
+                snapshot.ConfirmedConsumption = true;
+                log.Entries.Add(new Entry { Day = day.Value, Model = log.Model, Usage = delta, Key = key, HasBaseline = hasBaseline || (current != null && total.Key == current.Key) });
+            }
+            catch (ArgumentException) { if (IsTokenLine(line)) log.Issues.Add(ParseIssue(line, log, "INVALID_TOKEN_EVENT")); }
+            catch (InvalidOperationException) { if (IsTokenLine(line)) log.Issues.Add(ParseIssue(line, log, "INVALID_TOKEN_EVENT")); }
         }
     }
 
@@ -449,6 +1136,10 @@ internal static class CodexNativeQuotaPatch
                 PublishDiagnosis(socket);
             else if (TryConsoleRequest(message, "__codexQuotaOfficialRequest__", out requestId))
                 PublishOfficialPayload(socket, requestId);
+            else if (TryConsoleRequest(message, "__codexQuotaLocalUsageRequest__", out requestId))
+                PublishLocalUsage(socket, requestId);
+            else if (TryConsoleRequest(message, "__codexQuotaReleaseRequest__", out requestId))
+                PublishRelease(socket, requestId);
         }
     }
 
@@ -466,15 +1157,15 @@ internal static class CodexNativeQuotaPatch
     private static bool TryConsoleRequest(string message, string name, out string requestId)
     {
         requestId = null;
-        if (name != "__codexQuotaOfficialRequest__" && name != "__codexQuotaDoctorRequest__") return false;
+        if (name != "__codexQuotaOfficialRequest__" && name != "__codexQuotaDoctorRequest__" && name != "__codexQuotaLocalUsageRequest__" && name != "__codexQuotaReleaseRequest__") return false;
         var root = Json.DeserializeObject(message) as Dictionary<string, object>;
         if (root == null || StringValue(root, "method") != "Runtime.consoleAPICalled") return false;
         var parameters = root.ContainsKey("params") ? root["params"] as Dictionary<string, object> : null;
         var args = parameters != null && parameters.ContainsKey("args") ? parameters["args"] as object[] : null;
         var argument = args != null && (args.Length == 1 || args.Length == 2) ? args[0] as Dictionary<string, object> : null;
         if (argument == null || StringValue(argument, "type") != "string" || StringValue(argument, "value") != name) return false;
-        if (args.Length == 1) return true; // Previous helpers/pages used a single marker.
-        if (name != "__codexQuotaOfficialRequest__") return false;
+        if (args.Length == 1) return name == "__codexQuotaOfficialRequest__" || name == "__codexQuotaDoctorRequest__"; // Previous helpers/pages used a single marker.
+        if (name != "__codexQuotaOfficialRequest__" && name != "__codexQuotaLocalUsageRequest__" && name != "__codexQuotaReleaseRequest__") return false;
         var id = args[1] as Dictionary<string, object>;
         if (id == null || StringValue(id, "type") != "string" || !ValidRequestId(StringValue(id, "value"))) return false;
         requestId = StringValue(id, "value");
@@ -794,21 +1485,7 @@ internal static class CodexNativeQuotaPatch
         CurrentNetworkDiagnosis["NetworkCheckedAt"] = DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture);
         try
         {
-            var settings = ReadNetworkSettings();
-            var mode = StringValue(settings, "mode");
-            CurrentNetworkDiagnosis["NetworkMode"] = mode;
-            CurrentNetworkDiagnosis["ProxySource"] = StringValue(settings, "source");
-            if (mode == "system") return WebRequest.DefaultWebProxy;
-            var uri = NetworkProxyUri(DecryptNetworkProxy(StringValue(settings, "proxyProtected")));
-            CurrentNetworkDiagnosis["ProxyEndpoint"] = ProxyEndpoint(uri);
-            var proxy = new WebProxy(new Uri(ProxyEndpoint(uri)));
-            if (!String.IsNullOrEmpty(uri.UserInfo))
-            {
-                var credentials = uri.UserInfo.Split(new[] { ':' }, 2);
-                proxy.Credentials = new NetworkCredential(Uri.UnescapeDataString(credentials[0]),
-                    credentials.Length == 2 ? Uri.UnescapeDataString(credentials[1]) : "");
-            }
-            return proxy;
+            return SettingsProxy(ReadNetworkSettings(), CurrentNetworkDiagnosis);
         }
         catch (NetworkConfigurationException) { throw; }
         catch (UnauthorizedAccessException) { throw new NetworkConfigurationException("NETWORK_CONFIG_UNREADABLE"); }
@@ -818,6 +1495,27 @@ internal static class CodexNativeQuotaPatch
         catch (ArgumentException) { throw new NetworkConfigurationException("NETWORK_CONFIG_INVALID"); }
         catch (FormatException) { throw new NetworkConfigurationException("NETWORK_CONFIG_INVALID"); }
         catch (InvalidOperationException) { throw new NetworkConfigurationException("NETWORK_CONFIG_INVALID"); }
+    }
+
+    private static IWebProxy SettingsProxy(Dictionary<string, object> settings, Dictionary<string, object> diagnosis)
+    {
+        var mode = StringValue(settings, "mode");
+        if (diagnosis != null)
+        {
+            diagnosis["NetworkMode"] = mode;
+            diagnosis["ProxySource"] = StringValue(settings, "source");
+        }
+        if (mode == "system") return WebRequest.DefaultWebProxy;
+        var uri = NetworkProxyUri(DecryptNetworkProxy(StringValue(settings, "proxyProtected")));
+        if (diagnosis != null) diagnosis["ProxyEndpoint"] = ProxyEndpoint(uri);
+        var proxy = new WebProxy(new Uri(ProxyEndpoint(uri)));
+        if (!String.IsNullOrEmpty(uri.UserInfo))
+        {
+            var credentials = uri.UserInfo.Split(new[] { ':' }, 2);
+            proxy.Credentials = new NetworkCredential(Uri.UnescapeDataString(credentials[0]),
+                credentials.Length == 2 ? Uri.UnescapeDataString(credentials[1]) : "");
+        }
+        return proxy;
     }
 
     // Quota requests and their diagnostic context are serialized by PayloadGate.
@@ -1431,7 +2129,8 @@ internal static class CodexNativeQuotaPatch
                     if (socket.OnEvent != null) socket.OnEvent(message);
                     // Runtime.enable replays console history; only queue requests from the live session.
                     if (method != "Runtime.enable" && (IsConsoleRequest(message, "__codexQuotaDoctorRequest__") ||
-                        IsConsoleRequest(message, "__codexQuotaOfficialRequest__")))
+                        IsConsoleRequest(message, "__codexQuotaOfficialRequest__") || IsConsoleRequest(message, "__codexQuotaLocalUsageRequest__") ||
+                        IsConsoleRequest(message, "__codexQuotaReleaseRequest__")))
                         socket.PendingEvents.Enqueue(message);
                     continue;
                 }
@@ -1640,6 +2339,7 @@ internal static class CodexNativeQuotaPatch
     private sealed class CdpSocket : IDisposable
     {
         private readonly Uri uri;
+        public string Endpoint { get { return uri.ToString(); } }
         public readonly string Scope = SessionScope;
         public readonly int Generation = Volatile.Read(ref SessionGeneration);
         public Action<string> OnEvent;

@@ -145,7 +145,7 @@ test('Enter/Space, native popover exclusion, Escape focus and outside focus are 
     await t.focus();await page.keyboard.press('Enter');await settle(page);assert.equal(await p.isVisible(),true);assert.ok(await p.evaluate(el=>el.contains(document.activeElement)),'opening transfers focus away from the covered entry');assert.equal(await t.evaluate(el=>el.tabIndex),-1);
     await page.keyboard.press('Tab');assert.ok(await p.evaluate(el=>el.contains(document.activeElement)));
     await page.keyboard.press('Escape');assert.equal(await p.isVisible(),false);assert.equal(await t.getAttribute('aria-expanded'),'false');assert.equal(await t.evaluate(el=>el===document.activeElement),true);
-    await page.keyboard.press('Space');await settle(page);assert.equal(await p.isVisible(),true);assert.equal(await page.locator('.cq-actions button').count(),2);assert.equal(await page.locator('#codex-quota-popover > .cq-collapse-button').count(),1);await collapse(page);assert.equal(await p.isVisible(),false);assert.equal(await t.evaluate(el=>el===document.activeElement),true);assert.equal(await t.evaluate(el=>el.tabIndex),0);await open(page);
+    await page.keyboard.press('Space');await settle(page);assert.equal(await p.isVisible(),true);assert.equal(await page.locator('.cq-actions button').count(),3);assert.equal(await page.locator('#codex-quota-popover > .cq-collapse-button').count(),1);await collapse(page);assert.equal(await p.isVisible(),false);assert.equal(await t.evaluate(el=>el===document.activeElement),true);assert.equal(await t.evaluate(el=>el.tabIndex),0);await open(page);
     await page.getByRole('button',{name:'收起额度',exact:true}).focus();await page.keyboard.press('Enter');await settle(page);assert.equal(await p.isVisible(),false);assert.equal(await t.evaluate(el=>el===document.activeElement),true);await open(page);
     await page.locator('#outside').click();assert.equal(await p.isVisible(),false);assert.equal(await page.locator('#outside').evaluate(el=>el===document.activeElement),true);
     await open(page);await page.locator('#menu-trigger').click();assert.equal(await p.isVisible(),false);assert.equal(await page.locator('#native-menu').isVisible(),true);
@@ -263,7 +263,9 @@ test('shared Pro and Plus elements move and scale continuously while the toggle 
     const data=officialPayload();data.planName=planName;data.windows[1].usedPercent=11;if(planName==='pro')data.windows.shift();
     const page=await pageFor(data,{width:1024,height:720},{deviceScaleFactor:1.25});try{
       await page.emulateMedia({reducedMotion:'no-preference'});await settle(page);
-      const first=await sharedSnapshot(page,'#codex-quota-trigger');
+      // Sample the native timeline; CDP round trips can otherwise skip the middle frames.
+      await page.evaluate(async()=>{document.querySelector('#codex-quota-trigger').click();await Promise.resolve();for(const a of document.querySelector('#codex-quota-popover').getAnimations({subtree:true})){a.pause();a.currentTime=0;}});
+      const first=await sharedSnapshot(page);
       for(const key of ['plan','weekly-digits','weekly-percent','weekly-track','weekly-ring'])assert.ok(first.actors[key],`${planName} shares ${key}`);
       if(planName==='plus')for(const key of ['5h-digits','5h-percent'])assert.ok(first.actors[key],`Plus shares ${key}`);
       for(const edge of ['left','top','width','height'])assert.ok(Math.abs(first.actors['weekly-digits'][edge]-first.digitOrigin[edge])<1.5,`weekly digits start at their real ${edge}`);
@@ -273,7 +275,7 @@ test('shared Pro and Plus elements move and scale continuously while the toggle 
       });
       const sharedNodes=await page.locator('.cq-shared-layer [data-cq-shared-key]').elementHandles();
       const frames=[first];
-      for(let i=0;i<4;i++){await page.waitForTimeout(35);frames.push(await sharedSnapshot(page));}
+      for(const progress of [.1,.25,.45,.65]){await page.evaluate(progress=>{for(const a of document.querySelector('#codex-quota-popover').getAnimations({subtree:true}))a.currentTime=a.effect.getComputedTiming().duration*progress;},progress);frames.push(await sharedSnapshot(page));}
       const styleMutations=await mutationProbe.evaluate(probe=>{const count=probe.count+probe.observer.takeRecords().length;probe.observer.disconnect();return count;});await mutationProbe.dispose();
       assert.equal(styleMutations,0,'native shared motion must not write per-frame style attributes and wake host observers');
       const moving=frames.filter(frame=>frame.actors['weekly-digits']);assert.ok(moving.length>=3,'shared content persists across several rendered frames');
@@ -281,9 +283,10 @@ test('shared Pro and Plus elements move and scale continuously while the toggle 
         for(const axis of ['cx','cy'])assert.ok(Math.abs(frame.arrow[axis]-first.originArrow[axis])<1,`${planName} toggle ${axis} must not move`);
         assert.ok(frame.surfaceTransform==='none'||/^matrix\(1, 0, 0, 1,/.test(frame.surfaceTransform),'the surface must not scale its text');
       }
-      assert.ok(moving.some(frame=>Math.abs(frame.actors['weekly-digits'].top-first.digitOrigin.top)>3&&Math.abs(frame.actors['weekly-digits'].top-first.digitTarget.top)>3),'weekly number traverses the space between layouts');
+      assert.ok(moving.some(frame=>Math.abs(frame.actors['weekly-digits'].top-first.digitOrigin.top)>3&&Math.abs(frame.actors['weekly-digits'].top-first.digitTarget.top)>3),`weekly number traverses the space between layouts: ${JSON.stringify({planName,origin:first.digitOrigin.top,target:first.digitTarget.top,frames:moving.map(frame=>frame.actors['weekly-digits'].top)})}`);
       assert.ok(moving.some(frame=>frame.actors['weekly-digits'].height>first.digitOrigin.height+1&&frame.actors['weekly-digits'].height<first.digitTarget.height-1),'weekly digits enlarge during the move');
       for(const node of sharedNodes)assert.equal(await node.evaluate(el=>el.isConnected),true,'the same shared actors persist during the move');
+      await page.evaluate(()=>{for(const a of document.querySelector('#codex-quota-popover').getAnimations({subtree:true}))a.play();});
       await finishAnimations(page);await assertMotionClean(page);
       const last=await sharedSnapshot(page);
       for(const axis of ['cx','cy'])assert.ok(Math.abs(last.arrow[axis]-first.originArrow[axis])<1);
@@ -697,7 +700,7 @@ test('reinjection removes retired API state and can only request official quota'
     assert.equal(await page.locator('#codex-api-usage-host').count(),0);
     assert.equal(await page.locator('#codex-quota-trigger').getAttribute('data-cq-kind'),'official');
     await open(page);await page.locator('.cq-refresh').click();
-    assert.deepEqual(await page.evaluate(()=>requests.map(request=>request.marker)),['__codexQuotaOfficialRequest__']);
+    assert.deepEqual(await page.evaluate(()=>requests.filter(request=>request.marker!=='__codexQuotaReleaseRequest__').map(request=>request.marker)),['__codexQuotaOfficialRequest__']);
     await update(page,officialPayload());
   }finally{await close(page);}
 });
@@ -1529,4 +1532,563 @@ test('cold document injection installs once and stays collapsed on reload', asyn
     assert.equal(await page.locator('#codex-quota-popover').count(),1);assert.equal(await page.locator('#codex-quota-popover').isVisible(),false);
     await page.reload();await page.locator('#codex-quota-trigger').waitFor();assert.equal(await page.locator('#codex-quota-trigger').count(),1);assert.deepEqual(errors,[]);
   }finally{await page.close();}
+});
+
+
+const localUsagePayload = (range, overrides={}) => {
+  const data={...range,models:[
+  {model:'gpt-6-astra',inputTokens:4000000,cachedInputTokens:3000000,outputTokens:380000,totalTokens:4380000},
+  {model:'gpt-6.1-sol',inputTokens:23000000,cachedInputTokens:22000000,outputTokens:540000,totalTokens:23540000},
+  {model:'gpt-6-sol',inputTokens:1200,cachedInputTokens:1000,outputTokens:300,totalTokens:1500}],
+  eventCount:3,partial:false,hasLogs:true,...overrides};
+  if (!Object.hasOwn(overrides,'daily')) data.daily=data.eventCount || data.partial || data.issues?.length
+    ? [{date:range.end,models:data.models,eventCount:data.eventCount,partial:data.partial,issues:data.issues||[]}] : [];
+  return data;
+};
+async function localUsageRequest(page) {
+  return page.evaluate(()=>({range:globalThis.__codexQuotaLocalUsageRange,id:globalThis.__codexQuotaLocalUsageTestRequestId}));
+}
+async function showLocalUsage(page) {
+  await page.evaluate(()=>{
+    const info=console.info;
+    console.info=(...args)=>{if(args[0]==='__codexQuotaLocalUsageRequest__')globalThis.__codexQuotaLocalUsageTestRequestId=args[1];info.apply(console,args);};
+  });
+  await open(page);await page.locator('.cq-local-usage-button').click();await settle(page);
+}
+async function updateLocalUsage(page,data,id) {await page.evaluate(({data,id})=>__codexQuotaUpdateLocalUsage(data,id),{data,id});await settle(page);}
+
+test('local usage opens in place and estimates only referenced models without changing official data',async()=>{
+  const page=await pageFor();
+  try {
+    const original=await page.evaluate(()=>JSON.stringify(__codexQuotaOfficialPayload));
+    await showLocalUsage(page);
+    const {range,id}=await localUsageRequest(page);
+    assert.equal(range.start,range.end);
+    await updateLocalUsage(page,localUsagePayload(range),id);
+    assert.match(await page.locator('.cq-local-estimate strong').textContent(),/≈ 2%/);
+    assert.match(await page.locator('.cq-local-cost strong').textContent(),/\$41\.60/);
+    assert.match(await page.locator('.cq-local-excluded').textContent(),/1,500.*未折算/);
+    assert.deepEqual(await page.locator('.cq-local-metrics dd').evaluateAll(nodes=>nodes.map(n=>n.title)),['27,921,500 token','27,001,200 token','25,001,000 token','920,300 token']);
+    assert.equal(await page.locator('.cq-local-cache-track').getAttribute('role'),'meter');
+    assert.ok(Math.abs(Number(await page.locator('.cq-local-cache-track').getAttribute('aria-valuenow'))-25001000/27001200*100)<.001);
+    assert.equal(await page.locator('.cq-local-excluded').isVisible(),false);
+    assert.equal(await page.locator('.cq-local-status').getAttribute('data-cq-quiet'),'');
+    assert.equal(await page.locator('#codex-official-usage-host .cq-local-estimate').count(),0);
+    assert.equal(await page.locator('#cq-local-usage').evaluate(el=>el.parentElement.id),'codex-quota-popover');
+    assert.equal(await page.locator('[popover]:popover-open').count(),1);
+    assert.equal(await page.evaluate(()=>JSON.stringify(__codexQuotaOfficialPayload)),original);
+    await page.keyboard.press('Escape');assert.equal(await page.locator('#cq-local-usage').isVisible(),false);
+    assert.equal(await page.locator('#codex-quota-trigger').evaluate(el=>el===document.activeElement),true);
+    await open(page);await page.locator('.cq-local-usage-button').click();
+    await page.locator('#outside').evaluate(el=>el.style.cssText='position:fixed;right:8px;top:8px');
+    await page.locator('#outside').click();await settle(page);
+    assert.equal(await page.locator('#cq-local-usage').isVisible(),false);
+    assert.equal(await page.locator('#outside').evaluate(el=>el===document.activeElement),true);
+  } finally {await close(page);}
+});
+
+test('local date presets and custom queries reject stale replies and allow over 100 percent',async()=>{
+  const page=await pageFor();
+  try {
+    await page.clock.install({time:new Date('2026-10-28T12:00:00+08:00')});
+    await showLocalUsage(page);
+    const first=await localUsageRequest(page);
+    await page.locator('[data-period=week]').click();
+    const week=await localUsageRequest(page);
+    const expected=await page.evaluate(()=>{const d=new Date();d.setDate(d.getDate()-(d.getDay()+6)%7);return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;});
+    assert.equal(week.range.start,expected);
+    await updateLocalUsage(page,localUsagePayload(first.range),first.id);
+    assert.equal(await page.locator('.cq-local-estimate').count(),0);
+    await page.locator('[data-period=custom]').click();
+    await page.locator('[name=start]').fill('2026-10-01');await page.locator('[name=end]').fill('2026-10-20');
+    await page.locator('.cq-local-dates button[type=submit]').click();
+    const custom=await localUsageRequest(page);assert.deepEqual(custom.range,{start:'2026-10-01',end:'2026-10-20'});
+    await updateLocalUsage(page,localUsagePayload(custom.range,{models:[{model:'gpt-6-astra',inputTokens:876000000,cachedInputTokens:0,outputTokens:0,totalTokens:876000000}]}),custom.id);
+    assert.match(await page.locator('.cq-local-estimate strong').textContent(),/200%/);
+    await page.locator('[name=start]').fill('2026-10-21');await page.locator('.cq-local-dates button[type=submit]').click();
+    assert.equal((await localUsageRequest(page)).id,custom.id);
+  } finally {await close(page);}
+});
+
+test('local usage unavailable, empty and incomplete states do not fabricate quota percentages',async()=>{
+  const page=await pageFor();
+  try {
+    await showLocalUsage(page);let request=await localUsageRequest(page);
+    await updateLocalUsage(page,{errorCode:'LOCAL_USAGE_UNAVAILABLE'},request.id);
+    assert.match(await page.locator('.cq-local-status').innerText(),/暂不可用/);assert.equal(await page.locator('.cq-local-estimate').count(),0);
+    await page.locator('[data-period=today]').click();request=await localUsageRequest(page);
+    await updateLocalUsage(page,localUsagePayload(request.range,{models:[],eventCount:0}),request.id);
+    assert.match(await page.locator('.cq-local-estimate').innerText(),/未折算/);assert.match(await page.locator('.cq-local-status').innerText(),/未找到/);
+    await page.locator('[data-period=today]').click();request=await localUsageRequest(page);
+    await updateLocalUsage(page,localUsagePayload(request.range,{partial:true}),request.id);
+    assert.match(await page.locator('.cq-local-status').innerText(),/统计不完整/);
+    await page.locator('[data-period=today]').click();request=await localUsageRequest(page);
+    await updateLocalUsage(page,{errorCode:'LOCAL_USAGE_UNAVAILABLE'},request.id);
+    assert.match(await page.locator('.cq-local-status').innerText(),/保留上次结果/);assert.match(await page.locator('.cq-local-estimate strong').textContent(),/2%/);
+    await page.locator('[data-period=today]').click();request=await localUsageRequest(page);
+    await updateLocalUsage(page,localUsagePayload(request.range,{models:[{model:'gpt-6-astra',inputTokens:1,cachedInputTokens:0,outputTokens:0,totalTokens:1}]}),request.id);
+    assert.match(await page.locator('.cq-local-estimate strong').textContent(),/<0.01%/);
+    await page.evaluate(()=>__codexQuotaResetSession());assert.equal(await page.locator('#cq-local-usage').count(),0);
+    await updateLocalUsage(page,localUsagePayload(request.range),request.id);assert.equal(await page.locator('#cq-local-usage').count(),0);
+  } finally {await close(page);}
+});
+
+test('local usage themes and keyboard controls fit compact and desktop viewports',async()=>{
+  const dir=join(__dirname,'../.runtime-test/local-usage-20261027');mkdirSync(dir,{recursive:true});
+  for(const width of [390,1024])for(const dark of [false,true]) {
+    const page=await pageFor(officialPayload(),{width,height:800});
+    try {
+      if(dark)await page.evaluate(()=>{document.documentElement.classList.add('dark');document.documentElement.style.cssText='color-scheme:dark;--color-surface-elevated-secondary:#262724;--color-text:#f1f1eb;--color-text-secondary:#b0b2a8;--color-border:#494b43';});
+      await showLocalUsage(page);const {range,id}=await localUsageRequest(page);await updateLocalUsage(page,localUsagePayload(range),id);
+      const bounds=await page.locator('#cq-local-usage').evaluate(el=>{const r=el.getBoundingClientRect();return {left:r.left,right:r.right,top:r.top,bottom:r.bottom,overflow:el.scrollWidth-el.clientWidth,dark:getComputedStyle(el).colorScheme==='dark'};});
+      assert.ok(bounds.left>=12&&bounds.right<=width-12&&bounds.top>=12&&bounds.bottom<=800,JSON.stringify(bounds));assert.equal(bounds.overflow,0);assert.equal(bounds.dark,dark);
+      const layout=await geometry(page);assert.ok(Math.abs(layout.popup.bottom-layout.trigger.bottom)<1);assert.ok(layout.popup.width<=layout.column.width-16+.1);
+      await page.locator('.cq-local-close').focus();await page.keyboard.press('Tab');await page.keyboard.press('Shift+Tab');assert.equal(await page.locator('.cq-local-close').evaluate(el=>el.matches(':focus-visible')),true);
+      await page.screenshot({path:join(dir,`usage-${dark?'dark':'light'}-${width}.png`)});
+    } finally {await close(page);}
+  }
+});
+
+test('local API equivalent separates cache reads and writes and exposes safe coverage reasons',async()=>{
+  const page=await pageFor();
+  try {
+    await showLocalUsage(page);let {range,id}=await localUsageRequest(page);
+    const row={model:'gpt-6.1-sol',inputTokens:2000000,cachedInputTokens:1000000,cacheWriteInputTokens:500000,cacheWriteKnown:true,outputTokens:100000,totalTokens:2100000};
+    await updateLocalUsage(page,localUsagePayload(range,{models:[row],partial:true,issues:[{code:'SOURCE_UNCONFIRMED',count:2,missingTokens:12345,affectsTotals:true,dateUnknown:false}]}),id);
+    assert.match(await page.locator('.cq-local-cost strong').textContent(),/\$3\.35.*\$4\.60/);
+    assert.match(await page.locator('.cq-local-status').innerText(),/来源未确认 2/);
+    await page.locator('.cq-local-issues summary').click();assert.match(await page.locator('.cq-local-issues').innerText(),/12,345 token/);
+    await page.locator('[data-period=today]').click();({range,id}=await localUsageRequest(page));
+    await updateLocalUsage(page,localUsagePayload(range,{models:[{...row,cacheWriteKnown:false}],issues:[]}),id);
+    assert.match(await page.locator('.cq-local-api-note').innerText(),/写缓存计数不完整/);
+    await page.locator('[data-period=today]').click();({range,id}=await localUsageRequest(page));
+    await updateLocalUsage(page,localUsagePayload(range,{models:[{...row,cacheWriteInputTokens:1500000}]}),id);
+    assert.match(await page.locator('.cq-local-status').innerText(),/读取失败/);
+    await page.locator('[data-period=today]').click();({range,id}=await localUsageRequest(page));
+    await updateLocalUsage(page,localUsagePayload(range,{models:[{...row,model:'unknown-model'}],issues:[]}),id);
+    assert.equal(await page.locator('.cq-local-excluded').count(),1);
+    assert.match(await page.locator('.cq-local-excluded').textContent(),/无周基准与 API 价格/);
+    assert.match(await page.locator('.cq-local-cost').innerText(),/未计价/);
+    assert.match(await page.locator('.cq-local-estimate').innerText(),/未折算/);
+  } finally {await close(page);}
+});
+
+test('local usage pane keeps the collapse axis and reverses motion without a second popover',async()=>{
+  const page=await pageFor(officialPayload(),{width:1024,height:900},{reducedMotion:'no-preference'});
+  try {
+    await open(page);await finishAnimations(page);
+    const before=await geometry(page);
+    await page.locator('.cq-local-usage-button').click();await page.waitForTimeout(70);
+    const mid=await page.locator('#cq-local-usage').evaluate(el=>({parent:el.parentElement.id,animations:el.parentElement.getAnimations({subtree:true}).length}));
+    assert.equal(mid.parent,'codex-quota-popover');assert.ok(mid.animations>0);
+    await page.locator('.cq-local-close').evaluate(el=>el.click());await page.waitForTimeout(70);
+    await page.locator('.cq-local-usage-button').evaluate(el=>el.click());await finishAnimations(page);
+    const after=await geometry(page);assert.ok(Math.abs(after.popup.bottom-before.popup.bottom)<1);
+    const axis=await page.evaluate(()=>{const a=document.querySelector('.cq-local-close').getBoundingClientRect(),b=document.querySelector('.cq-collapse-button').getBoundingClientRect();return a.x+a.width/2-b.x-b.width/2;});
+    assert.ok(Math.abs(axis)<.2);assert.equal(await page.locator('[popover]:popover-open').count(),1);
+    await collapse(page);await finishAnimations(page);assert.equal(await page.locator('#codex-quota-popover').isVisible(),false);
+    await open(page);await finishAnimations(page);assert.equal(await page.locator('#cq-local-usage').count(),0);assert.equal(await page.locator('.cq-local-usage-button').isVisible(),true);
+  } finally {await close(page);}
+});
+
+
+test('statistics hierarchy keeps exact counts, unknown states and narrow DPR layout readable',async()=>{
+  for(const column of [196,238])for(const dpr of [1,1.25]) {
+    const page=await pageFor(officialPayload(),{width:1024,height:900},{deviceScaleFactor:dpr});
+    try {
+      await page.locator('.sidebar-navigation').evaluate((el,width)=>el.style.width=width+'px',column);await settle(page);
+      await showLocalUsage(page);let {range,id}=await localUsageRequest(page);
+      await updateLocalUsage(page,localUsagePayload(range),id);
+      const presentation=await page.locator('#cq-local-usage').evaluate(el=>{
+        const primary=el.querySelector('.cq-local-value-number'),unit=el.querySelector('.cq-local-value-unit'),row=el.querySelector('.cq-local-highlights');
+        return {primary:parseFloat(getComputedStyle(primary).fontSize),unit:parseFloat(getComputedStyle(unit).fontSize),columns:getComputedStyle(row).gridTemplateColumns.split(' ').length,
+          overflow:el.scrollWidth-el.clientWidth,exact:[...el.querySelectorAll('.cq-local-metrics dd')].map(n=>n.getAttribute('aria-label'))};
+      });
+      assert.equal(presentation.columns,2);assert.ok(presentation.primary>presentation.unit+3);assert.equal(presentation.overflow,0);
+      assert.equal(presentation.exact[0],'27,921,500 token');
+      assert.equal(await page.locator('.cq-local-metrics').isVisible(),false);
+      await page.locator('.cq-local-usage-details summary').click();assert.equal(await page.locator('.cq-local-metrics').isVisible(),true);
+      await page.locator('.cq-local-usage-details summary').click();
+      await page.locator('.cq-local-models summary').click();assert.equal(await page.locator('.cq-local-excluded').isVisible(),true);
+      await page.locator('.cq-local-models summary').click();
+      await page.locator('[data-period=today]').click();({range,id}=await localUsageRequest(page));
+      await updateLocalUsage(page,localUsagePayload(range,{models:[],eventCount:0}),id);
+      assert.equal(await page.locator('.cq-local-cache-track').getAttribute('role'),'img');
+      assert.equal(await page.locator('.cq-local-cache-track').getAttribute('aria-valuenow'),null);
+      assert.match(await page.locator('.cq-local-status').innerText(),/未找到/);
+    } finally {await close(page);}
+  }
+});
+
+
+const dailyChartPayload = range => {
+  const a={model:'gpt-6.1-sol',inputTokens:1000000,cachedInputTokens:500000,cacheWriteInputTokens:0,cacheWriteKnown:true,outputTokens:100000,totalTokens:1100000};
+  const b={...a,inputTokens:2000000,cachedInputTokens:1000000,outputTokens:200000,totalTokens:2200000};
+  const issue={code:'SOURCE_UNCONFIRMED',count:1,missingTokens:900,affectsTotals:true,dateUnknown:false};
+  return localUsagePayload(range,{models:[{...a,inputTokens:3000000,cachedInputTokens:1500000,outputTokens:300000,totalTokens:3300000}],eventCount:2,partial:true,issues:[issue],daily:[
+    {date:'2026-10-01',models:[a],eventCount:1,partial:false,issues:[]},
+    {date:'2026-10-02',models:[b],eventCount:1,partial:false,issues:[]},
+    {date:'2026-10-04',models:[],eventCount:0,partial:true,issues:[issue]}
+  ]});
+};
+async function customDailyRange(page) {
+  await showLocalUsage(page);await page.locator('[data-period=custom]').click();
+  await page.locator('[name=start]').fill('2026-10-01');await page.locator('[name=end]').fill('2026-10-14');
+  await page.locator('.cq-local-dates button[type=submit]').click();return localUsageRequest(page);
+}
+
+test('daily bars page actual dates and select exact token and API totals without extra requests',async()=>{
+  const page=await pageFor(officialPayload(),{width:1024,height:1000});
+  try {
+    const original=await page.evaluate(()=>JSON.stringify(__codexQuotaOfficialPayload));
+    const {range,id}=await customDailyRange(page);await updateLocalUsage(page,dailyChartPayload(range),id);
+    const previous=page.getByRole('button',{name:'查看更早日期'});
+    while(!await page.locator('.cq-local-day[data-date="2026-10-01"]').count())await previous.click();
+    await page.locator('.cq-local-day[data-date="2026-10-02"]').click();
+    assert.equal(await page.locator('.cq-local-day[data-date="2026-10-02"]').getAttribute('aria-pressed'),'true');
+    assert.match(await page.locator('.cq-local-day-detail strong').first().getAttribute('title'),/2,200,000 token/);
+    assert.match(await page.locator('.cq-local-day-values > div').nth(1).innerText(),/\$4\.10/);
+    assert.equal((await localUsageRequest(page)).id,id);
+    assert.equal(await page.evaluate(()=>JSON.stringify(__codexQuotaOfficialPayload)),original);
+    const colours=await page.evaluate(()=>['input','cache','output'].map(kind=>getComputedStyle(document.querySelector(`.cq-local-day[data-date="2026-10-02"] i[data-kind=${kind}]`)).backgroundColor));
+    assert.equal(new Set(colours).size,3);
+    assert.equal(await page.locator('[popover]:popover-open').count(),1);
+  } finally {await close(page);}
+});
+
+test('daily chart distinguishes absent and uncertain days, supports keyboard selection and rejects inconsistent buckets',async()=>{
+  const page=await pageFor(officialPayload(),{width:1024,height:1000});
+  try {
+    const {range,id}=await customDailyRange(page);await updateLocalUsage(page,dailyChartPayload(range),id);
+    while(!await page.locator('.cq-local-day[data-date="2026-10-04"]').count())await page.getByRole('button',{name:'查看更早日期'}).click();
+    await page.locator('.cq-local-day[data-date="2026-10-04"]').click();
+    assert.equal(await page.locator('.cq-local-day[data-date="2026-10-04"] .cq-local-day-incomplete').count(),1);
+    assert.match(await page.locator('.cq-local-day-detail').innerText(),/统计不完整.*暂不可用/s);assert.doesNotMatch(await page.locator('.cq-local-day-detail').innerText(),/\$0/);
+    await page.keyboard.press('ArrowLeft');
+    assert.equal(await page.locator('.cq-local-day[data-date="2026-10-03"]').getAttribute('aria-pressed'),'true');
+    assert.match(await page.locator('.cq-local-day-detail').innerText(),/无记录/);
+    await page.locator('.cq-local-dates button[type=submit]').click();const next=await localUsageRequest(page);
+    const broken=dailyChartPayload(range);broken.daily[0].models[0].cachedInputTokens=0;
+    await updateLocalUsage(page,broken,next.id);assert.match(await page.locator('.cq-local-status').innerText(),/读取失败/);
+    assert.equal(await page.locator('.cq-local-day[data-date="2026-10-03"]').getAttribute('aria-pressed'),'true');
+  } finally {await close(page);}
+});
+
+test('statistics inner motion retargets selection immediately and preserves exact values and requests',async()=>{
+  const page=await pageFor(officialPayload(),{width:1024,height:1000});
+  try {
+    const {range,id}=await customDailyRange(page);await updateLocalUsage(page,dailyChartPayload(range),id);
+    while(!await page.locator('.cq-local-day[data-date="2026-10-01"]').count())await page.getByRole('button',{name:'查看更早日期'}).click();
+    await page.emulateMedia({reducedMotion:'no-preference'});
+    const sample=await page.evaluate(()=>{
+      const plot=document.querySelector('.cq-local-chart-plot'),marker=plot.querySelector('.cq-local-day-selection');
+      plot.querySelector('[data-date="2026-10-01"]').click();
+      let animation=marker.getAnimations()[0];animation.pause();animation.currentTime=80;
+      const before=marker.getBoundingClientRect().left;
+      plot.querySelector('[data-date="2026-10-02"]').click();
+      animation=marker.getAnimations()[0];animation.pause();animation.currentTime=0;
+      const after=marker.getBoundingClientRect().left;
+      return {before,after,pressed:plot.querySelector('[aria-pressed=true]').dataset.date,
+        value:document.querySelector('.cq-local-day-detail strong').title,
+        cost:document.querySelectorAll('.cq-local-day-detail strong')[1].textContent,
+        frames:animation.effect.getKeyframes(),detail:document.querySelector('.cq-local-day-detail').getAnimations().length};
+    });
+    assert.ok(Math.abs(sample.before-sample.after)<.1,'retarget starts at current presentation');
+    assert.equal(sample.pressed,'2026-10-02');assert.equal(sample.value,'2,200,000 token');assert.equal(sample.cost,'$4.10');
+    assert.notEqual(sample.frames[0].transform,sample.frames.at(-1).transform);assert.ok(sample.detail);
+    assert.equal((await localUsageRequest(page)).id,id);
+    await page.emulateMedia({reducedMotion:'reduce'});await settle(page);
+    assert.equal(await page.locator('#cq-local-usage').evaluate(el=>el.getAnimations({subtree:true}).length),0);
+    await page.keyboard.press('ArrowLeft');
+  } finally {await close(page);}
+});
+
+test('statistics details animate on a fixed bottom, reverse mid-frame and clean up on return',async()=>{
+  const page=await pageFor(officialPayload(),{width:1024,height:1100},{deviceScaleFactor:1.25});
+  try {
+    await showLocalUsage(page);const {range,id}=await localUsageRequest(page);await updateLocalUsage(page,localUsagePayload(range),id);
+    await page.emulateMedia({reducedMotion:'no-preference'});
+    const frames=await page.evaluate(()=>{
+      const popup=document.getElementById('codex-quota-popover'),details=document.querySelector('.cq-local-usage-details'),summary=details.querySelector('summary');
+      const button=document.querySelector('.cq-collapse-button'),rect=()=>{const r=button.getBoundingClientRect();return [r.right,r.bottom];};
+      const axis=rect();summary.click();
+      const animations=popup.getAnimations({subtree:true});
+      for(const a of animations){a.pause();a.currentTime=90;}
+      const during=rect(),clip=getComputedStyle(popup).clipPath,panel=document.getElementById('cq-local-usage');
+      popup.style.setProperty('--color-text','#173524');
+      const start=panel.getBoundingClientRect().top;
+      summary.click();
+      for(const a of popup.getAnimations({subtree:true})){a.pause();a.currentTime=0;}
+      const reversed=panel.getBoundingClientRect().top;
+      const result={axis,during,start,reversed,clip,open:details.open,frames:popup.getAnimations().flatMap(a=>a.effect.getKeyframes()),ghosts:panel.querySelectorAll(':scope > [aria-hidden=true]').length};
+      for(const a of popup.getAnimations({subtree:true}))a.play();return result;
+    });
+    assert.ok(frames.frames.length>0);assert.equal(frames.open,false);assert.ok(frames.ghosts>0);
+    assert.ok(Math.abs(frames.start-frames.reversed)<1,'reversal preserves panel presentation');
+    frames.axis.forEach((v,i)=>assert.ok(Math.abs(v-frames.during[i])<1,'collapse control stays fixed'));
+    for(const frame of frames.frames){assert.equal('height' in frame,false);assert.equal('top' in frame,false);}
+    await page.waitForTimeout(300);
+    assert.equal(await page.locator('#codex-quota-popover').evaluate(el=>el.style.getPropertyValue('--color-text')),'#173524');
+    assert.equal(await page.locator('#cq-local-usage > [aria-hidden=true]').count(),0);
+    const reference=await page.evaluate(()=>{
+      const details=document.querySelector('.cq-local-reference'),summary=details.querySelector('summary'),popup=document.getElementById('codex-quota-popover');
+      summary.click();for(const a of popup.getAnimations({subtree:true}))a.finish();
+      const original=getComputedStyle(details.querySelector('a')),expected={font:original.fontSize,margin:original.marginTop};
+      summary.click();const ghost=document.querySelector('#cq-local-usage > [aria-hidden=true]'),actual=getComputedStyle(ghost.querySelector('a'));
+      return {expected,actual:{font:actual.fontSize,margin:actual.marginTop}};
+    });
+    assert.deepEqual(reference.actual,reference.expected,'outgoing reference content keeps its typography');
+    await page.waitForTimeout(300);
+    await page.locator('.cq-local-models summary').click();
+    await page.locator('.cq-local-close').evaluate(el=>el.click());
+    await page.waitForTimeout(800);await assertMotionClean(page);
+    assert.equal(await page.locator('#cq-local-usage').count(),0);
+  } finally {await close(page);}
+});
+
+test('statistics chart range transitions use current bar heights and shrink empty slots without new requests',async()=>{
+  const page=await pageFor(officialPayload(),{width:1024,height:1000});
+  try {
+    const {range,id}=await customDailyRange(page);await updateLocalUsage(page,dailyChartPayload(range),id);
+    while(!await page.locator('.cq-local-day[data-date="2026-10-01"]').count())await page.getByRole('button',{name:'查看更早日期'}).click();
+    await page.emulateMedia({reducedMotion:'no-preference'});
+    const shrinking=await page.evaluate(()=>{
+      document.querySelector('[aria-label="查看更晚日期"]').click();
+      const ghosts=[...document.querySelectorAll('.cq-local-day-bar[aria-hidden=true]')];
+      const frames=ghosts.map(node=>node.getAnimations().flatMap(a=>a.effect.getKeyframes()).map(f=>f.transform));
+      for(const ghost of ghosts)for(const a of ghost.getAnimations()){a.pause();a.currentTime=80;}
+      const before=Number(getComputedStyle(ghosts[0]).opacity);
+      document.querySelector('[aria-label="查看更早日期"]').click();
+      document.querySelector('[aria-label="查看更晚日期"]').click();
+      const ghost=document.querySelector('.cq-local-day-bar[aria-hidden=true]');
+      const after=ghost.getAnimations().map(a=>a.effect.getKeyframes()).find(frames=>frames[0].opacity!==undefined)[0].opacity;
+      return {frames,before,after};
+    });
+    assert.ok(shrinking.frames.length>0);assert.ok(shrinking.frames.some(frames=>frames.includes('scaleY(0)')));
+    assert.ok(Math.abs(shrinking.before-shrinking.after)<.01,`rapid pagination carries the fading bar opacity: ${JSON.stringify(shrinking)}`);
+    assert.equal((await localUsageRequest(page)).id,id);
+    await page.emulateMedia({reducedMotion:'reduce'});await settle(page);
+    assert.equal(await page.locator('.cq-local-day-bar[aria-hidden=true]').count(),0);
+    await page.emulateMedia({reducedMotion:'no-preference'});
+    const refreshed=await page.evaluate(({range,id,payload})=>{
+      __codexQuotaUpdateLocalUsage(payload,id);
+      const popup=document.getElementById('codex-quota-popover');
+      return {animations:popup.getAnimations({subtree:true}).length,overflow:popup.scrollWidth-popup.clientWidth};
+    },{range,id,payload:dailyChartPayload(range)});
+    assert.ok(refreshed.animations>0);assert.equal(refreshed.overflow,0);
+    await page.keyboard.press('Escape');await page.waitForTimeout(800);await assertMotionClean(page);
+  } finally {await close(page);}
+});
+
+test('statistics inner layout preserves a scrolled short viewport and disposes on reinjection',async()=>{
+  const page=await pageFor(officialPayload(),{width:390,height:600},{deviceScaleFactor:1.25});
+  try {
+    await showLocalUsage(page);const {range,id}=await localUsageRequest(page);await updateLocalUsage(page,localUsagePayload(range),id);
+    await page.locator('.cq-local-usage-details summary').click();
+    await page.locator('#codex-quota-popover').evaluate(el=>el.scrollTop=80);
+    await page.emulateMedia({reducedMotion:'no-preference'});
+    const scroll=await page.locator('#codex-quota-popover').evaluate(el=>{
+      const before=el.scrollTop;el.querySelector('.cq-local-models summary').click();return before;
+    });
+    assert.ok(scroll>0);
+    await page.waitForTimeout(300);
+    assert.ok(Math.abs(await page.locator('#codex-quota-popover').evaluate(el=>el.scrollTop)-scroll)<1);
+    await page.locator('.cq-local-models summary').evaluate(el=>el.click());
+    await page.evaluate(source);await page.waitForTimeout(800);
+    assert.equal(await page.locator('#cq-local-usage').count(),0);await assertMotionClean(page);
+    assert.equal(await page.locator('#codex-quota-trigger').count(),1);
+  } finally {await close(page);}
+});
+
+test('statistics range loading stays in the existing header and hidden date fields never fly from zero geometry',async()=>{
+  const page=await pageFor(officialPayload(),{width:1024,height:1100});
+  try {
+    await showLocalUsage(page);let {range,id}=await localUsageRequest(page);await updateLocalUsage(page,localUsagePayload(range),id);
+    await page.emulateMedia({reducedMotion:'no-preference'});
+    const before=await geometry(page);
+    await page.locator('[data-period=week]').click();
+    await page.waitForTimeout(280);
+    const loading=await geometry(page);
+    assert.ok(Math.abs(loading.popup.top-before.popup.top)<1,'waiting for logs must not add a 32px status row');
+    assert.match(await page.locator('.cq-local-estimate-tag').innerText(),/读取中/);
+    ({range,id}=await localUsageRequest(page));await updateLocalUsage(page,localUsagePayload(range),id);await page.waitForTimeout(280);
+    const after=await geometry(page);assert.ok(Math.abs(after.popup.top-before.popup.top)<1);
+    const custom=await page.evaluate(()=>{
+      document.querySelector('[data-period=custom]').click();
+      const popup=document.getElementById('codex-quota-popover'),form=document.querySelector('.cq-local-dates');
+      for(const a of popup.getAnimations({subtree:true})){a.pause();a.currentTime=0;}
+      const rect=form.getBoundingClientRect(),header=document.querySelector('#cq-local-usage header').getBoundingClientRect();
+      const result={top:rect.top,headerBottom:header.bottom,frames:form.getAnimations().flatMap(a=>a.effect.getKeyframes())};
+      for(const a of popup.getAnimations({subtree:true}))a.play();return result;
+    });
+    assert.ok(custom.top>=custom.headerBottom,'new form starts beside its own content, not at viewport top');
+    assert.ok(custom.frames.every(frame=>!frame.transform),'new fields reveal locally rather than FLIP from a hidden zero rect');
+    await page.waitForTimeout(280);
+    await page.locator('[data-period=today]').click();await page.waitForTimeout(280);
+    assert.ok(Math.abs((await geometry(page)).popup.top-before.popup.top)<1);
+  } finally {await close(page);}
+});
+
+test('themed inline calendar supports leap days, keyboard, Escape and strict date validation without requests',async()=>{
+  const page=await pageFor(officialPayload(),{width:1024,height:1000});
+  try {
+    await showLocalUsage(page);const {range,id}=await localUsageRequest(page);await updateLocalUsage(page,localUsagePayload(range),id);
+    await page.locator('[data-period=custom]').click();await page.locator('[name=start]').fill('2024-02-29');
+    await page.locator('[data-date-field=start]').click();
+    assert.equal(await page.locator('.cq-local-calendar').isVisible(),true);
+    assert.equal(await page.locator('.cq-calendar-grid [aria-selected=true]').getAttribute('data-date'),'2024-02-29');
+    await page.keyboard.press('ArrowRight');await page.keyboard.press('Enter');
+    assert.equal(await page.locator('[name=start]').inputValue(),'2024-03-01');assert.equal(await page.locator('.cq-local-calendar').isVisible(),false);
+    assert.equal((await localUsageRequest(page)).id,id);
+    await page.locator('[data-date-field=end]').click();await page.keyboard.press('Escape');
+    assert.equal(await page.locator('.cq-local-calendar').isVisible(),false);assert.equal(await page.locator('#codex-quota-popover').isVisible(),true);
+    assert.equal(await page.locator('[name=end]').evaluate(el=>el===document.activeElement),true);
+    for(const invalid of ['2024-02-30','2024-2-01','2021-12-31','2099-01-01']){
+      await page.locator('[name=start]').fill(invalid);await page.locator('.cq-local-dates button[type=submit]').click();
+      assert.equal((await localUsageRequest(page)).id,id,`invalid date ${invalid} must not request logs`);
+    }
+    await page.locator('[name=start]').fill('2024-03-03');await page.locator('[name=end]').fill('2024-03-01');
+    await page.locator('.cq-local-dates button[type=submit]').click();assert.equal((await localUsageRequest(page)).id,id);
+    await page.locator('[name=start]').fill('2024-02-29');await page.locator('.cq-local-dates button[type=submit]').click();
+    const query=await localUsageRequest(page);assert.notEqual(query.id,id);assert.deepEqual(query.range,{start:'2024-02-29',end:'2024-03-01'});
+  } finally {await close(page);}
+});
+
+test('calendar uses host themes, stays inside narrow short popovers and disables future dates',async()=>{
+  for(const dark of [false,true]){
+    const page=await pageFor(officialPayload(),{width:390,height:620},{deviceScaleFactor:1.25});
+    try {
+      if(dark)await page.evaluate(()=>{document.documentElement.classList.add('dark');document.documentElement.style.setProperty('--color-surface-elevated-secondary','#262824');document.documentElement.style.setProperty('--color-text','#e7e5db');});
+      await showLocalUsage(page);const {range,id}=await localUsageRequest(page);await updateLocalUsage(page,localUsagePayload(range),id);
+      await page.locator('[data-period=custom]').click();await page.locator('[data-date-field=start]').click();
+      const view=await page.evaluate(()=>{
+        const c=document.querySelector('.cq-local-calendar'),p=document.getElementById('codex-quota-popover'),a=c.getBoundingClientRect(),b=p.getBoundingClientRect();
+        return {inside:a.left>=b.left&&a.right<=b.right&&a.top>=b.top&&a.bottom<=b.bottom,overflow:c.scrollWidth-c.clientWidth,
+          background:getComputedStyle(c).backgroundColor,surface:getComputedStyle(p).backgroundColor,
+          future:[...c.querySelectorAll('[data-date]')].filter(n=>n.dataset.date>new Date().toLocaleDateString('en-CA')).every(n=>n.disabled),
+          tabStops:c.querySelectorAll('[role=gridcell][tabindex="0"]').length};
+      });
+      assert.equal(view.inside,true);assert.equal(view.overflow,0);assert.equal(view.background,dark?'rgb(38, 40, 36)':'rgb(245, 243, 235)');assert.equal(view.future,true);assert.equal(view.tabStops,1);
+      await page.keyboard.press('PageUp');await page.keyboard.press('Home');
+      assert.equal(await page.locator('.cq-calendar-grid button:focus').count(),1);
+      await page.emulateMedia({forcedColors:'active'});assert.equal(await page.locator('.cq-local-calendar').isVisible(),true);
+      await page.locator('[data-period=week]').click();assert.equal(await page.locator('.cq-local-calendar').isVisible(),false);
+    } finally {await close(page);}
+  }
+});
+
+const releasePayload = (overrides={}) => ({currentVersion:'2.5.1',latestVersion:'2.6.0',
+  releaseUrl:'https://github.com/DrFanghaiz/codex-usage-card/releases/tag/v2.6.0',
+  lastSuccessAt:new Date().toISOString(),lastAttemptAt:new Date().toISOString(),nextCheckAt:new Date(Date.now()+86400000).toISOString(),errorCode:null,...overrides});
+async function releaseProbe(page) {
+  await page.evaluate(()=>{
+    const info=console.info;globalThis.__releaseRequests=[];
+    console.info=(...args)=>{if(args[0]==='__codexQuotaReleaseRequest__')__releaseRequests.push(args[1]);return info.apply(console,args);};
+  });
+  await page.evaluate(source);await settle(page);
+  return page.evaluate(()=>__releaseRequests.at(-1));
+}
+async function replyRelease(page,payload,id) {await page.evaluate(({payload,id})=>__codexQuotaUpdateRelease(payload,id),{payload,id});}
+
+test('release reminders compare stable versions numerically, reject unsafe metadata and keep button geometry',async()=>{
+  const page=await pageFor();
+  try {
+    const id=await releaseProbe(page);assert.match(id,/^[a-zA-Z0-9-]{1,80}$/);
+    await open(page);
+    const before=await page.locator('.cq-settings-button').boundingBox();
+    const data=releasePayload({currentVersion:'2.9.0',latestVersion:'2.10.0',releaseUrl:'https://github.com/DrFanghaiz/codex-usage-card/releases/tag/v2.10.0'});
+    await replyRelease(page,{...data,releaseUrl:'https://example.invalid/update'},id);
+    assert.equal(await page.locator('.cq-settings-button[data-cq-update]').count(),0);
+    await replyRelease(page,{...data,latestVersion:'2.10.0-rc.1'},id);
+    assert.equal(await page.locator('.cq-settings-button[data-cq-update]').count(),0);
+    await replyRelease(page,data,id);
+    assert.equal(await page.locator('.cq-settings-button[data-cq-update]').count(),1);
+    assert.match(await page.locator('.cq-settings-button').getAttribute('aria-label'),/有新版本/);
+    assert.deepEqual(await page.locator('.cq-settings-button').boundingBox(),before);
+    assert.equal(await page.locator('[popover]:popover-open').count(),1);
+    await page.locator('.cq-settings-button').click();
+    assert.match(await page.locator('.cq-release-link').innerText(),/2\.10\.0/);
+    assert.equal(await page.locator('.cq-release-link').getAttribute('href'),data.releaseUrl);
+    assert.equal(await page.locator('.cq-settings-button[data-cq-update]').count(),0);
+  } finally {await close(page);}
+});
+
+test('release check failures retain confirmed newer versions and unknown checks never claim latest',async()=>{
+  const page=await pageFor();
+  try {
+    let id=await releaseProbe(page);
+    await replyRelease(page,releasePayload({latestVersion:null,releaseUrl:null,lastSuccessAt:null,errorCode:'UPDATE_CHECK_FAILED'}),id);
+    await open(page);await page.locator('.cq-settings-button').click();
+    assert.doesNotMatch(await page.locator('.cq-release-link').getAttribute('aria-label'),/已是最新/);
+    assert.match(await page.locator('.cq-release-link').getAttribute('title'),/暂未确认/);
+    id=await releaseProbe(page);await replyRelease(page,releasePayload(),id);
+    assert.equal(await page.locator('.cq-settings-button[data-cq-update]').count(),1);
+    id=await releaseProbe(page);
+    await replyRelease(page,releasePayload({latestVersion:null,releaseUrl:null,lastSuccessAt:null,errorCode:'UPDATE_CHECK_FAILED'}),id);
+    assert.equal(await page.locator('.cq-settings-button[data-cq-update]').count(),1);
+    await page.locator('.cq-settings-button').click();
+    assert.match(await page.locator('.cq-release-link').innerText(),/2\.6\.0/);
+    assert.match(await page.locator('.cq-release-link').getAttribute('title'),/保留上次成功/);
+    id=await releaseProbe(page);await replyRelease(page,releasePayload({currentVersion:'2.10.0',latestVersion:'2.9.9',releaseUrl:'https://github.com/DrFanghaiz/codex-usage-card/releases/tag/v2.9.9'}),id);
+    assert.equal(await page.locator('.cq-settings-button[data-cq-update]').count(),0);
+  } finally {await close(page);}
+});
+
+test('viewed release reminders persist across reinjection and synchronize between windows',async()=>{
+  const {context,pages}=await sharedPages(2);
+  try {
+    for(const page of pages) {
+      await update(page,officialPayload());const id=await releaseProbe(page);await replyRelease(page,releasePayload(),id);
+      assert.equal(await page.locator('.cq-settings-button[data-cq-update]').count(),1);
+    }
+    await open(pages[0]);await pages[0].locator('.cq-settings-button').click();
+    await pages[1].waitForFunction(()=>!document.querySelector('.cq-settings-button[data-cq-update]'));
+    assert.equal(await pages[0].evaluate(()=>localStorage.getItem('codex-usage-card.release-seen.v1')),'2.6.0');
+    const id=await releaseProbe(pages[0]);await replyRelease(pages[0],releasePayload(),id);
+    assert.equal(await pages[0].locator('.cq-settings-button[data-cq-update]').count(),0);
+    const next=await releaseProbe(pages[1]);await replyRelease(pages[1],releasePayload({latestVersion:'2.7.0',releaseUrl:'https://github.com/DrFanghaiz/codex-usage-card/releases/tag/v2.7.0'}),next);
+    assert.equal(await pages[1].locator('.cq-settings-button[data-cq-update]').count(),1);
+    for(const page of pages)await page.evaluate(()=>{globalThis.releaseStorageEvents=0;window.addEventListener('storage',()=>releaseStorageEvents++);});
+    await open(pages[1]);await pages[1].locator('.cq-settings-button').click();
+    await pages[0].locator('.cq-settings-button').click();await settle(pages[0]);
+    for(const page of pages){
+      assert.equal(await page.evaluate(()=>localStorage.getItem('codex-usage-card.release-seen.v1')),'2.7.0','older window cannot lower the read version');
+      assert.equal(await page.locator('.cq-settings-button[data-cq-update]').count(),0);
+      assert.ok(await page.evaluate(()=>releaseStorageEvents)<5,'different cached versions must not bounce storage events');
+    }
+  } finally {for(const page of pages)await close(page);await context.close();}
+});
+
+test('release reminders are acknowledged only when the settings version row is visible',async()=>{
+  const page=await pageFor(officialPayload(),{width:1024,height:720});
+  try {
+    const id=await releaseProbe(page);await open(page);await page.locator('.cq-settings-button').click();
+    await page.evaluate(()=>{Object.defineProperty(document,'visibilityState',{configurable:true,get:()=> 'hidden'});document.dispatchEvent(new Event('visibilitychange'));});
+    await replyRelease(page,releasePayload(),id);
+    assert.equal(await page.locator('.cq-settings-button[data-cq-update]').count(),1);
+    assert.equal(await page.evaluate(()=>globalThis.__codexQuotaReleaseSeen||null),null);
+    await page.evaluate(()=>{delete document.visibilityState;document.dispatchEvent(new Event('visibilitychange'));});await settle(page);
+    assert.equal(await page.locator('.cq-settings-button[data-cq-update]').count(),0);
+    assert.equal(await page.evaluate(()=>globalThis.__codexQuotaReleaseSeen),'2.6.0');
+  } finally {await close(page);}
+});
+
+test('release checks time out silently, pause while hidden and reject callbacks from disposed requests',async()=>{
+  const page=await pageFor();
+  try {
+    const now=Date.now();await page.clock.install({time:new Date(now)});await page.clock.pauseAt(new Date(now+1000));
+    await page.evaluate(()=>{const info=console.info;globalThis.__releaseRequests=[];console.info=(...args)=>{if(args[0]==='__codexQuotaReleaseRequest__')__releaseRequests.push(args[1]);return info.apply(console,args);};});
+    await page.evaluate(source);await page.clock.runFor(1);
+    assert.equal(await page.evaluate(()=>__releaseRequests.length),1);
+    await page.clock.fastForward(20001);
+    assert.equal(await page.locator('.cq-settings-button[data-cq-update]').count(),0);
+    assert.equal(await page.locator('[popover]:popover-open').count(),0);
+    await page.evaluate(()=>{Object.defineProperty(document,'visibilityState',{configurable:true,get:()=> 'hidden'});document.dispatchEvent(new Event('visibilitychange'));});
+    await page.clock.fastForward(86400000);assert.equal(await page.evaluate(()=>__releaseRequests.length),1);
+    await page.evaluate(()=>{delete document.visibilityState;document.dispatchEvent(new Event('visibilitychange'));});await page.clock.runFor(1);
+    const old=await page.evaluate(()=>__releaseRequests.at(-1));assert.equal(await page.evaluate(()=>__releaseRequests.length),2);
+    await page.evaluate(source);await page.clock.runFor(1);const current=await page.evaluate(()=>__releaseRequests.at(-1));assert.notEqual(current,old);
+    await replyRelease(page,releasePayload(),old);assert.equal(await page.locator('.cq-settings-button[data-cq-update]').count(),0);
+    await replyRelease(page,releasePayload(),current);assert.equal(await page.locator('.cq-settings-button[data-cq-update]').count(),1);
+  } finally {await close(page);}
 });

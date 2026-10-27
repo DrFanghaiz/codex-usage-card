@@ -498,6 +498,13 @@ __HTTP_METHODS__
             Check(!TryConsoleRequest(correlated.Replace("nonce-7", invalid.Replace("\n", "\\n")), "__codexQuotaOfficialRequest__", out requestId), "Invalid request ID rejected");
         Check(!TryConsoleRequest(correlated.Replace("__codexQuotaOfficialRequest__", "__codexQuotaDoctorRequest__"), "__codexQuotaDoctorRequest__", out requestId), "Doctor remains single-argument");
         Check(TryConsoleRequest(quotaEvent, "__codexQuotaOfficialRequest__", out requestId) && requestId == null, "Legacy marker remains supported");
+        var releaseEvent = correlated.Replace("__codexQuotaOfficialRequest__", "__codexQuotaReleaseRequest__");
+        Check(TryConsoleRequest(releaseEvent, "__codexQuotaReleaseRequest__", out requestId) && requestId == "nonce-7", "Release event retains its request ID");
+        Check(!TryConsoleRequest(quotaEvent.Replace("__codexQuotaOfficialRequest__", "__codexQuotaReleaseRequest__"), "__codexQuotaReleaseRequest__", out requestId), "Release requests require a nonce");
+        using (var releaseQueue = new CdpSocket("synthetic") { RequestEvent = releaseEvent }) {
+            SendCommand(releaseQueue, "Runtime.evaluate", new Dictionary<string, object>());
+            Check(releaseQueue.PendingEvents.Count == 1 && releaseQueue.PendingEvents.Dequeue() == releaseEvent, "Release events survive active CDP commands");
+        }
         var apiEvent = quotaEvent.Replace("__codexQuotaOfficialRequest__", "__codexQuotaApiRequest__");
         Check(!TryConsoleRequest(apiEvent, "__codexQuotaApiRequest__", out requestId), "Removed API request marker must be rejected");
         using (var ignoredApi = new CdpSocket("synthetic") { RequestEvent = apiEvent }) {

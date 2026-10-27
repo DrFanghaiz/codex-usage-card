@@ -8,8 +8,10 @@
   }
   const {animate, spring, createElement, ChevronUp} = __codexQuotaLibraries;
   const restoreOpen = Boolean(document.getElementById("codex-quota-popover")?.matches(":popover-open"));
+  globalThis.__codexQuotaReleaseCleanup?.();
   globalThis.__codexQuotaMotionCleanup?.();
   globalThis.__codexQuotaNoticeCleanup?.();
+  globalThis.__codexQuotaLocalUsageCleanup?.();
   for (const key of Object.keys(globalThis)) if (key.startsWith("__codexQuotaApi") || key === "__codexQuotaUpdateApi") delete globalThis[key];
   document.getElementById("cq-settings")?.remove();
   globalThis.__codexQuotaGeometryCleanup?.();
@@ -21,6 +23,7 @@
   const motions = new Map();
   let sharedPopover = null;
   let paneMotion = null;
+  let localLayout = null;
   const refreshFeedbackTimers = new Map();
   const requestTimers = new Map();
   const requestEpoch = crypto.getRandomValues(new Uint32Array(2)).join("-");
@@ -92,6 +95,7 @@
     return control;
   };
   const finishMotion = () => {
+    finishLocalLayout();
     finishPaneMotion();
     finishSharedPopover();
     for (const [element, record] of [...motions]) {
@@ -105,11 +109,13 @@
   // Optical drawings for a 16px tool slot, rather than downscaling a 24px icon.
   const toolIcons = {
     refresh: [["path", {d: "M13 8a5 5 0 1 1-1.4645-3.5355M11.5355 1.75v2.7145H8.75"}]],
+    usage: [["path", {d: "M2.5 12.5h11M4 9V5.5M8 9V2.5M12 9V7"}]],
     settings: [["path", {d: "M2.5 5h3M8.5 5h5M2.5 11h5M10.5 11h3"}], ["circle", {cx: "7", cy: "5", r: "1.5"}], ["circle", {cx: "9", cy: "11", r: "1.5"}]],
     done: [["path", {d: "m3.5 8.25 3 3 6.25-6.5"}]],
     warning: [["circle", {cx: "8", cy: "8", r: "5.5"}], ["path", {d: "M8 4.75v3.5M8 11.25h.01"}]],
     back: [["path", {d: "m9.75 3.5-4.5 4.5 4.5 4.5"}]],
     close: [["path", {d: "m4 4 8 8M12 4l-8 8"}]],
+    calendar: [["rect", {x:"2.5",y:"3.5",width:"11",height:"10",rx:"2"}], ["path", {d:"M5.5 2v3M10.5 2v3M2.5 7h11M5.5 9.5h.01M8 9.5h.01M10.5 9.5h.01"}]],
   };
   const toolIcon = (name, className) => createElement(toolIcons[name], {
     class: className, viewBox: "0 0 16 16", width: "16", height: "16",
@@ -117,7 +123,7 @@
   });
   const pressFeedback = (button) => {
     // Keep tiny vector strokes at their optical size; tool buttons use :active color.
-    if (button.matches(".cq-refresh,.cq-settings-button")) return;
+    if (button.matches(".cq-refresh,.cq-settings-button,.cq-local-usage-button")) return;
     let pressed = false;
     const press = () => {
       if (button.disabled || pressed) return;
@@ -268,6 +274,95 @@
   };
   let preferences = readSettings();
   const words = (zh, en) => isChinese ? zh : en;
+  const releaseSeenKey = "codex-usage-card.release-seen.v1";
+  const releaseBase = "https://github.com/DrFanghaiz/codex-usage-card/releases/";
+  const releaseVersion = value => {
+    if (typeof value !== "string" || !/^(0|[1-9]\d{0,9})\.(0|[1-9]\d{0,9})\.(0|[1-9]\d{0,9})$/.test(value)) return null;
+    const parts=value.split(".").map(Number);return parts.every(part=>part<=2147483647)?parts:null;
+  };
+  const newerRelease = (a,b) => {
+    const left=releaseVersion(a),right=releaseVersion(b);
+    if(!left||!right)return false;
+    for(let i=0;i<3;i++)if(left[i]!==right[i])return left[i]>right[i];
+    return false;
+  };
+  const highestSeenRelease = (...values) => values.reduce((latest,value)=>releaseVersion(value) && (!latest || newerRelease(value,latest)) ? value : latest,null);
+  const releaseDate = value => typeof value === "string" && value.length<=40 && /^\d{4}-\d\d-\d\dT/.test(value) && Number.isFinite(Date.parse(value));
+  const validRelease = data => data && releaseVersion(data.currentVersion) &&
+    (data.latestVersion===null ? data.releaseUrl===null && data.lastSuccessAt===null : releaseVersion(data.latestVersion) &&
+      data.releaseUrl===releaseBase+"tag/v"+data.latestVersion && releaseDate(data.lastSuccessAt)) &&
+    (data.lastAttemptAt===null || releaseDate(data.lastAttemptAt)) && releaseDate(data.nextCheckAt) &&
+    (data.errorCode===null || data.errorCode==="UPDATE_CHECK_FAILED");
+  let releaseState = validRelease(globalThis.__codexQuotaReleasePayload) ? globalThis.__codexQuotaReleasePayload : null;
+  let releaseSeen = globalThis.__codexQuotaReleaseSeen || null;
+  try {releaseSeen=localStorage.getItem(releaseSeenKey) || releaseSeen;} catch {}
+  let releaseTimer=null, releaseDeadline=null, releaseRequest=null, releaseSequence=0;
+  let releaseDue=0, releaseCheckFailed=Boolean(releaseState?.errorCode);
+  const hasNewRelease = () => Boolean(releaseState && newerRelease(releaseState.latestVersion,releaseState.currentVersion));
+  const syncReleaseUI = () => {
+    const available=hasNewRelease(), panel=document.getElementById("cq-settings"),link=panel?.querySelector(".cq-release-link");
+    if(available && link && document.visibilityState==="visible" && !panel.hidden && !panel.inert && panel.getAttribute("aria-hidden")!=="true" && panel.closest(":popover-open") && Number(getComputedStyle(panel).opacity)>.99 && visible(link)) {
+      let stored=null;
+      try {stored=localStorage.getItem(releaseSeenKey);} catch {}
+      releaseSeen=highestSeenRelease(releaseSeen,stored,releaseState.latestVersion);globalThis.__codexQuotaReleaseSeen=releaseSeen;
+      try {if(stored!==releaseSeen)localStorage.setItem(releaseSeenKey,releaseSeen);} catch {}
+    }
+    for(const button of document.querySelectorAll(".cq-settings-button")) {
+      const unseen=available && (!releaseVersion(releaseSeen) || newerRelease(releaseState.latestVersion,releaseSeen));
+      button.toggleAttribute("data-cq-update",unseen);
+      button.title=words("额度卡设置","Usage card settings")+(unseen?words(" · 有新版本"," · Update available"):"");
+      button.setAttribute("aria-label",button.title);
+    }
+    if(link) {
+      link.href=available?releaseBase+"tag/v"+releaseState.latestVersion:releaseBase+"latest";
+      link.firstElementChild.textContent=available?words(`发现 v${releaseState.latestVersion}`,`New v${releaseState.latestVersion}`)
+        :releaseState?words(`当前 v${releaseState.currentVersion}`,`Current v${releaseState.currentVersion}`):words("版本更新","Updates");
+      link.lastElementChild.textContent=available?words("查看新版","View release"):words("版本说明","Release notes");
+      link.title=releaseCheckFailed?words("暂未确认最新版本；保留上次成功结果。","Latest version not confirmed; previous result retained.")
+        :releaseState?.lastSuccessAt && Date.now()<Date.parse(releaseState.nextCheckAt)?available?words("查看更新说明与安装方式","View release notes and installation instructions")
+        :newerRelease(releaseState.currentVersion,releaseState.latestVersion)?words("当前版本较新","Current version is newer")
+        :words("已是最新稳定版","Latest stable version"):words("暂未确认最新版本","Latest version not confirmed");
+      link.setAttribute("aria-label",`${link.firstElementChild.textContent} · ${link.lastElementChild.textContent} · ${link.title}`);
+    }
+  };
+  const scheduleReleaseCheck = () => {
+    clearTimeout(releaseTimer);releaseTimer=null;
+    if(disposed || document.visibilityState!=="visible" || releaseRequest)return;
+    releaseTimer=setTimeout(requestReleaseCheck,Math.min(86400000,Math.max(0,releaseDue-Date.now())));
+  };
+  const requestReleaseCheck = () => {
+    if(disposed || document.visibilityState!=="visible" || releaseRequest)return;
+    releaseRequest=`release-${requestEpoch}-${uiRevision}-${++releaseSequence}`;
+    const id=releaseRequest;
+    releaseDeadline=setTimeout(()=>{
+      if(releaseRequest!==id)return;
+      releaseRequest=null;releaseCheckFailed=true;releaseDue=Date.now()+86400000;
+      if(releaseState) {releaseState={...releaseState,errorCode:"UPDATE_CHECK_FAILED",nextCheckAt:new Date(releaseDue).toISOString()};globalThis.__codexQuotaReleasePayload=releaseState;}
+      syncReleaseUI();scheduleReleaseCheck();
+    },20000);
+    console.info("__codexQuotaReleaseRequest__",id);
+  };
+  globalThis.__codexQuotaUpdateRelease = (data,id) => {
+    if(disposed || id!==releaseRequest || !validRelease(data))return;
+    clearTimeout(releaseDeadline);releaseDeadline=null;releaseRequest=null;
+    if(data.errorCode && releaseState?.latestVersion && (!data.lastSuccessAt || Date.parse(data.lastSuccessAt)<Date.parse(releaseState.lastSuccessAt)))
+      data={...data,latestVersion:releaseState.latestVersion,releaseUrl:releaseState.releaseUrl,lastSuccessAt:releaseState.lastSuccessAt};
+    releaseState={...data};globalThis.__codexQuotaReleasePayload=releaseState;
+    releaseCheckFailed=Boolean(data.errorCode);releaseDue=Math.max(Date.now()+60000,Date.parse(data.nextCheckAt));
+    syncReleaseUI();scheduleReleaseCheck();
+  };
+  const releaseVisibility = () => {
+    if(document.visibilityState!=="visible"){clearTimeout(releaseTimer);releaseTimer=null;return;}
+    syncReleaseUI();scheduleReleaseCheck();
+  };
+  const releaseStorage = event => {if(event.key===releaseSeenKey || event.key===null){releaseSeen=highestSeenRelease(releaseSeen,event.newValue);syncReleaseUI();}};
+  document.addEventListener("visibilitychange",releaseVisibility);
+  window.addEventListener("storage",releaseStorage);
+  globalThis.__codexQuotaReleaseCleanup = () => {
+    clearTimeout(releaseTimer);clearTimeout(releaseDeadline);releaseRequest=null;
+    document.removeEventListener("visibilitychange",releaseVisibility);window.removeEventListener("storage",releaseStorage);
+    delete globalThis.__codexQuotaUpdateRelease;
+  };
   const requestErrorReasons = {
     AUTH_REQUIRED: words("请重新登录", "Sign in again"),
     RATE_LIMITED: words("服务端限流", "Rate limited"),
@@ -606,12 +701,12 @@
     const popup = document.getElementById("codex-quota-popover");
     const host = opener.closest(`.${compactClass}`);
     if (!popup || !host) return;
-    if (existing) { animatePane(host, existing, true); existing.querySelector("button").focus({preventScroll: true}); return; }
+    if (existing) { animatePane(host, existing, true); syncReleaseUI(); existing.querySelector("button").focus({preventScroll: true}); return; }
     const panel = document.createElement("div");
     panel.id = "cq-settings";
     panel.innerHTML = `<form method="dialog"><header><h2 id="cq-settings-title"></h2><button value="close" formnovalidate></button></header>
       <div class="cq-options"><div class="cq-option-group cq-display-options" role="group"><h3></h3></div><div class="cq-option-group cq-alert-options" role="group"><h3></h3></div></div>
-      <div class="cq-tools"><button type="button" class="cq-doctor"></button><button type="button" class="cq-copy"></button><a target="_blank" rel="noopener noreferrer" href="https://github.com/DrFanghaiz/codex-usage-card/releases/latest"></a></div>
+      <div class="cq-tools"><button type="button" class="cq-doctor"></button><button type="button" class="cq-copy"></button><a class="cq-release-link" target="_blank" rel="noopener noreferrer" href="https://github.com/DrFanghaiz/codex-usage-card/releases/latest"><span></span><span></span></a></div>
       <p class="cq-settings-feedback" role="status"></p>
       <pre id="cq-diagnosis" role="status"></pre></form>`;
     panel.querySelector("h2").textContent = words("额度设置", "Usage settings");
@@ -703,8 +798,6 @@
       try { await navigator.clipboard.writeText(panel.querySelector("pre").textContent); feedback.textContent = words("已复制", "Copied"); }
       catch { feedback.textContent = words("复制失败，请选中文字手动复制。", "Copy failed; select the diagnostic text to copy manually."); }
     };
-    panel.querySelector("a").textContent = words("版本更新", "Release notes");
-    panel.querySelector("a").setAttribute("aria-label", words("检查更新与版本说明", "Check updates and release notes"));
     panel.querySelector("form").onsubmit = event => {
       event.preventDefault();
       clearTimeout(globalThis.__codexQuotaDiagnosisTimer);
@@ -714,7 +807,593 @@
     panel.hidden = true;
     popup.append(panel);
     animatePane(host, panel, true);
+    syncReleaseUI();
     back.focus({preventScroll: true});
+  };
+
+  // Reference totals are empirical Pro 200 samples, not official subscription limits.
+  const localUsageBaselines = new Map([["gpt-6-astra", 438000000], ["gpt-6.1-sol", 2354000000]]);
+  // OpenAI Standard short-context list prices, USD / 1M tokens, checked 2026-10-27.
+  const localApiPrices = new Map([
+    ["gpt-6-astra", [10, 1, 50, 12.5, 25]], ["gpt-6.1-sol", [2, .1, 10, 2.5, 5]],
+    ["gpt-6.1-terra", [1, .05, 5, 1.25, 2.5]], ["gpt-6-luna", [.1, .01, .5, .125, .25]],
+    ["gpt-6-sol", [2, .2, 10, 2.5, 2.5]], ["gpt-5.6-sol", [4, .4, 20, 5, 10]],
+  ]);
+  const localIssueLabels = {
+    SOURCE_UNCONFIRMED: words("来源未确认", "Unconfirmed source"),
+    BASELINE_MISSING: words("历史起点缺失", "Missing history baseline"),
+    INVALID_TOKEN_EVENT: words("计数记录损坏", "Invalid token record"),
+    INVALID_TIMESTAMP: words("记录日期无效", "Invalid timestamp"),
+    FILE_UNREADABLE: words("日志无法读取", "Unreadable log"),
+    CACHE_WRITE_UNRECORDED: words("写缓存计数缺失", "Cache-write count missing"),
+  };
+  const apiEquivalent = row => {
+    const rates = localApiPrices.get(row.model);
+    if (!rates) return null;
+    const write = row.cacheWriteInputTokens || 0;
+    const ordinary = row.inputTokens - row.cachedInputTokens - write;
+    const common = ordinary * rates[0] + row.cachedInputTokens * rates[1] + row.outputTokens * rates[2];
+    return [(common + write * rates[3]) / 1e6, (common + write * rates[4]) / 1e6];
+  };
+  const moneyText = value => value > 0 && value < .01 ? "<$0.01" : new Intl.NumberFormat(navigator.language,{style:"currency",currency:"USD",currencyDisplay:"narrowSymbol"}).format(value);
+  const localDate = date => `${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,"0")}-${String(date.getDate()).padStart(2,"0")}`;
+  let localUsageTimer, localUsageRequestId, localUsageSequence = 0;
+  const numberText = value => new Intl.NumberFormat(navigator.language, {maximumFractionDigits: 0}).format(value);
+  const compactLocalTokens = value => {
+    const units = isChinese ? [[1e8,"亿"],[1e4,"万"]] : [[1e9,"B"],[1e6,"M"],[1e3,"K"]];
+    const [scale,unit] = units.find(([scale]) => value >= scale) || [1,""];
+    const number = new Intl.NumberFormat(navigator.language,{maximumFractionDigits:scale === 1 ? 0 : value / scale >= 100 ? 1 : 2}).format(value / scale);
+    return {number,unit,text:number + unit};
+  };
+  const localDayIndex = key => Date.parse(`${key}T00:00:00Z`) / 86400000;
+  const localDayKey = index => new Date(index * 86400000).toISOString().slice(0,10);
+  const validLocalModels = models => Array.isArray(models) && models.every(row => typeof row?.model === "string" &&
+    ["inputTokens","cachedInputTokens","outputTokens","totalTokens"].every(key => Number.isSafeInteger(row[key]) && row[key] >= 0) &&
+    (row.cacheWriteInputTokens == null || Number.isSafeInteger(row.cacheWriteInputTokens) && row.cacheWriteInputTokens >= 0) &&
+    (row.cacheWriteKnown == null || typeof row.cacheWriteKnown === "boolean") &&
+    row.cachedInputTokens + (row.cacheWriteInputTokens || 0) <= row.inputTokens && row.totalTokens === row.inputTokens + row.outputTokens);
+  const validLocalIssues = issues => issues == null || Array.isArray(issues) && issues.every(issue => Object.hasOwn(localIssueLabels,issue?.code) &&
+    Number.isSafeInteger(issue.count) && issue.count >= 0 && typeof issue.affectsTotals === "boolean" && typeof issue.dateUnknown === "boolean" &&
+    (issue.missingTokens === null || Number.isSafeInteger(issue.missingTokens) && issue.missingTokens >= 0));
+  const validLocalDaily = data => {
+    if (data.daily == null) return true;
+    if (!Array.isArray(data.daily)) return false;
+    const dates = new Set();
+    for (const day of data.daily) {
+      if (typeof day?.date !== "string" || !/^\d{4}-\d\d-\d\d$/.test(day.date) || !Number.isFinite(localDayIndex(day.date)) ||
+          localDayKey(localDayIndex(day.date)) !== day.date || day.date < data.start || day.date > data.end || dates.has(day.date) ||
+          !validLocalModels(day.models) || !Number.isSafeInteger(day.eventCount) || day.eventCount < 0 || typeof day.partial !== "boolean" || !validLocalIssues(day.issues)) return false;
+      dates.add(day.date);
+    }
+    const aggregate = models => {
+      const totals = new Map();
+      for (const row of models) {
+        const sum = totals.get(row.model) || [0,0,0,0];
+        [row.inputTokens,row.cachedInputTokens,row.cacheWriteInputTokens || 0,row.outputTokens].forEach((value,index)=>sum[index]+=value);
+        totals.set(row.model,sum);
+      }
+      return totals;
+    };
+    const expected=aggregate(data.models), actual=aggregate(data.daily.flatMap(day=>day.models));
+    return actual.size === expected.size && [...expected].every(([model,values])=>actual.has(model) &&
+      values.every((value,index)=>Number.isSafeInteger(value) && value === actual.get(model)[index])) &&
+      data.daily.reduce((sum,day)=>sum+day.eventCount,0) === data.eventCount;
+  };
+  const stopLocalMotions = root => {
+    for (const node of [...motions.keys()]) if (node === root || root.contains(node)) stopMotion(node);
+  };
+  const finishLocalLayout = () => {
+    const state = localLayout;
+    if (!state) return;
+    localLayout = null;
+    for (const animation of state.animations) {animation.onfinish = null;animation.cancel();}
+    for (const [node, styles] of state.styles) for (const [name,value,priority] of styles) {
+      if (value) node.style.setProperty(name,value,priority);else node.style.removeProperty(name);
+    }
+    for (const ghost of state.ghosts) ghost.remove();
+    state.popup.scrollTop=state.scroll;
+    positionPopover();
+  };
+  const localBlocks = panel => [...panel.children].flatMap(node => node.matches(".cq-local-result") ? [...node.children] : [node]);
+  const localDetailBodies = panel => {
+    for (const details of panel.querySelectorAll("details")) {
+      if (details.querySelector(":scope > .cq-local-detail-body")) continue;
+      const body = document.createElement("div");body.className = "cq-local-detail-body";
+      body.append(...[...details.children].filter(node => node.tagName !== "SUMMARY"));details.append(body);
+    }
+  };
+  const animateLocalLayout = (panel, change) => {
+    const popup = panel.parentElement;
+    const enabled = !paneMotion && !sharedPopover && popup?.matches(":popover-open") && !reducedMotion.matches && document.visibilityState === "visible";
+    const oldBox = popup.getBoundingClientRect(), clip = parseFloat(getComputedStyle(popup).clipPath.match(/^inset\(([-\d.]+)px/)?.[1] || 0);
+    const before = new Map(localBlocks(panel).filter(node=>node.getClientRects().length && !node.hasAttribute("data-cq-quiet"))
+      .map(node => [node.tagName + node.className, node.getBoundingClientRect()]));
+    const arrows = new Map([...panel.querySelectorAll(".cq-local-detail-arrow")].map(node => [node,getComputedStyle(node).transform]));
+    const bodies = [...panel.querySelectorAll("details[open] > .cq-local-detail-body"),...(localLayout?.ghosts || [])].map(visible => ({node:visible.cqSource || visible,box:visible.getBoundingClientRect(),copy:visible.cloneNode(true),opacity:getComputedStyle(visible).opacity,clipPath:getComputedStyle(visible).clipPath}));
+    finishLocalLayout();
+    change();localDetailBodies(panel);positionPopover();
+    if (!enabled || !panel.isConnected) return;
+    const end = popup.getBoundingClientRect(), targets = new Map(localBlocks(panel).map(node=>[node,node.getBoundingClientRect()]));
+    const panelBox = panel.getBoundingClientRect(), css = getComputedStyle(popup);
+    const state = {popup,scroll:popup.scrollTop,animations:[],ghosts:[],styles:[[popup,["height","overflow"]],[panel,["position","left","top","width"]]]
+      .map(([node,names])=>[node,names.map(name=>[name,node.style.getPropertyValue(name),node.style.getPropertyPriority(name)])])};
+    popup.style.height = Math.max(oldBox.height - clip,end.height) + "px";
+    popup.style.overflow = "clip";positionPopover();
+    const box = popup.getBoundingClientRect(), from = oldBox.top + clip - box.top, to = end.top - box.top;
+    Object.assign(panel.style,{position:"absolute",left:css.paddingLeft,top:(parseFloat(css.paddingTop)-state.scroll)+"px",width:panelBox.width+"px"});
+    localLayout = state;
+    const run = (node,frames) => {
+      const animation = node.animate(frames,{duration:220,easing:"cubic-bezier(.2,.8,.2,1)",fill:"both"});
+      state.animations.push(animation);return animation;
+    };
+    const clock = run(popup,{clipPath:[`inset(${Math.max(0,from)}px 0 0 round ${css.borderTopLeftRadius})`,`inset(${Math.max(0,to)}px 0 0 round ${css.borderTopLeftRadius})`]});
+    run(panel,{transform:[`translateY(${from}px)`,`translateY(${to}px)`]});
+    for (const [node, target] of targets) {
+      const old = before.get(node.tagName + node.className);
+      if (old) run(node,{transform:[`translateY(${old.top-target.top-oldBox.top-clip+end.top}px)`,"translateY(0px)"]});
+      else if (target.height && !node.hasAttribute("data-cq-quiet")) run(node,{opacity:[.4,1],clipPath:["inset(0 0 100% 0)","inset(0)"]});
+    }
+    for (const [arrow, transform] of arrows) if (arrow.isConnected) run(arrow,{transform:[transform,getComputedStyle(arrow).transform]});
+    for (const {node,box:bodyBox,copy,opacity,clipPath} of bodies) if (node.isConnected && !node.parentElement.open) {
+      copy.setAttribute("aria-hidden","true");copy.inert=true;copy.cqSource=node;
+      copy.className=node.className+" "+node.parentElement.className;
+      Object.assign(copy.style,{position:"absolute",left:(bodyBox.left-panelBox.left)+"px",top:(bodyBox.top-oldBox.top-clip-parseFloat(css.paddingTop)+state.scroll)+"px",width:bodyBox.width+"px",pointerEvents:"none",margin:"0",padding:"0",border:"0"});
+      panel.append(copy);state.ghosts.push(copy);
+      run(copy,{opacity:[opacity,0],clipPath:[clipPath==="none"?"inset(0)":clipPath,"inset(0 0 100% 0)"]});
+    }
+    for (const body of panel.querySelectorAll("details[open] > .cq-local-detail-body")) {
+      const prior = bodies.find(item=>item.node===body);
+      if (!prior || Number(prior.opacity)<1 || prior.clipPath!=="none") run(body,{opacity:[prior?.opacity || .4,1],clipPath:[prior?.clipPath || "inset(0 0 100% 0)","inset(0)"]});
+    }
+    clock.onfinish = () => {if (localLayout===state) finishLocalLayout();};
+  };
+  const localBarSnapshots = root => [...root.querySelectorAll(".cq-local-day")].map(day=>{
+    const bar = day.querySelector('.cq-local-day-bar[aria-hidden="true"]') || day.querySelector(".cq-local-day-bar");
+    return {height:bar.getBoundingClientRect().height,opacity:Number(getComputedStyle(bar).opacity),copy:bar.cloneNode(true)};
+  });
+  const renderLocalDaily = (data, result, addText, previousBars = []) => {
+    const chart = addText("section", "cq-local-daily", "", result);
+    chart.setAttribute("aria-label", words("每日 token 用量", "Daily token usage"));
+    const heading = addText("div", "cq-local-chart-heading", "", chart);
+    addText("span", "", words("每日用量", "Daily usage"), heading);
+    if (!data.daily) {addText("p", "cq-local-day-note", words("每日明细暂不可用，请更新 Helper。", "Daily details unavailable; update the helper."),chart);return;}
+    const navigation = addText("span", "cq-local-chart-nav", "", heading);
+    const previous = addText("button", "", "", navigation), next = addText("button", "", "", navigation);
+    previous.type = next.type = "button";
+    previous.append(toolIcon("back", ""));next.append(toolIcon("back", "cq-local-chart-next"));
+    previous.setAttribute("aria-label", words("查看更早日期", "Earlier dates"));next.setAttribute("aria-label",words("查看更晚日期", "Later dates"));
+    const detail = addText("div", "cq-local-day-detail", "", chart);
+    detail.setAttribute("role","status");detail.setAttribute("aria-atomic","true");
+    const pageLabel = addText("div", "cq-local-chart-scale", "", chart);
+    const plot = addText("div", "cq-local-chart-plot", "", chart);
+    plot.setAttribute("role","group");plot.setAttribute("aria-label",words("按日期选择用量", "Select a usage date"));
+    const selection = addText("span", "cq-local-day-selection", "", plot);selection.setAttribute("aria-hidden","true");
+    const legend = addText("div", "cq-local-chart-legend", "", chart);
+    for (const [kind,label] of [["input",words("非缓存", "Uncached")],["cache",words("缓存", "Cached")],["output",words("输出", "Output")]]) {
+      const item = addText("span", "", label, legend);item.dataset.kind = kind;
+    }
+    const first = localDayIndex(data.start), last = localDayIndex(data.end);
+    const count = chart.clientWidth - 16 >= 168 ? 7 : 5;
+    const days = new Map(data.daily.map(day=>[day.date,day]));
+    let pageEnd = last, selected = data.end, shown = false;
+    const dailyTotal = day => day?.models.reduce((sum,row)=>sum+row.totalTokens,0) || 0;
+    const showDay = date => {
+      const changed = shown && selected !== date;
+      selected = date;
+      for (const button of plot.querySelectorAll("button")) button.setAttribute("aria-pressed",String(button.dataset.date === date));
+      const button = plot.querySelector(`button[data-date="${date}"]`), box = button.getBoundingClientRect(), area = plot.getBoundingClientRect();
+      const current = getComputedStyle(selection).transform;
+      stopMotion(selection);selection.style.width = Math.min(24,box.width)+"px";
+      const target = `translateX(${box.left-area.left+(box.width-Math.min(24,box.width))/2}px)`;
+      if (shown) move(selection,{transform:[current,target]},{duration:.2,ease:[.2,.8,.2,1]});else selection.style.transform=target;
+      const day = days.get(date), tokens = dailyTotal(day);
+      detail.replaceChildren();
+      addText("div", "cq-local-day-date", `${date.replaceAll("-",".")}${day?.partial ? words(" · 统计不完整", " · Incomplete") : ""}`, detail);
+      const values = addText("div", "cq-local-day-values", "", detail);
+      const token = addText("div", "", "", values), api = addText("div", "", "", values);
+      const tokenValue = addText("strong", "", day?.eventCount ? compactLocalTokens(tokens).text : day?.partial ? words("暂不可用", "Unavailable") : words("无记录", "No records"), token);
+      tokenValue.title = day?.eventCount ? `${numberText(tokens)} token` : tokenValue.textContent;
+      addText("span", "", words("当日 token", "Daily tokens"), token);
+      const priced = (day?.models || []).map(apiEquivalent).filter(Boolean);
+      const cost = priced.reduce((sum,row)=>[sum[0]+row[0],sum[1]+row[1]],[0,0]);
+      const costValue = addText("strong", "", priced.length ? `${moneyText(cost[0])}${cost[1] > cost[0] ? ` – ${moneyText(cost[1])}` : ""}`
+        : day?.eventCount ? words("未计价", "Not priced") : "—", api);
+      costValue.title = priced.length ? `${costValue.textContent} USD · ${words("估算", "Estimate")}` : costValue.textContent;
+      const apiLabel = addText("span", "", words("API 等值", "API equivalent"), api);
+      const unpriced = (day?.models || []).filter(row=>!localApiPrices.has(row.model)).reduce((sum,row)=>sum+row.totalTokens,0);
+      if (unpriced || day?.models.some(row=>row.cacheWriteKnown === false)) {
+        apiLabel.textContent = words("部分 API 等值", "Partial API eq.");
+        costValue.title += words("；仅覆盖已有价格与计数", "; recorded counts with known prices only");
+      }
+      if (changed) {
+        const css = getComputedStyle(detail), transform = css.transform, opacity = css.opacity;
+        move(detail,{opacity:[Number(opacity)<1?Number(opacity):.6,1],transform:[transform!=="none"?transform:"translateY(3px)","translateY(0px)"]},
+          {duration:.14,ease:[.2,.8,.2,1]},()=>{detail.style.removeProperty("opacity");detail.style.removeProperty("transform");});
+      }
+      shown = true;
+    };
+    const renderPage = () => {
+      const pageStart = Math.max(first,pageEnd-count+1);
+      previous.disabled = pageStart <= first;next.disabled = pageEnd >= last;
+      const oldBars = plot.querySelector(".cq-local-day") ? localBarSnapshots(plot) : previousBars;
+      stopLocalMotions(plot);
+      plot.replaceChildren(selection);
+      const visible = [];
+      for (let index=pageStart;index<=pageEnd;index++) visible.push(localDayKey(index));
+      const maximum = Math.max(0,...visible.map(date=>dailyTotal(days.get(date))));
+      pageLabel.textContent = `${localDayKey(pageStart).slice(5).replace("-",".")} – ${localDayKey(pageEnd).slice(5).replace("-",".")}`;
+      addText("span", "", maximum ? `${compactLocalTokens(maximum).text} token` : words("无已知计数", "No recorded counts"), pageLabel);
+      plot.style.gridTemplateColumns = `repeat(${visible.length},minmax(0,1fr))`;
+      for (const [slot,date] of visible.entries()) {
+        const day = days.get(date), total = dailyTotal(day), button = addText("button", "cq-local-day", "", plot);
+        button.type = "button";button.dataset.date = date;
+        button.setAttribute("aria-label",`${date} · ${day?.eventCount ? `${numberText(total)} token` : day?.partial ? words("暂不可用", "Unavailable") : words("无记录", "No records")}${day?.partial ? words(" · 统计不完整", " · Incomplete") : ""}`);
+        button.title = button.getAttribute("aria-label");
+        if (day?.eventCount) button.title += "\n" + [[words("非缓存输入", "Uncached input"),day.models.reduce((sum,row)=>sum+row.inputTokens-row.cachedInputTokens,0)],
+          [words("缓存输入", "Cached input"),day.models.reduce((sum,row)=>sum+row.cachedInputTokens,0)],[words("输出", "Output"),day.models.reduce((sum,row)=>sum+row.outputTokens,0)]]
+          .map(([label,value])=>`${label}: ${numberText(value)}`).join(" · ");
+        button.setAttribute("aria-label",button.title.replaceAll("\n"," · "));
+        const rail = addText("span", "cq-local-day-rail", "", button);
+        const bar = addText("span", "cq-local-day-bar", "", rail);
+        bar.style.height = (maximum && total ? total/maximum*100 : 0) + "%";
+        if (total) for (const [kind,value] of [["input",day.models.reduce((sum,row)=>sum+row.inputTokens-row.cachedInputTokens,0)],
+          ["cache",day.models.reduce((sum,row)=>sum+row.cachedInputTokens,0)],["output",day.models.reduce((sum,row)=>sum+row.outputTokens,0)]]) {
+          const segment = addText("i", "", "", bar);segment.dataset.kind=kind;segment.style.flexGrow=String(value);segment.hidden=!value;
+        }
+        const height = bar.getBoundingClientRect().height;
+        if (height) {
+          // Seed the presentation synchronously so another click before RAF can retarget it.
+          bar.style.transform=`scaleY(${(oldBars[slot]?.height || 0)/height})`;bar.style.opacity=String(oldBars[slot]?.opacity ?? 1);
+          move(bar,{transform:[bar.style.transform,"scaleY(1)"],opacity:[Number(bar.style.opacity),1]},
+            {duration:.24,ease:[.2,.8,.2,1]},()=>{bar.style.removeProperty("transform");bar.style.removeProperty("opacity");});
+        }
+        else if (oldBars[slot]?.height && !reducedMotion.matches) {
+          const ghost = oldBars[slot].copy;ghost.setAttribute("aria-hidden","true");
+          Object.assign(ghost.style,{position:"absolute",bottom:"0",height:oldBars[slot].height+"px",transform:"none",opacity:String(oldBars[slot].opacity)});
+          rail.append(ghost);
+          move(ghost,{transform:["scaleY(1)","scaleY(0)"],opacity:[oldBars[slot].opacity,0]},{duration:.2,ease:[.2,.8,.2,1]},()=>ghost.remove());
+        }
+        if (day?.partial) {button.dataset.partial="";addText("span","cq-local-day-incomplete","?",rail);}
+        addText("span", "cq-local-day-label", date.slice(8), button);
+        button.onclick = () => showDay(date);
+        button.onkeydown = event => {
+          let index = visible.indexOf(date);
+          if (event.key === "ArrowLeft") index--;else if(event.key === "ArrowRight") index++;
+          else if(event.key === "Home") index=0;else if(event.key === "End") index=visible.length-1;else return;
+          event.preventDefault();index=Math.max(0,Math.min(visible.length-1,index));showDay(visible[index]);plot.querySelectorAll("button")[index].focus({preventScroll:true});
+        };
+      }
+      showDay(selected >= visible[0] && selected <= visible.at(-1) ? selected : visible.at(-1));
+    };
+    previous.onclick = () => {pageEnd=Math.max(first,pageEnd-count);renderPage();};
+    next.onclick = () => {pageEnd=Math.min(last,pageEnd+count);renderPage();};
+    renderPage();
+  };
+  const closeLocalUsage = () => {
+    const panel = document.getElementById("cq-local-usage");
+    if (!panel) return;
+    finishLocalLayout();stopLocalMotions(panel);
+    animatePane(panel.cqHost, panel, false);
+    panel.cqOpener?.focus({preventScroll:true});
+  };
+  globalThis.__codexQuotaLocalUsageCleanup = () => {
+    clearTimeout(localUsageTimer);
+    finishLocalLayout();
+    const panel = document.getElementById("cq-local-usage");
+    if (panel) {stopLocalMotions(panel);panel.remove();}
+    delete globalThis.__codexQuotaLocalUsageRange;
+    delete globalThis.__codexQuotaUpdateLocalUsage;
+  };
+  const requestLocalUsage = (panel, change = () => {}) => {
+    const form = panel.querySelector("form");
+    const today = localDate(new Date());
+    for (const input of form.querySelectorAll("input")) {
+      input.max = today;
+      const value = input.value, index = localDayIndex(value);
+      input.setCustomValidity(/^\d{4}-\d\d-\d\d$/.test(value) && Number.isFinite(index) && localDayKey(index)===value && value>=input.min && value<=today
+        ? "" : words("请输入 2022-01-01 至今天之间的有效日期", "Enter a valid date between 2022-01-01 and today"));
+    }
+    const start = form.elements.start.value, end = form.elements.end.value;
+    if (!form.elements.end.validationMessage && start > end) form.elements.end.setCustomValidity(words("结束日期不能早于开始日期", "End date must not precede start date"));
+    if (!form.reportValidity()) return;
+    panel.cqCloseCalendar?.(false);
+    clearTimeout(localUsageTimer);
+    localUsageRequestId = `local-${uiRevision}-${++localUsageSequence}-${Date.now()}`;
+    globalThis.__codexQuotaLocalUsageRange = {start, end};
+    const result = panel.querySelector(".cq-local-result");
+    animateLocalLayout(panel,()=>{
+      change();
+      result.setAttribute("aria-busy", "true");
+      panel.querySelector(".cq-local-estimate-tag").textContent=words("读取中", "Reading");
+      panel.querySelector(".cq-local-status").setAttribute("data-cq-quiet", "");
+      panel.querySelector(".cq-local-status").textContent = words("正在读取本机日志…", "Reading local logs…");
+    });
+    const id = localUsageRequestId;
+    localUsageTimer = setTimeout(() => globalThis.__codexQuotaUpdateLocalUsage?.({errorCode: "TIMEOUT"}, id), 60000);
+    console.info("__codexQuotaLocalUsageRequest__", id);
+  };
+  globalThis.__codexQuotaUpdateLocalUsage = (data, requestId) => {
+    const panel = document.getElementById("cq-local-usage");
+    if (!panel || requestId !== localUsageRequestId) return;
+    clearTimeout(localUsageTimer);
+    const result = panel.querySelector(".cq-local-result"), status = panel.querySelector(".cq-local-status");
+    result.setAttribute("aria-busy", "false");
+    const range = globalThis.__codexQuotaLocalUsageRange;
+    const valid = data && !data.errorCode && data.start === range?.start && data.end === range?.end &&
+      validLocalModels(data.models) &&
+      Number.isSafeInteger(data.eventCount) && data.eventCount >= 0 && typeof data.partial === "boolean" &&
+      validLocalIssues(data.issues) && validLocalDaily(data);
+    if (!valid) {
+      animateLocalLayout(panel,()=>{
+      panel.querySelector(".cq-local-estimate-tag").textContent=words("估算", "Estimate");
+      status.removeAttribute("data-cq-quiet");
+      status.textContent = result.dataset.loaded ? words("读取失败；保留上次结果，请重试。", "Read failed; previous results retained. Retry.")
+        : words("暂不可用，请重试；旧版 Helper 可能需要更新。", "Unavailable; retry or update the helper.");
+      });
+      return;
+    }
+    const previousBars = localBarSnapshots(result);
+    stopLocalMotions(result);
+    result.dataset.loaded = "true";
+    animateLocalLayout(panel, () => {
+    panel.querySelector(".cq-local-estimate-tag").textContent=words("估算", "Estimate");
+    result.replaceChildren();
+    const totals = data.models.reduce((sum,row) => ({input:sum.input+row.inputTokens, cache:sum.cache+row.cachedInputTokens,
+      output:sum.output+row.outputTokens, tokens:sum.tokens+row.totalTokens}), {input:0,cache:0,output:0,tokens:0});
+    const covered = data.models.filter(row => localUsageBaselines.has(row.model));
+    const excluded = data.models.filter(row => !localUsageBaselines.has(row.model)).reduce((sum,row) => sum+row.totalTokens,0);
+    const estimate = covered.reduce((sum,row) => sum+row.totalTokens/localUsageBaselines.get(row.model)*100,0);
+    const priced = data.models.map(row => ({row,cost:apiEquivalent(row)})).filter(item => item.cost);
+    const cost = priced.reduce((sum,item)=>[sum[0]+item.cost[0],sum[1]+item.cost[1]],[0,0]);
+    const unpriced = data.models.filter(row => !localApiPrices.has(row.model)).reduce((sum,row)=>sum+row.totalTokens,0);
+    const issues = data.issues || [];
+    const addText = (tag, className, text, parent = result) => {const node = document.createElement(tag); node.className = className; node.textContent = text; parent.append(node); return node;};
+    const dateLabel = addText("p", "cq-local-range-label", data.start === data.end ? data.start.replaceAll("-", ".")
+      : `${data.start.replaceAll("-", ".")} – ${(data.start.slice(0,4) === data.end.slice(0,4) ? data.end.slice(5) : data.end).replaceAll("-", ".")}`);
+    dateLabel.title = `${data.start} — ${data.end}`;
+    const highlights = addText("div", "cq-local-highlights", "");
+    move(highlights,{opacity:[.65,1]},{duration:.14},()=>highlights.style.removeProperty("opacity"));
+    const estimateRow = addText("div", "cq-local-estimate", "", highlights);
+    addText("span", "cq-local-metric-label", words("周额度估算", "Weekly estimate"), estimateRow);
+    const estimated = addText("strong", "", "", estimateRow);
+    if (covered.length) {
+      addText("span", "cq-local-value-unit", "≈ ", estimated);
+      addText("span", "cq-local-value-number", estimate > 0 && estimate < .01 ? "<0.01" : new Intl.NumberFormat(navigator.language,{maximumFractionDigits:2}).format(estimate), estimated);
+      addText("span", "cq-local-value-unit", "%", estimated);
+    } else {estimated.textContent = words("未折算", "Not estimated");estimated.dataset.unavailable = "";}
+    const costRow = addText("div", "cq-local-cost", "", highlights);
+    addText("span", "cq-local-metric-label", words("API 等值", "API equivalent"), costRow);
+    const costValue = addText("strong", "", "", costRow);
+    if (priced.length) {
+      addText("span", "cq-local-value-unit", "≈ ", costValue);
+      const amount = value => {
+        const part = addText("span", "cq-local-price-part", "", costValue);
+        part.toggleAttribute("data-long", moneyText(value).length > 7);
+        addText("span", "cq-local-value-unit", value > 0 && value < .01 ? "<$" : "$", part);
+        addText("span", "cq-local-value-number", new Intl.NumberFormat(navigator.language,{minimumFractionDigits:2,maximumFractionDigits:2}).format(value > 0 && value < .01 ? .01 : value), part);
+      };
+      amount(cost[0]);
+      if (cost[1] > cost[0]) {costValue.dataset.range = "";addText("span", "cq-local-value-unit", " – ", costValue);amount(cost[1]);}
+      costValue.title = `${moneyText(cost[0])}${cost[1] > cost[0] ? ` – ${moneyText(cost[1])}` : ""} USD`;
+    } else {costValue.textContent = words("未计价", "Not priced");costValue.dataset.unavailable = "";}
+    if (priced.some(item => item.row.cacheWriteKnown === false)) addText("p", "cq-local-api-note", words("写缓存计数不完整，API 等值可能偏低。", "Cache-write counts are incomplete; API equivalent may be understated."));
+    renderLocalDaily(data,result,addText,previousBars);
+    const usageDetails = addText("details", "cq-local-usage-details", "");
+    const usageSummary = addText("summary", "", "", usageDetails);
+    addText("span", "", words("用量明细", "Usage breakdown"), usageSummary);
+    addText("span", "cq-local-detail-meta", compactLocalTokens(totals.tokens).text, usageSummary);
+    usageSummary.append(toolIcon("back", "cq-local-detail-arrow"));
+    const usageGroup = addText("div", "cq-local-usage-group", "", usageDetails);
+    const metrics = addText("dl", "cq-local-metrics", "", usageGroup);
+    for (const [label,value] of [[words("总 token", "Total tokens"),totals.tokens],[words("输入", "Input"),totals.input],
+      [words("其中缓存", "Cached input"),totals.cache],[words("输出", "Output"),totals.output]]) {
+      const pair = addText("div", "", "", metrics); addText("dt", "", label, pair);
+      const valueNode = addText("dd", "", "", pair);
+      const {number,unit} = compactLocalTokens(value);
+      addText("span", "", number, valueNode);
+      if (unit) addText("span", "cq-local-token-unit", unit, valueNode);
+      valueNode.title = `${numberText(value)} token`;
+      valueNode.setAttribute("aria-label", valueNode.title);
+    }
+    const cacheRate = totals.input ? totals.cache / totals.input * 100 : null;
+    const cache = addText("div", "cq-local-cache", "", usageGroup);
+    const cacheLabel = addText("div", "cq-local-cache-label", "", cache);
+    addText("span", "", words("缓存命中", "Cache hit rate"), cacheLabel);
+    addText("span", "", cacheRate === null ? "—" : `${new Intl.NumberFormat(navigator.language,{maximumFractionDigits:1}).format(cacheRate)}%`, cacheLabel);
+    const track = addText("div", "cq-local-cache-track", "", cache);
+    track.setAttribute("role", cacheRate === null ? "img" : "meter");track.setAttribute("aria-label", words("输入 token 缓存命中率", "Input token cache hit rate"));
+    if (cacheRate !== null) {track.setAttribute("aria-valuemin","0");track.setAttribute("aria-valuemax","100");track.setAttribute("aria-valuenow",String(cacheRate));}
+    else track.setAttribute("aria-label", words("缓存命中率暂不可用，无输入记录", "Cache hit rate unavailable; no input records"));
+    const cacheFill = addText("i", "", "", track);cacheFill.style.width = (cacheRate || 0) + "%";cacheFill.hidden = !cacheRate;
+    const breakdown = addText("details", "cq-local-models", "");
+    const modelSummary = addText("summary", "", "", breakdown);
+    addText("span", "", words("模型明细", "Model breakdown"), modelSummary);
+    addText("span", "cq-local-detail-meta", String(data.models.length), modelSummary);
+    modelSummary.append(toolIcon("back", "cq-local-detail-arrow"));
+    for (const row of data.models) {
+      const line = addText("div", "cq-local-model", "", breakdown);
+      addText("span", "", row.model === "unknown" ? words("未知模型", "Unknown model") : row.model.replace(/^gpt-/, "GPT-"), line);
+      addText("span", "", `${numberText(row.totalTokens)} token`, line);
+    }
+    const sameCoverage = excluded > 0 && data.models.every(row => localUsageBaselines.has(row.model) === localApiPrices.has(row.model));
+    if (sameCoverage) addText("p", "cq-local-excluded", words(`其他模型 ${numberText(excluded)} token：无周基准与 API 价格，未折算。`,
+      `Other models: ${numberText(excluded)} tokens without a weekly reference or API price; excluded from estimates.`), breakdown);
+    else {
+      if (excluded) addText("p", "cq-local-excluded", words(`其他模型 ${numberText(excluded)} token：无参考基准，未折算。`,
+        `Other models: ${numberText(excluded)} tokens without a reference; excluded.`), breakdown);
+      if (unpriced) addText("p", "cq-local-excluded", words(`${numberText(unpriced)} token 缺少 API 价格，未计价。`, `${numberText(unpriced)} tokens without API prices were excluded from cost.`), breakdown);
+    }
+    const missing = issues.filter(issue => issue.affectsTotals);
+    status.textContent = data.partial ? `${words("统计不完整", "Incomplete")}: ${missing.length ? missing.map(issue => `${localIssueLabels[issue.code]} ${numberText(issue.count)}`).join(" · ")
+      : words("部分日志无法读取或归属，结果仅覆盖已识别记录。", "Some logs could not be read or attributed; identified records only.")}`
+      : !data.eventCount ? words("该区间未找到可统计的官方用量记录。", "No countable official usage records in this range.")
+      : words("仅本机日志；估算未按本账号校准。", "Local logs only; estimate not calibrated to this account.");
+    status.toggleAttribute("data-cq-quiet", !data.partial && data.eventCount > 0);
+    if (issues.length) {
+      const details = addText("details", "cq-local-issues", "");
+      const summary = addText("summary", "", words("统计说明", "Coverage details"), details);
+      summary.append(toolIcon("back", "cq-local-detail-arrow"));
+      for (const issue of issues) addText("p", "", `${localIssueLabels[issue.code]}: ${numberText(issue.count)}${issue.missingTokens ? ` · ${numberText(issue.missingTokens)} token` : ""}${issue.dateUnknown ? words("（日期未知）", " (date unknown)") : ""}`, details);
+    }
+    });
+  };
+  const installLocalCalendar = panel => {
+    const form=panel.querySelector("form"), popup=panel.parentElement;
+    const calendar=document.createElement("div");calendar.className="cq-local-calendar";calendar.hidden=true;
+    calendar.setAttribute("role","dialog");calendar.setAttribute("aria-labelledby","cq-calendar-title");
+    calendar.innerHTML='<div class="cq-calendar-heading"><button type="button" data-month="-1"></button><strong id="cq-calendar-title" aria-live="polite"></strong><button type="button" data-month="1"></button></div><div class="cq-calendar-grid" role="grid" aria-labelledby="cq-calendar-title"></div><div class="cq-calendar-footer"><button type="button" data-today></button><button type="button" data-close></button></div>';
+    form.append(calendar);
+    let active=null, month=0, focusDay=0;
+    const bounds=()=>[localDayIndex(active.min),localDayIndex(localDate(new Date()))];
+    const monthStart=index=>{const date=new Date(index*86400000);return Date.UTC(date.getUTCFullYear(),date.getUTCMonth(),1)/86400000;};
+    const monthShift=(index,delta)=>{const date=new Date(index*86400000);return Date.UTC(date.getUTCFullYear(),date.getUTCMonth()+delta,1)/86400000;};
+    const close = (focus=true) => {
+      if(calendar.hidden)return;
+      calendar.hidden=true;stopLocalMotions(calendar);
+      for(const button of form.querySelectorAll("[data-date-field]"))button.setAttribute("aria-expanded","false");
+      if(focus)active?.focus({preventScroll:true});
+    };
+    panel.cqCloseCalendar=close;
+    panel.cqPositionCalendar=()=>{
+      if(calendar.hidden)return;
+      const field=active.closest("label").getBoundingClientRect(),area=form.getBoundingClientRect(),box=popup.getBoundingClientRect();
+      const top=Math.max(box.top+8,Math.min(field.bottom+4,box.bottom-32-calendar.offsetHeight));
+      calendar.style.top=(top-area.top)+"px";
+    };
+    const select=index=>{
+      active.value=localDayKey(index);active.dispatchEvent(new Event("input",{bubbles:true}));close();
+    };
+    const grid=calendar.querySelector('[role="grid"]');
+    const draw=(focus=false)=>{
+      const [min,max]=bounds(), today=localDate(new Date());
+      calendar.querySelector("strong").textContent=new Intl.DateTimeFormat(navigator.language,{year:"numeric",month:"long",timeZone:"UTC"}).format(new Date(month*86400000));
+      for(const button of calendar.querySelectorAll("[data-month]"))button.disabled=Number(button.dataset.month)<0 ? month<=monthStart(min) : month>=monthStart(max);
+      grid.replaceChildren();
+      const weekdays=document.createElement("div");weekdays.setAttribute("role","row");grid.append(weekdays);
+      for(let i=0;i<7;i++){
+        const label=document.createElement("span");label.setAttribute("role","columnheader");
+        label.textContent=new Intl.DateTimeFormat(navigator.language,{weekday:"narrow",timeZone:"UTC"}).format(new Date(Date.UTC(2026,9,26+i)));weekdays.append(label);
+      }
+      const start=month-(new Date(month*86400000).getUTCDay()+6)%7;
+      for(let row=0;row<6;row++){
+        const line=document.createElement("div");line.setAttribute("role","row");grid.append(line);
+        for(let column=0;column<7;column++){
+          const index=start+row*7+column,date=localDayKey(index),button=document.createElement("button");
+          button.type="button";button.setAttribute("role","gridcell");button.dataset.date=date;button.textContent=String(Number(date.slice(8)));
+          button.setAttribute("aria-label",new Intl.DateTimeFormat(navigator.language,{dateStyle:"full",timeZone:"UTC"}).format(new Date(index*86400000)));
+          button.setAttribute("aria-selected",String(date===active.value));button.tabIndex=index===focusDay?0:-1;
+          button.disabled=index<min || index>max;button.toggleAttribute("data-other-month",monthStart(index)!==month);
+          if(date===today)button.setAttribute("aria-current","date");
+          button.onclick=()=>select(index);
+          button.onkeydown=event=>{
+            let next=index;
+            if(event.key==='ArrowLeft')next--;else if(event.key==='ArrowRight')next++;
+            else if(event.key==='ArrowUp')next-=7;else if(event.key==='ArrowDown')next+=7;
+            else if(event.key==='Home')next-=column;else if(event.key==='End')next+=6-column;
+            else if(event.key==='PageUp'||event.key==='PageDown'){
+              const nextMonth=monthShift(index,event.key==='PageUp'?-1:1);
+              next=nextMonth+Math.min(Number(date.slice(8)),monthShift(nextMonth,1)-nextMonth)-1;
+            }else return;
+            event.preventDefault();focusDay=Math.max(min,Math.min(max,next));month=monthStart(focusDay);draw(true);
+          };
+          line.append(button);
+        }
+      }
+      panel.cqPositionCalendar();
+      if(focus)grid.querySelector(`button[data-date="${localDayKey(focusDay)}"]`)?.focus({preventScroll:true});
+    };
+    for(const button of calendar.querySelectorAll("[data-month]")){
+      const delta=Number(button.dataset.month);button.setAttribute("aria-label",delta<0?words("上个月","Previous month"):words("下个月","Next month"));
+      button.append(toolIcon("back",delta>0?"cq-local-chart-next":""));
+      button.onclick=()=>{month=monthShift(month,delta);const [min,max]=bounds();focusDay=Math.max(min,Math.min(max,month));draw();};
+    }
+    const today=calendar.querySelector("[data-today]"),dismiss=calendar.querySelector("[data-close]");
+    today.textContent=words("今天","Today");today.onclick=()=>select(localDayIndex(localDate(new Date())));
+    dismiss.textContent=words("关闭","Close");dismiss.onclick=()=>close();
+    for(const button of form.querySelectorAll("[data-date-field]")){
+      button.setAttribute("aria-haspopup","dialog");button.setAttribute("aria-expanded","false");
+      button.setAttribute("aria-label",button.dataset.dateField==="start"?words("选择开始日期","Choose start date"):words("选择结束日期","Choose end date"));
+      button.append(toolIcon("calendar",""));
+      const open=()=>{
+        const input=form.elements[button.dataset.dateField];
+        if(!calendar.hidden && active===input){close();return;}
+        close(false);active=input;const [min,max]=bounds(), value=localDayIndex(input.value);
+        focusDay=Math.max(min,Math.min(max,Number.isFinite(value)?value:max));month=monthStart(focusDay);
+        calendar.hidden=false;button.setAttribute("aria-expanded","true");draw(true);
+        move(calendar,{opacity:[.6,1]},{duration:.12},()=>calendar.style.removeProperty("opacity"));
+      };
+      button.onclick=open;
+      form.elements[button.dataset.dateField].onkeydown=event=>{if(event.key==='ArrowDown'){event.preventDefault();open();}};
+    }
+    panel.addEventListener("keydown",event=>{if(event.key==='Escape'&&!calendar.hidden){event.preventDefault();event.stopPropagation();close();}});
+    panel.addEventListener("pointerdown",event=>{if(!calendar.hidden&&!calendar.contains(event.target)&&!event.target.closest('[data-date-field]'))close(false);});
+    panel.addEventListener("focusout",event=>{if(event.relatedTarget&&!form.contains(event.relatedTarget))close(false);});
+  };
+  const openLocalUsage = opener => {
+    const popup = document.getElementById("codex-quota-popover"), host = opener?.closest(`.${compactClass}`);
+    if (!popup || !host) return;
+    let panel = document.getElementById("cq-local-usage");
+    if (panel) { animatePane(host,panel,true); panel.querySelector("header button").focus({preventScroll:true}); return; }
+    panel = document.createElement("section");
+    panel.id = "cq-local-usage";
+    panel.cqHost = host; panel.cqOpener = opener;
+    panel.setAttribute("role", "region");
+    panel.setAttribute("aria-labelledby", "cq-local-title");
+    panel.innerHTML = `<header><h2 id="cq-local-title"></h2><button type="button" class="cq-local-close"></button></header>
+      <div class="cq-local-periods" role="group"><button type="button" data-period="today"></button><button type="button" data-period="week"></button><button type="button" data-period="custom"></button></div>
+      <form class="cq-local-dates" hidden><label><span></span><span class="cq-local-date-field"><input type="text" name="start" placeholder="YYYY-MM-DD" autocomplete="off" required><button type="button" data-date-field="start"></button></span></label><label><span></span><span class="cq-local-date-field"><input type="text" name="end" placeholder="YYYY-MM-DD" autocomplete="off" required><button type="button" data-date-field="end"></button></span></label><button type="submit"></button></form>
+      <div class="cq-local-result" role="region" aria-busy="false"></div><p class="cq-local-status" role="status"></p>
+      <details class="cq-local-reference"><summary></summary><p></p></details>`;
+    panel.querySelector("h2").textContent = words("本机用量", "Local usage");
+    const tag = document.createElement("span");tag.className = "cq-local-estimate-tag";tag.textContent = words("估算", "Estimate");
+    panel.querySelector("h2").after(tag);
+    const close = panel.querySelector("header button");
+    close.title = words("返回额度", "Back to quota"); close.setAttribute("aria-label",close.title);
+    close.append(toolIcon("back", "")); close.onclick = closeLocalUsage;
+    const form = panel.querySelector("form");
+    form.querySelectorAll("label > span:first-child").forEach((node,index) => node.textContent = index ? words("至", "To") : words("从", "From"));
+    form.querySelector('[type="submit"]').textContent = words("查询", "Apply");
+    for (const input of form.querySelectorAll("input")) {
+      input.min = "2022-01-01"; input.max = localDate(new Date());
+      input.oninput = () => {input.setCustomValidity("");form.elements.end.setCustomValidity("");};
+    }
+    form.onsubmit = event => {event.preventDefault(); requestLocalUsage(panel);};
+    panel.querySelector(".cq-local-result").setAttribute("aria-label", words("本机用量统计结果", "Local usage results"));
+    panel.querySelector("summary").textContent = words("估算依据", "References");
+    panel.querySelector("summary").append(toolIcon("back", "cq-local-detail-arrow"));
+    panel.querySelector("details p").textContent = words(
+      "ModelDial 2026-10-05 Pro 200 新额度样本：Astra 4.38 亿、Sol 23.54 亿 token／周，已是新额度，不再减半。原研究按月归一为周，负载与缓存比例可能不同；非官方上限，未按当前账号校准。周估算仍按总 token 比例，不用 API 美元推导。API 等值按 2026-10-27 官方 Standard 短上下文单价，区分普通输入／缓存读取／写入／输出；写入时长未知时给出价格区间。不含长上下文、加速、地区、工具等附加费，不是实付账单。仅本机现存日志，可能含历史账户或导入记录。本周按本地周一至今，跨周期可超过 100%。",
+      "ModelDial's 2026-10-05 Pro 200 new-limit sample: Astra 438M, Sol 2.354B tokens/week, already reduced; not halved again. Monthly research values were normalized to weeks with a different workload. Not an official limit or calibrated to this account. Weekly fractions use total tokens, not API dollars. API equivalent uses OpenAI Standard short-context prices checked 2026-10-27, separating ordinary input, cache reads/writes and output. Unknown write retention produces a price range. Excludes long-context, speed, regional and tool fees; not a bill. Local files may include old accounts or imported histories. Weeks start Monday; ranges can exceed 100%.");
+    for (const [label,url] of [["ModelDial","https://modeldial.com/subscriptions"],[words("OpenAI 价格", "OpenAI pricing"),"https://developers.openai.com/api/docs/pricing"]]) {
+      const link=document.createElement("a");link.textContent=label;link.href=url;link.target="_blank";link.rel="noopener noreferrer";panel.querySelector("details").append(link);
+    }
+    const choose = period => {
+      const now = new Date(), start = new Date(now);
+      if (period === "week") start.setDate(start.getDate()-(start.getDay()+6)%7);
+      for (const button of panel.querySelectorAll("[data-period]")) button.setAttribute("aria-pressed",String(button.dataset.period === period));
+      panel.cqCloseCalendar?.(false);
+      if (period !== "custom") {form.elements.start.value=localDate(start); form.elements.end.value=localDate(now); requestLocalUsage(panel,()=>{form.hidden=true;});}
+      else {animateLocalLayout(panel,()=>{form.hidden=false;});form.elements.start.focus({preventScroll:true});}
+      if (!paneMotion) positionPopover();
+    };
+    for (const button of panel.querySelectorAll("[data-period]")) {
+      button.textContent = {today:words("今日", "Today"),week:words("本周", "This week"),custom:words("自选日期", "Date range")}[button.dataset.period];
+      button.onclick = () => choose(button.dataset.period);
+    }
+    panel.addEventListener("click", event => {
+      const summary = event.target.closest("summary");
+      if (!summary || !panel.contains(summary)) return;
+      event.preventDefault();
+      animateLocalLayout(panel,()=>{summary.parentElement.open=!summary.parentElement.open;});
+    });
+    panel.addEventListener("toggle", () => {if (!paneMotion && !localLayout) positionPopover();},true);
+    localDetailBodies(panel);
+    panel.hidden = true;
+    popup.append(panel);
+    installLocalCalendar(panel);
+    animatePane(host,panel,true);
+    choose("today");
+    close.focus({preventScroll:true});
   };
 
   const adaptiveRefreshDelayMs = (now = Date.now()) => {
@@ -751,7 +1430,7 @@
   const ensureStyle = () => {
     const style = document.getElementById(styleId) || document.createElement("style");
     const css = __codexQuotaTailwindCss + `
-      #codex-quota-trigger, #codex-quota-popover {
+      #codex-quota-trigger, #codex-quota-popover, #cq-local-usage {
         --cq-solid: var(--color-surface-elevated-secondary, var(--color-token-main-surface-primary, #f5f3eb));
         --cq-ink: var(--color-text, var(--color-token-text-primary, #202522));
         --cq-muted: var(--color-text-secondary, var(--color-token-text-secondary, #63675d));
@@ -766,7 +1445,7 @@
         font-variant-numeric: tabular-nums;
         box-sizing: border-box;
       }
-      #codex-quota-trigger[data-cq-dark], #codex-quota-popover[data-cq-dark] {
+      #codex-quota-trigger[data-cq-dark], #codex-quota-popover[data-cq-dark], #cq-local-usage[data-cq-dark] {
         --cq-solid: var(--color-surface-elevated-secondary, var(--color-token-main-surface-primary, Canvas));
         --cq-ink: var(--color-text, var(--color-token-text-primary, CanvasText));
         --cq-muted: var(--color-text-secondary, var(--color-token-text-secondary, var(--cq-ink)));
@@ -837,12 +1516,14 @@
       #codex-quota-popover .cq-plan { margin-right: auto; margin-left: 0; min-width: 0; flex: 0 1 auto; }
       #codex-quota-popover .cq-actions { display: flex; flex: none; gap: 8px; }
       #codex-quota-popover .cq-actions button { display: grid; place-items: center; width: 24px; height: 24px; padding: 4px; border-radius: 6px; color: var(--cq-muted); }
+      #codex-quota-popover .cq-settings-button { position: relative; }
+      #codex-quota-popover .cq-settings-button[data-cq-update]::after { content: ""; position: absolute; right: 1px; top: 1px; width: 4px; height: 4px; border-radius: 50%; background: var(--cq-fill); outline: 1px solid var(--cq-solid); pointer-events: none; }
       #codex-quota-popover .cq-actions svg { display: block; width: 16px; height: 16px; stroke-width: 1.5; }
       #codex-quota-popover .cq-actions button { transition: background-color 120ms ease, color 120ms ease; }
       #codex-quota-popover .cq-actions button:active:not(:disabled) { background: color-mix(in srgb, var(--cq-ink) 12%, transparent); color: var(--cq-ink); transition-duration: 0s; }
       #codex-quota-popover .cq-collapse-button { position: absolute; z-index: 3; display: grid; place-items: center; width: 24px; height: 24px; padding: 6px; border-radius: 5px; color: var(--cq-muted); }
       #codex-quota-popover .cq-collapse-icon { width: 12px; height: 12px; transform: rotate(180deg); }
-      #codex-quota-popover[data-cq-inplace] #cq-settings { padding-bottom: 24px; }
+      #codex-quota-popover[data-cq-inplace] :is(#cq-settings,#cq-local-usage) { padding-bottom: 24px; }
       #codex-quota-popover[data-cq-pane] { overflow: clip; opacity: 1; transition-duration: 700ms; }
       #codex-quota-popover[data-cq-pane] > .cq-collapse-button { opacity: 1; }
       #codex-quota-popover[data-cq-inplace] .cq-rows > :last-child { padding-bottom: 0; }
@@ -853,7 +1534,7 @@
       #codex-quota-popover[data-cq-morph] { background: transparent; border-color: transparent; box-shadow: none; backdrop-filter: none; overflow: visible; opacity: 1; pointer-events: auto; }
       #codex-quota-popover[data-cq-morph] > * { opacity: 1; }
       #codex-quota-popover .cq-shared-layer { position: absolute; inset: 0; z-index: 2; pointer-events: none; }
-      #codex-quota-popover[data-cq-morph] > :is(#codex-official-usage-host,#cq-settings) { position: relative; z-index: 1; }
+      #codex-quota-popover[data-cq-morph] > :is(#codex-official-usage-host,#cq-settings,#cq-local-usage) { position: relative; z-index: 1; }
       #codex-quota-popover .cq-shared-surface { position: absolute; z-index: 0; transform-origin: 0 0; pointer-events: none; }
       #codex-quota-popover .cq-shared-actor { position: absolute; left: 0; top: 0; transform-origin: 0 0; pointer-events: none; will-change: transform; }
       :is(#codex-quota-trigger,#codex-quota-popover) [data-cq-shared-hidden] { visibility: hidden !important; }
@@ -912,6 +1593,116 @@
       #codex-quota-popover .cq-low { font-size: 11px; white-space: nowrap; }
       #codex-quota-popover .cq-status { position: absolute; top: 0; left: 0; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
       #codex-quota-popover .cq-empty { padding: 8px 16px 8px 8px; color: var(--cq-muted); }
+      #cq-local-usage { --cq-chart-input: #a46b40; --cq-chart-cache: #708771; --cq-chart-output: #6c8299; position: relative; width: 100%; margin: 0; padding: 0; border: 0; background: transparent; color: var(--cq-ink); box-shadow: none; user-select: text; }
+      #codex-quota-popover[data-cq-dark] #cq-local-usage { --cq-chart-input: #d3a879; --cq-chart-cache: #a1b49a; --cq-chart-output: #9cb2c8; }
+      #cq-local-usage * { box-sizing: border-box; }
+      #cq-local-usage [hidden] { display: none !important; }
+      #cq-local-usage header { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 24px; margin-bottom: 16px; padding: 0 var(--cq-control-right, 6px) 0 8px; }
+      #cq-local-usage h2 { margin: 0; font-size: 14px; line-height: 20px; font-weight: 600; letter-spacing: -.01em; }
+      #cq-local-usage .cq-local-estimate-tag { margin-right: auto; color: var(--cq-muted); font-size: 10px; line-height: 16px; }
+      #cq-local-usage button { display: inline-flex; align-items: center; justify-content: center; border: 0; border-radius: 6px; padding: 4px 8px; min-height: 24px; font: inherit; font-size: 11px; color: var(--cq-ink); background: transparent; cursor: pointer; }
+      #cq-local-usage button:hover { background: var(--cq-hover); }
+      #cq-local-usage button:active { background: color-mix(in srgb,var(--cq-ink) 12%,transparent); }
+      #cq-local-usage :is(button,input,summary):focus-visible { outline: 2px solid var(--cq-ink); outline-offset: 2px; }
+      #cq-local-usage .cq-local-close { flex: none; width: 24px; height: 24px; padding: 4px; color: var(--cq-muted); }
+      #cq-local-usage .cq-local-periods { display: flex; gap: 0; padding: 3px; margin: 0 16px 0 8px; border-radius: 7px; background: color-mix(in srgb,var(--cq-ink) 4%,transparent); }
+      #cq-local-usage .cq-local-periods button { flex: 1; white-space: nowrap; }
+      #cq-local-usage .cq-local-periods button[aria-pressed=true] { background: var(--cq-solid); box-shadow: 0 1px 3px #0001; font-weight: 600; }
+      #cq-local-usage .cq-local-dates { position: relative; display: grid; grid-template-columns: 1fr; gap: 8px; margin: 16px 16px 0 8px; }
+      #cq-local-usage .cq-local-dates label { display: grid; grid-template-columns: 16px 1fr; align-items: center; gap: 8px; min-width: 0; font-size: 11px; color: var(--cq-muted); }
+      #cq-local-usage .cq-local-dates label > span:first-child { display: block; }
+      #cq-local-usage .cq-local-date-field { position: relative; display: block; min-width: 0; }
+      #cq-local-usage input { display: block; min-width: 0; width: 100%; height: 28px; border: 1px solid var(--cq-border); border-radius: 6px; padding: 4px 8px; color: var(--cq-ink); background: var(--cq-solid); font: inherit; font-size: 11px; }
+      #cq-local-usage .cq-local-date-field input { padding-right: 32px; font-variant-numeric: tabular-nums; }
+      #cq-local-usage .cq-local-date-field button { position: absolute; right: 2px; top: 2px; width: 24px; height: 24px; padding: 4px; color: var(--cq-muted); }
+      #cq-local-usage .cq-local-dates > button { background: var(--cq-hover); }
+      #cq-local-usage .cq-local-calendar { position: absolute; z-index: 5; left: 0; right: 0; padding: 8px; background: var(--cq-solid); border: 1px solid var(--cq-border); border-radius: var(--radius-sm,6px); box-shadow: 0 4px 12px #302c2214; color: var(--cq-ink); }
+      #cq-local-usage .cq-calendar-heading { display: flex; align-items: center; justify-content: space-between; gap: 4px; margin-bottom: 8px; }
+      #cq-local-usage .cq-calendar-heading strong { font-size: 12px; line-height: 24px; font-weight: 600; }
+      #cq-local-usage .cq-calendar-heading button { width: 24px; height: 24px; padding: 4px; }
+      #cq-local-usage .cq-calendar-grid > div { display: grid; grid-template-columns: repeat(7,minmax(0,1fr)); gap: 2px; margin-bottom: 2px; }
+      #cq-local-usage .cq-calendar-grid [role=columnheader] { text-align: center; color: var(--cq-muted); font-size: 10px; line-height: 20px; }
+      #cq-local-usage .cq-calendar-grid button { min-width: 0; width: 100%; height: 24px; padding: 0; font-size: 11px; font-variant-numeric: tabular-nums; border-radius: 4px; }
+      #cq-local-usage .cq-calendar-grid button[data-other-month] { color: var(--cq-muted); }
+      #cq-local-usage .cq-calendar-grid button[aria-current=date] { text-decoration: underline; text-underline-offset: 3px; }
+      #cq-local-usage .cq-calendar-grid button[aria-selected=true] { background: var(--cq-ink); color: var(--cq-solid); font-weight: 600; }
+      #cq-local-usage .cq-local-calendar button:disabled { opacity: .28; cursor: default; }
+      #cq-local-usage .cq-calendar-footer { display: flex; justify-content: space-between; gap: 8px; margin-top: 8px; padding-top: 4px; border-top: 1px solid var(--cq-border); }
+      #cq-local-usage .cq-calendar-footer button { color: var(--cq-muted); padding: 2px 4px; }
+      @media (forced-colors: active) { #cq-local-usage .cq-local-calendar { background: Canvas; color: CanvasText; border-color: CanvasText; } #cq-local-usage .cq-calendar-grid button[aria-selected=true] { forced-color-adjust: none; background: Highlight; color: HighlightText; } }
+      #cq-local-usage .cq-local-result { container-type: inline-size; min-height: 460px; padding: 0 16px 0 8px; }
+      #cq-local-usage .cq-local-range-label { margin: 16px 0; color: var(--cq-muted); font-size: 10px; line-height: 16px; }
+      #cq-local-usage .cq-local-highlights { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr); gap: 16px; margin: 0 0 20px; }
+      #cq-local-usage .cq-local-metric-label { display: block; color: var(--cq-muted); font-size: 11px; line-height: 16px; margin-bottom: 6px; }
+      #cq-local-usage .cq-local-highlights strong { display: flex; flex-wrap: wrap; align-items: baseline; column-gap: 1px; font-weight: 650; line-height: 30px; letter-spacing: -.025em; }
+      #cq-local-usage .cq-local-value-number { font-size: clamp(16px,12cqi,23px); }
+      #cq-local-usage .cq-local-cost .cq-local-value-number { font-size: clamp(15px,11cqi,21px); }
+      #cq-local-usage .cq-local-value-unit { font-size: 11px; font-weight: 500; letter-spacing: 0; }
+      #cq-local-usage .cq-local-price-part { display: inline-flex; align-items: baseline; white-space: nowrap; }
+      #cq-local-usage .cq-local-price-part[data-long] .cq-local-value-number { font-size: 16px; }
+      #cq-local-usage strong[data-range] .cq-local-value-number { font-size: 16px; }
+      #cq-local-usage strong[data-unavailable] { font-size: 13px; font-weight: 500; letter-spacing: 0; }
+      #cq-local-usage .cq-local-usage-group { padding: 12px; margin-bottom: 16px; border-radius: var(--radius-sm,6px); background: color-mix(in srgb,var(--cq-ink) 3%,transparent); }
+      #cq-local-usage .cq-local-usage-details { border-top: 1px solid var(--cq-border); }
+      #cq-local-usage .cq-local-metrics { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr); gap: 16px 12px; margin: 0; }
+      #cq-local-usage .cq-local-metrics > div { display: flex; flex-direction: column-reverse; gap: 3px; }
+      #cq-local-usage .cq-local-metrics dt { color: var(--cq-muted); font-size: 11px; line-height: 16px; }
+      #cq-local-usage .cq-local-metrics dd { margin: 0; font-size: clamp(13px,8.8cqi,16px); line-height: 22px; font-weight: 600; letter-spacing: -.015em; overflow-wrap: anywhere; }
+      #cq-local-usage .cq-local-token-unit { font-size: 10px; font-weight: 500; margin-left: 2px; }
+      #cq-local-usage .cq-local-cache { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--cq-border); }
+      #cq-local-usage .cq-local-cache-label { display: flex; justify-content: space-between; gap: 8px; margin-bottom: 6px; color: var(--cq-muted); font-size: 10px; line-height: 16px; }
+      #cq-local-usage .cq-local-cache-track { height: 3px; overflow: hidden; border-radius: 2px; background: var(--cq-track); }
+      #cq-local-usage .cq-local-cache-track i { display: block; min-width: 2px; max-width: 100%; height: 100%; background: var(--cq-chart-cache); border-radius: inherit; }
+      #cq-local-usage .cq-local-daily { margin: 0 0 16px; padding: 8px; border-radius: var(--radius-sm,6px); background: color-mix(in srgb,var(--cq-ink) 3%,transparent); }
+      #cq-local-usage .cq-local-chart-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 12px; font-weight: 500; }
+      #cq-local-usage .cq-local-chart-nav { display: flex; gap: 4px; }
+      #cq-local-usage .cq-local-chart-nav button { width: 24px; height: 24px; padding: 5px; }
+      #cq-local-usage .cq-local-chart-nav svg { width: 14px; height: 14px; }
+      #cq-local-usage .cq-local-chart-next { transform: rotate(180deg); }
+      #cq-local-usage .cq-local-day-detail { min-height: 88px; margin: 8px 0 12px; }
+      #cq-local-usage .cq-local-day-date { font-size: 10px; line-height: 16px; color: var(--cq-muted); margin-bottom: 6px; }
+      #cq-local-usage .cq-local-day-values { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr); gap: 12px; }
+      #cq-local-usage .cq-local-day-values strong { display: block; font-size: clamp(12px,8cqi,16px); line-height: 20px; font-weight: 600; overflow-wrap: anywhere; }
+      #cq-local-usage .cq-local-day-values > div > span { display: block; font-size: 10px; line-height: 16px; color: var(--cq-muted); margin-top: 2px; }
+      #cq-local-usage .cq-local-day-note { margin: 6px 0 0; color: var(--cq-muted); font-size: 10px; line-height: 16px; }
+      #cq-local-usage .cq-local-chart-scale { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 4px; font-size: 9px; line-height: 14px; color: var(--cq-muted); }
+      #cq-local-usage .cq-local-chart-plot { position: relative; isolation: isolate; display: grid; gap: 0; height: 110px; margin-top: 4px; background: repeating-linear-gradient(to top,transparent 0,transparent 29px,var(--cq-border) 29px,var(--cq-border) 30px); background-size: 100% 90px; background-repeat: no-repeat; }
+      #cq-local-usage .cq-local-day-selection { position: absolute; top: 0; left: 0; height: 90px; border-radius: 4px; background: color-mix(in srgb,var(--cq-ink) 6%,transparent); pointer-events: none; z-index: -1; }
+      #cq-local-usage .cq-local-day { position: relative; display: flex; flex-direction: column; justify-content: flex-end; min-width: 0; width: 100%; height: 110px; padding: 0 2px; border-radius: 4px; }
+      #cq-local-usage .cq-local-day:hover, #cq-local-usage .cq-local-day[aria-pressed=true] { background: transparent; }
+      #cq-local-usage .cq-local-day-rail { position: relative; display: flex; justify-content: center; align-items: flex-end; width: 100%; height: 90px; }
+      #cq-local-usage .cq-local-day-bar { position: relative; display: flex; flex-direction: column; flex: none; width: min(14px,65%); border-radius: 2px 2px 0 0; overflow: hidden; transform-origin: center bottom; }
+      #cq-local-usage .cq-local-day[aria-pressed=true] .cq-local-day-label { color: var(--cq-ink); font-weight: 600; }
+      #cq-local-usage .cq-local-day[aria-pressed=true] .cq-local-day-bar { outline: 1px solid var(--cq-ink); outline-offset: 1px; }
+      #cq-local-usage .cq-local-day-bar i { display: block; flex-basis: 0; min-height: 0; }
+      #cq-local-usage [data-kind=input] { background: var(--cq-chart-input); }
+      #cq-local-usage [data-kind=cache] { background: var(--cq-chart-cache); }
+      #cq-local-usage [data-kind=output] { background: var(--cq-chart-output); }
+      #cq-local-usage .cq-local-day-label { display: block; height: 20px; line-height: 20px; color: var(--cq-muted); font-size: 9px; }
+      #cq-local-usage .cq-local-day-incomplete { position: absolute; bottom: 2px; left: 50%; transform: translateX(-50%); color: var(--cq-ink); background: var(--cq-solid); border: 1px dashed currentColor; font-size: 9px; line-height: 12px; min-width: 12px; border-radius: 2px; }
+      #cq-local-usage .cq-local-chart-legend { display: flex; flex-wrap: wrap; gap: 4px 10px; margin-top: 8px; font-size: 9px; line-height: 14px; color: var(--cq-muted); }
+      #cq-local-usage .cq-local-chart-legend span { display: inline-flex; align-items: center; gap: 4px; background: transparent; }
+      #cq-local-usage .cq-local-chart-legend span::before { content: ""; width: 5px; height: 5px; background: var(--cq-chart-input); border-radius: 1px; }
+      #cq-local-usage .cq-local-chart-legend [data-kind=cache]::before { background: var(--cq-chart-cache); }
+      #cq-local-usage .cq-local-chart-legend [data-kind=output]::before { background: var(--cq-chart-output); }
+      #cq-local-usage .cq-local-models { border-top: 1px solid var(--cq-border); font-size: 11px; }
+      #cq-local-usage .cq-local-model { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 8px; padding-top: 8px; font-size: 11px; }
+      #cq-local-usage .cq-local-api-note { color: var(--cq-muted); font-size: 10px; line-height: 16px; margin: 4px 0 0; }
+      #cq-local-usage .cq-local-excluded, #cq-local-usage .cq-local-status, #cq-local-usage .cq-local-reference, #cq-local-usage .cq-local-issues { margin: 16px 0 0; color: var(--cq-muted); font-size: 11px; line-height: 16px; overflow-wrap: anywhere; }
+      #cq-local-usage .cq-local-status:empty { display: none; }
+      #cq-local-usage .cq-local-status[data-cq-quiet] { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; margin: 0; }
+      #cq-local-usage .cq-local-status, #cq-local-usage .cq-local-reference { margin-right: 16px; margin-left: 8px; }
+      #cq-local-usage .cq-local-reference { border-top: 1px solid var(--cq-border); padding-top: 0; margin-top: 0; }
+      #cq-local-usage .cq-local-reference a { display: inline-block; margin: 8px 16px 0 0; text-decoration: underline; text-underline-offset: 2px; color: var(--cq-ink); }
+      #cq-local-usage summary { display: flex; align-items: center; gap: 8px; min-height: 36px; list-style: none; cursor: pointer; font-size: 12px; font-weight: 500; color: var(--cq-ink); }
+      #cq-local-usage summary::-webkit-details-marker { display: none; }
+      #cq-local-usage .cq-local-detail-meta { margin-left: auto; color: var(--cq-muted); font-size: 11px; font-weight: 400; }
+      #cq-local-usage .cq-local-detail-arrow { flex: none; width: 12px; height: 12px; margin-left: auto; color: var(--cq-muted); transform: rotate(180deg); }
+      #cq-local-usage .cq-local-detail-meta + .cq-local-detail-arrow { margin-left: 0; }
+      #cq-local-usage details[open] > summary .cq-local-detail-arrow { transform: rotate(270deg); }
+      @media (forced-colors: active) { #cq-local-usage .cq-local-usage-group { outline: 1px solid CanvasText; } #cq-local-usage .cq-local-cache-track { forced-color-adjust: none; background: GrayText; } #cq-local-usage .cq-local-cache-track i { background: Highlight; } }
+      @media (forced-colors: active) { #cq-local-usage .cq-local-daily { outline: 1px solid CanvasText; } #cq-local-usage .cq-local-day-bar i, #cq-local-usage .cq-local-chart-legend span::before { forced-color-adjust: none; } #cq-local-usage [data-kind=input] { background: CanvasText; } #cq-local-usage [data-kind=cache] { background: Highlight; } #cq-local-usage [data-kind=output] { background: GrayText; } #cq-local-usage .cq-local-chart-legend [data-kind=input]::before { background: CanvasText; } #cq-local-usage .cq-local-chart-legend [data-kind=cache]::before { background: Highlight; } #cq-local-usage .cq-local-chart-legend [data-kind=output]::before { background: GrayText; } }
+      #cq-local-usage .cq-local-detail-body p { margin: 8px 0 0; }
       #cq-settings { padding: 0; }
       #cq-settings header { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 24px; margin: 0 0 16px; padding: 0 var(--cq-control-right, 6px) 0 8px; }
       #cq-settings h2 { font-size: 14px; line-height: 20px; font-weight: 600; letter-spacing: -.01em; margin: 0; }
@@ -938,6 +1729,10 @@
       #cq-settings .cq-switch input:focus-visible + .cq-switch-track { outline: 2px solid var(--cq-ink); outline-offset: 2px; }
       #cq-settings .cq-tools { display: flex; flex-wrap: wrap; align-items: center; column-gap: 16px; row-gap: 0; margin: 8px 16px 0 8px; padding-top: 8px; border-top: 1px solid var(--cq-border); font-size: 11px; line-height: 16px; color: var(--cq-muted); }
       #cq-settings .cq-tools :is(button,a) { display: inline-flex; align-items: center; min-height: 24px; padding: 0; border-radius: 4px; text-decoration: none; }
+      #cq-settings .cq-tools .cq-release-link { flex-basis: 100%; min-width: 0; justify-content: space-between; gap: 8px; }
+      #cq-settings .cq-release-link span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      #cq-settings .cq-release-link span:last-child { flex: none; }
+      @media (forced-colors: active) { #codex-quota-popover .cq-settings-button[data-cq-update]::after { forced-color-adjust: none; background: Highlight; outline-color: Canvas; } }
       #cq-settings pre { white-space: pre-wrap; overflow-wrap: anywhere; font: 11px/1.5 var(--default-font-family, sans-serif); margin: 8px 16px 0 8px; user-select: text; }
       #cq-settings pre:empty { display: none; }
       #codex-quota-trigger { position: relative; gap: 8px; font-variant-numeric: tabular-nums; --cq-alert-ink: #b42318; --cq-alert-label: #8f453e; --cq-alert-surface: #fbe4e1; --cq-alert-border: #dca29b; }
@@ -1129,7 +1924,16 @@
     settings.append(toolIcon("settings", "cq-settings-icon"));
     pressFeedback(settings);
     settings.onclick = () => openSettings(settings);
-    actions.append(button, settings);
+    const usage = document.createElement("button");
+    usage.type = "button";
+    usage.className = "cq-local-usage-button";
+    usage.title = words("本机用量与周额度估算", "Local usage and weekly quota estimate");
+    usage.setAttribute("aria-label", usage.title);
+    usage.setAttribute("aria-haspopup", "dialog");
+    usage.append(toolIcon("usage", "cq-usage-icon"));
+    usage.onclick = () => openLocalUsage(usage);
+    actions.append(button, usage, settings);
+    queueMicrotask(syncReleaseUI);
     return actions;
   };
 
@@ -1666,7 +2470,7 @@
   const positionPopover = () => {
     const popup = document.getElementById("codex-quota-popover");
     const trigger = document.getElementById("codex-quota-trigger");
-    if (sharedPopover || paneMotion || !popup?.matches(":popover-open") || !visible(trigger)) { syncInlineAlert(); return; }
+    if (sharedPopover || paneMotion || localLayout || !popup?.matches(":popover-open") || !visible(trigger)) { syncInlineAlert(); return; }
     const rect = trigger.getBoundingClientRect();
     const column = anchors?.column ? visibleRect(anchors.column) : null;
     const leftEdge = column ? Math.max(12, column.left + 8) : 12;
@@ -1686,10 +2490,12 @@
     const controlLeft = column ? arrow.left + arrow.width / 2 - box.left - popup.clientLeft - 12 : popup.clientWidth - 30;
     collapse.style.left = controlLeft + "px";
     // Both right-hand tools share the measured entry arrow axis.
-    const heading = popup.querySelector("#cq-settings:not([hidden]) header") || popup.querySelector(".cq-heading");
+    const heading = popup.querySelector(":is(#cq-settings,#cq-local-usage):not([hidden]) header") || popup.querySelector(".cq-heading");
     if (heading?.getClientRects().length) popup.style.setProperty("--cq-control-right",
       (heading.getBoundingClientRect().right - box.left - popup.clientLeft - controlLeft - 24) + "px");
     collapse.style.top = (column ? arrow.top + arrow.height / 2 - box.top - popup.clientTop + popup.scrollTop - 12 : popup.scrollTop + popup.clientHeight - 30) + "px";
+    document.getElementById("cq-local-usage")?.cqPositionCalendar?.();
+    syncReleaseUI();
     syncInlineAlert();
   };
   const finishSharedPopover = () => {
@@ -1911,6 +2717,9 @@
   const settlePopoverMotion = () => {
     if (!quotaShell) return null;
     const {popup} = quotaShell;
+    finishLocalLayout();
+    const local = document.getElementById("cq-local-usage");
+    if (local) stopLocalMotions(local);
     finishPaneMotion();
     finishSharedPopover();
     stopMotion(popup);
@@ -1963,8 +2772,10 @@
     collapse.firstElementChild.style.removeProperty("transform");
     state.host.querySelectorAll(".cq-refresh").forEach(refreshMotion);
     positionPopover();
+    syncReleaseUI();
   };
   const animatePane = (host, panel, settings, open = quotaShell.popup.matches(":popover-open")) => {
+    finishLocalLayout();
     const {popup, trigger, collapse} = quotaShell;
     if (!paneMotion) {
       const material = sharedPopover?.rail ? getComputedStyle(popup) : null;
@@ -2028,7 +2839,7 @@
     const railStyle = getComputedStyle(anchors.rail);
     const dark = railStyle.colorScheme === "dark" || document.documentElement.classList.contains("dark") ||
       (railStyle.colorScheme !== "light" && matchMedia("(prefers-color-scheme: dark)").matches);
-    for (const node of [document.getElementById("codex-quota-trigger"), document.getElementById("codex-quota-popover")]) {
+    for (const node of [document.getElementById("codex-quota-trigger"), document.getElementById("codex-quota-popover"), document.getElementById("cq-local-usage")].filter(Boolean)) {
       node.toggleAttribute("data-cq-dark", dark);
       node.style.colorScheme = dark ? "dark" : "light";
       // Scoped theme variables may live on the shell rather than :root.
@@ -2146,6 +2957,7 @@
         // Only a fresh opening returns from settings to the quota view.
         if (!sharedPopover && !paneMotion) {
           document.getElementById("cq-settings")?.remove();
+          document.getElementById("cq-local-usage")?.remove();
           const host = popup.querySelector(`#${officialHostId}`);
           if (host) host.hidden = false;
         }
@@ -2256,6 +3068,9 @@
 
   globalThis.__codexQuotaResetSession = () => {
     alertGeneration++;
+    clearTimeout(localUsageTimer); localUsageRequestId = null;
+    document.getElementById("cq-local-usage")?.remove();
+    delete globalThis.__codexQuotaLocalUsageRange;
     delete globalThis.__codexQuotaNetworkDiagnosis;
     finishMotion();
     manualRefresh = null;
@@ -2416,6 +3231,7 @@
       return true;
     } catch (error) { console.error("Codex quota UI installation failed", error); return false; }
   };
+  scheduleReleaseCheck();
   if (install()) {
     if (restoreOpen && visible(document.getElementById("codex-quota-trigger"))) document.getElementById("codex-quota-trigger").click();
     return true;

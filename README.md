@@ -9,7 +9,7 @@ Codex Usage Card 在 Codex 桌面端列表侧栏底部提供一行额度入口�
 在 PowerShell 7 中运行：
 
 ```powershell
-$installer = Join-Path $env:TEMP 'install-codex-usage-card.ps1'; Invoke-WebRequest 'https://raw.githubusercontent.com/DrFanghaiz/codex-usage-card/v2.5.1/install.ps1' -OutFile $installer; Unblock-File -LiteralPath $installer; & $installer
+$installer = Join-Path $env:TEMP 'install-codex-usage-card.ps1'; Invoke-WebRequest 'https://raw.githubusercontent.com/DrFanghaiz/codex-usage-card/v2.6.0/install.ps1' -OutFile $installer; Unblock-File -LiteralPath $installer; & $installer
 ```
 
 安装器会校验发布包的 SHA-256，把 Skill 安装到 `$CODEX_HOME\skills`（未设置时为 `$env:USERPROFILE\.codex\skills`），把无窗口修复器部署到 `$env:LOCALAPPDATA\CodexUsageCard`，并注册当前用户的计划任务 `Codex Usage Card`。从旧版升级时，只迁移路径与动作完全匹配的旧任务。安装完成后会输出 `ActivationState`、`StageCodes` 和 `CardVisible` 等只读验收结果；Codex 未运行时显示等待状态，不把已完成安装误报为失败。
@@ -21,6 +21,14 @@ python "$env:USERPROFILE\.codex\skills\.system\skill-installer\scripts\install-s
 ```
 
 安装后重新启动 Codex，使新 Skill 出现在可用 Skill 列表中。
+
+## v2.6.0 本机用量统计与低打扰版本提醒
+
+- 刷新按钮旁新增本机用量统计，原位查看今日、本周和自选日期的 token、API 等值与参考周额度估算；点击每日柱状图查看当天消耗，官方额度仍独立显示。
+- 日志增量统计覆盖归档、复制／分叉去重与可验证的子代理继承快照；按日期解释不完整来源，不把未知值当成零。
+- 日期选中、柱形、范围切换和明细展开加入可打断过渡，修复加载行撑高与隐藏表单错误起点；自绘日历统一浅深色与键盘操作。
+- Helper 每 24 小时最多匿名检查一次稳定版，设置图标以静态小圆点提示，已读跨窗口同步，失败保留缓存。升级继续使用固定版本安装器与 SHA-256 校验 ZIP。
+- [v2.6.0 发布与验证记录](docs/releases/v2.6.0.md)包含统计估算边界、安装验证和发布包摘要。
 
 ## v2.5.1 兼容性修复
 
@@ -36,7 +44,7 @@ python "$env:USERPROFILE\.codex\skills\.system\skill-installer\scripts\install-s
 
 ## 工作方式
 
-- 新版界面的初始数据和几何契约见 [`spec.md`](docs/quota-sidebar-v3/spec.md)，后续已确认的外观与动画以[当前设计方案](docs/codex-bar-proposal-20260926.html)为准；发布验证见 [v2.5.1 验证记录](docs/releases/v2.5.1.md)。官方模式沿用 Helper 校验后的真实额度窗口；原生单窗口数据仍可作为回退来源，未知窗口逐条呈现。
+- 新版界面的初始数据和几何契约见 [`spec.md`](docs/quota-sidebar-v3/spec.md)，后续已确认的外观与动画以[当前设计方案](docs/codex-bar-proposal-20260926.html)为准；发布验证见 [v2.6.0 验证记录](docs/releases/v2.6.0.md)。官方模式沿用 Helper 校验后的真实额度窗口；原生单窗口数据仍可作为回退来源，未知窗口逐条呈现。
 - 入口上沿按宿主头像实际矩形对齐，兼容宿主自身缩放；footer 在 `.sidebar-navigation` 中正常留位。弹层打开时按实测列表列宽取 `min(272px, 列宽 − 16px)`，不越出列表列，矮窗口可内部滚动。官方横线表示已用，高 2px，L2 方案填充至少 3px。浅色轨道 `#E2D8C4`、填充 `#8E4617`，额度数字字重 600；时间环为 10px/描边 2.75。深色填充结合宿主前景调亮，表面与文字优先使用宿主 token。
 - 折叠侧栏入口使用 20px 自绘仪表，1.33px 轮廓、三枚轻刻度与轴心，背景和图标色与宿主导航一致。指针显示官方剩余额度：左 0%、上 50%、右 100%；多窗口采用剩余最少者，悬停说明窗口。随现有刷新回包更新并平滑转动，不额外轮询；失败保留上次值，无数据隐藏指针。
 - 页面可见时使用唯一的自适应单次计时器：最近聚焦 5 分钟内每 2 分钟、聚焦后 5 分钟至 1 小时每 5 分钟、闲置 1–4 小时每 15 分钟、超过 4 小时每 30 分钟；若额度值刚发生变化则维持 5 分钟档。页面隐藏时立即停表，恢复可见或重新聚焦时按新鲜度补刷新。失败重试继续服从至少 60 秒及服务端 `Retry-After` 冷却，不监听键盘、不扫描进程或会话文件。
@@ -82,6 +90,14 @@ Codex 必须暴露本机调试端口，修复器才能向页面注入控件。�
 卡内自检显示网络模式、配置来源、脱敏后的代理端点、最近一次请求错误与检查时间。这些信息来自已有额度请求，诊断不额外访问外网；尚无记录时显示未检查。端点不包含用户名、密码、路径或查询参数。失败区分代理不可达、代理认证、DNS、TLS、超时、登录失效、拒绝访问及限流，仍保留上次成功额度；账户隔离与服务端冷却保持不变。
 
 实现与实机证据见[网络策略验收记录](docs/network-policy-20261022.md)。
+
+## 版本更新提醒与固定升级方式
+
+Helper 只查询本项目公开的 GitHub 稳定版，复用现有系统／代理配置，不携带 ChatGPT 账号凭据。每次尝试先持久化时间，成功或失败后 24 小时内都复用缓存；多窗口共享限额，检查在独立任务中执行。失败保留上次确认的版本，未知或过期结果不显示“已是最新”。
+
+发现比当前版本更新的稳定版时，设置图标出现静态小圆点，设置页显示版本号与“查看新版”。版本行真正进入可见区域后才记为已读；跨窗口保存最高已读版本，旧窗口不能降低水位。提醒不抢焦点、不弹窗，不改变额度入口或按钮的位置。
+
+升级方式固定为：**对应版本 GitHub Release 页面 → 该版本固定的 PowerShell 安装命令 → 安装器下载同版本 Skill ZIP 并校验固定 SHA-256 → 覆盖升级**。提醒只打开版本说明，不自动下载或执行程序。沿用安装器的备份、失败回滚、现有配置保留和官方快捷方式维护；自定义安装目录必须继续传原 `-InstallRoot`。每次发布须同步 Helper 的 `ProductVersion`、顶层 `install.ps1` 的版本与 ZIP 校验值，并在该 Release 中提供固定 tag 的安装命令。v2.6.0 包含本机统计、动画与日历优化及版本提醒。
 
 ## 设置、提醒与可靠性
 
@@ -148,3 +164,22 @@ node --check native-patch\native_patch.js
 ```
 
 完整维护流程与安全约束见 [`skills/codex-usage-card/SKILL.md`](skills/codex-usage-card/SKILL.md)。
+
+
+### 本机用量与参考周额度估算
+
+额度展开后的刷新按钮旁新增“本机用量”按钮，在原位置切换至统计页，复用现有可打断的展开、返回和收起动画，查询今日、本周（本地时区周一至今）或自选日期（含首尾）。官方额度仍保留在原额度页。只读本机 `sessions` 与 `archived_sessions` 的官方用量日志，按累计增量去重，分别显示输入、其中缓存、输出及总 token；不上传会话正文。统计可能包含本机不同账户或导入的历史记录，无法据此证明日志的物理设备来源，也不代表账户全量。
+
+周额度估算采用 [ModelDial](https://modeldial.com/subscriptions) 的 **Pro 200 新额度参考样本**：GPT-6 Astra 每周 4.38 亿 token，GPT-6.1 Sol 每周 23.54 亿 token。2026-10-27 核实这组值已被来源标为新额度，不再次减半；来源为 2026-10-05 Agent 负载研究，将月值归一为周，并非固定官方 token 上限。按各模型总 token 与参考总量的比例相加，不套 API 价格、不额外猜测缓存权重。无基准模型仅统计；没有记录时不生成百分比。基准未按当前套餐和账户切换时点校准，跨周期查询可超过 100%。
+
+API 等值独立按 [OpenAI 价格](https://developers.openai.com/api/docs/pricing) 的 2026-10-27 Standard 短上下文单价折算普通输入、缓存读取、缓存写入和输出；未知写入保留时长时给出价格区间。未记录的写缓存、长上下文／加速／地区／工具附加费，以及历史调价，均不冒充已核实的实付金额。无价格模型明确未计价。此功能不恢复 API 登录或余额卡，也不以 API 等值推导官方周额度。
+
+覆盖问题按查询日期列出具体类别与数量，区分来源未确认、历史起点缺失、损坏记录、日期异常和不可读文件；写缓存元数据缺失不等于总 token 漏计。缺 `plan_type` 但同事件有有效官方 Codex 额度窗口的记录可恢复；同会话跨日志的累计起点只有精确匹配时才接续。无法证实的来源与缺失历史继续明确提示，不猜测补齐。
+
+新增后端回归：Windows PowerShell 5.1 运行 `tests/local_usage_regressions.ps1`；UI 用例沿用 `node --test tests/native_patch_runtime.cjs`。
+
+统计页包含每日堆叠柱状图：暖赭＝非缓存输入、鼠尾草绿＝缓存输入、灰蓝＝输出；深色使用对应浅色。图表跟随当前日期范围，长区间分页，每根柱子始终代表一天。点击或方向键选择日期，查看该日 token 和 API 等值；直接读取已返回日桶，不触发新请求。区间与日桶复用同一日志去重和汇总；无记录与不完整日期分别标示，不能当成已确认消费零。区间输入、输出和缓存计数保留在可展开的“用量明细”中。
+
+统计页内的选中标记、柱形切换和明细展开使用 140–240ms 的轻量动效，读数即时更新。连续点击承接当前可见状态；明细展开保持卡片底边与收起按钮位置，短窗口保留滚动位置。动画使用现有 Motion／WAAPI，尊重减少动态效果，并在返回、关闭和重注入时清理。
+
+切换范围时，读取提示在标题标记内显示，不新增状态行高度。自选日期使用与宿主配色一致的内部日历，支持手输 `YYYY-MM-DD`、月份切换、方向键及 Escape；只允许真实且不晚于今天的日期，查询时校验起止顺序。点选日期不扫描日志，点击“查询”才提交。
