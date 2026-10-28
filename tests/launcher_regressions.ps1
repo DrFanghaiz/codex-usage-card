@@ -8,7 +8,7 @@ function MethodBlock($Start, $End) {
     if ($to -le $from) { throw "Missing launcher boundary: $End" }
     $source.Substring($from, $to - $from)
 }
-$main = (MethodBlock '    private static void Main(' '    private static async Task MainAsync()').Replace('private static void Main(', 'private static void RunMain(')
+$main = (MethodBlock '    private static void Main(' '    private static void PublishRelease(').Replace('private static void Main(', 'private static void RunMain(')
 $initialize = (MethodBlock '    private static async Task MainAsync()' '        var retrySeconds = 1;').Replace('private static async Task MainAsync()', 'private static void RememberExistingRoots()') + "    }`r`n"
 $launch = MethodBlock '    private static void LaunchCodex()' '    private static string FindInstalledCodexAppId()'
 $filter = MethodBlock '    private static bool IsCodexRootProcess(' '    private static uint LaunchRegisteredApp('
@@ -56,6 +56,11 @@ public static class LauncherRegressions
         if (error != null) { Check(stage.EndsWith("-failed"), "Startup failure must be labelled"); FailureLogs++; }
     }
     private static Task MainAsync() { throw new Exception("Explicit launcher entered the background service"); }
+    private sealed class OfficialShortcutMonitor : IDisposable
+    {
+        public OfficialShortcutMonitor() { throw new Exception("Explicit launcher started shortcut maintenance"); }
+        public void Dispose() { }
+    }
     // No real process is opened or killed: the actual production method resolves this nested fake.
     private sealed class Process : IDisposable
     {

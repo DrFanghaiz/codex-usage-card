@@ -144,6 +144,63 @@ public static class LocalUsageRegressions
         File.AppendAllText(caseFile,"\n",new UTF8Encoding(false));
         result=Read(cases);
         Check(Total(result)==24 && !(bool)result["partial"],"Completed tail is retried exactly once");
+        Check(Total(Read(cases))==24,"Unchanged EOF preserves cached records");
+        var originalWrite=File.GetLastWriteTimeUtc(caseFile);
+        File.WriteAllText(caseFile,Meta("openai")+Model("gpt-6-astra")+E(1,10,C(20,8,5),C(20,8,5),"pro"),new UTF8Encoding(false));
+        File.SetLastWriteTimeUtc(caseFile,originalWrite);
+        Check(Total(Read(cases))==25,"EOF shortcut still validates the tail anchor when size and write time are unchanged");
+        var oversized=Dir(root,"oversized");var oversizedSessions=Dir(oversized,"sessions");var oversizedFile=Path.Combine(oversizedSessions,"tail.jsonl");
+        File.WriteAllText(oversizedFile,Meta("openai")+Model("gpt-6-astra")+"{\"timestamp\":\""+Stamp(1,11)+"\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":\""+new string('x',16777217),new UTF8Encoding(false));
+        result=Read(oversized);
+        Check((bool)result["partial"] && IssueCount(result,"INVALID_TOKEN_EVENT")==1,"An oversized unfinished token record stays explicitly incomplete");
+        File.AppendAllText(oversizedFile,"\n",new UTF8Encoding(false));result=Read(oversized);
+        Check((bool)result["partial"] && IssueCount(result,"INVALID_TOKEN_EVENT")==1,"Completing an oversized invalid tail does not duplicate its issue");
+        var collisions=Dir(root,"collisions");var collisionSessions=Dir(collisions,"sessions");
+        var collisionEvent=E(1,12,CW(100,20,0,10),CW(100,20,0,10),"pro");
+        var identityA=Json.Serialize(new {type="session_meta",payload=new {model_provider="openai",session_id="independent-a",id="independent-a"}})+"\n";
+        var identityB=identityA.Replace("independent-a","independent-b");
+        File.WriteAllText(Path.Combine(collisionSessions,"a.jsonl"),identityA+Model("gpt-6-astra")+collisionEvent,new UTF8Encoding(false));
+        File.WriteAllText(Path.Combine(collisionSessions,"b.jsonl"),identityB+Model("gpt-6.1-sol")+collisionEvent,new UTF8Encoding(false));
+        result=Read(collisions);
+        Check(Total(result)==220 && (int)result["eventCount"]==2 && ((List<Dictionary<string,object>>)result["models"]).Count==2,"Independent identified threads with equal counters at one timestamp both count");DailyMatches(result);
+        var collisionArchive=Dir(collisions,"archived_sessions");File.Copy(Path.Combine(collisionSessions,"a.jsonl"),Path.Combine(collisionArchive,"copy.jsonl"));
+        Check(Total(Read(collisions))==220,"An identified thread's archived copy is still counted once");
+        File.WriteAllText(Path.Combine(collisionSessions,"b.jsonl"),identityB.Replace("\"session_id\":\"independent-b\"","\"session_id\":\"independent-a\"")+Model("gpt-6-astra")+collisionEvent,new UTF8Encoding(false));
+        Check(Total(Read(collisions))==220,"Distinct thread ids take priority over shared guardian session ids");
+        var historyRoot=Dir(root,"declared-history");var historySessions=Dir(historyRoot,"sessions");
+        var historyA=E(1,13,CW(100,20,10,10),CW(100,20,10,10),"pro");
+        var historyB=E(1,14,CW(150,30,20,20),CW(50,10,10,10),"pro");
+        var childDelta=E(2,1,CW(175,35,25,25),CW(25,5,5,5),"pro");
+        File.WriteAllText(Path.Combine(historySessions,"parent.jsonl"),identityA.Replace("independent-a","history-parent")+Model("gpt-6-astra")+historyA+historyB,new UTF8Encoding(false));
+        File.WriteAllText(Path.Combine(historySessions,"child.jsonl"),Startup("history-child","history-parent",6)+historyA+historyB+childDelta,new UTF8Encoding(false));
+        Check(Total(Read(historyRoot))==200,"An explicit pre-birth history boundary deduplicates every copied parent event, retaining the child's delta");
+        var parentHistory=File.ReadAllText(Path.Combine(historySessions,"parent.jsonl"));File.Delete(Path.Combine(historySessions,"parent.jsonl"));
+        Check(Total(Read(historyRoot))==200,"A declared history copy still contributes when its original parent file is absent");
+        File.WriteAllText(Path.Combine(historySessions,"parent.jsonl"),parentHistory,new UTF8Encoding(false));
+        Check(Total(Read(historyRoot))==200,"Restoring the original parent does not duplicate the previously available history copy");
+        File.WriteAllText(Path.Combine(historySessions,"grandchild.jsonl"),Startup("history-grandchild","history-child",7).Replace(Stamp(2,0),Stamp(2,2))+historyA+historyB+childDelta+E(2,3,CW(200,40,30,30),CW(25,5,5,5),"pro"),new UTF8Encoding(false));
+        result=Read(historyRoot);
+        Check(Total(result)==230 && Total(Read(historyRoot,"2026-09-01","2026-09-01"))==170,"Nested explicit history resolves to its original parent without excluding the parent's real consumption");DailyMatches(result);
+        var importFile=Path.Combine(historySessions,"independent-import.jsonl");
+        File.WriteAllText(importFile,identityB+Model("gpt-6-astra")+historyA+historyB,new UTF8Encoding(false));
+        Check(Total(Read(historyRoot))==400,"Different identified logs without ancestry are never merged from coincident numbers");File.Delete(importFile);
+        File.WriteAllText(importFile,Startup("unbounded-history","history-parent",0)+historyA+historyB,new UTF8Encoding(false));
+        Check(Total(Read(historyRoot))==400,"An absent history boundary cannot establish parent ownership");File.Delete(importFile);
+        var sameTime=Dir(root,"same-time-parent");var sameTimeSessions=Dir(sameTime,"sessions");
+        var simultaneous=E(2,0,CW(100,20,0,10),CW(100,20,0,10),"pro");
+        File.WriteAllText(Path.Combine(sameTimeSessions,"parent.jsonl"),identityA.Replace("independent-a","same-time-parent")+Model("gpt-6-astra")+simultaneous,new UTF8Encoding(false));
+        File.WriteAllText(Path.Combine(sameTimeSessions,"child.jsonl"),Startup("same-time-child","same-time-parent")+simultaneous,new UTF8Encoding(false));
+        Check(Total(Read(sameTime))==220,"An event at the child's creation time is not pre-birth history and cannot remove real parent usage");
+        var cycle=Dir(root,"cyclic-history");var cycleSessions=Dir(cycle,"sessions");
+        File.WriteAllText(Path.Combine(cycleSessions,"a.jsonl"),Startup("cycle-a","cycle-b")+historyA,new UTF8Encoding(false));
+        File.WriteAllText(Path.Combine(cycleSessions,"b.jsonl"),Startup("cycle-b","cycle-a")+historyA,new UTF8Encoding(false));
+        Check(Total(Read(cycle))==220,"Cyclic history pointers terminate and preserve separate identities");
+        var copiedStartup=Dir(root,"copied-startup");var copiedStartupSessions=Dir(copiedStartup,"sessions");
+        File.WriteAllText(Path.Combine(copiedStartupSessions,"parent.jsonl"),identityA.Replace("independent-a","startup-parent")+Model("gpt-6-astra")+historyA,new UTF8Encoding(false));
+        var startupEvent=E(2,0,CW(100,20,10,10),CW(100,20,10,10),"pro");
+        File.WriteAllText(Path.Combine(copiedStartupSessions,"child.jsonl"),Startup("startup-child","startup-parent")+startupEvent,new UTF8Encoding(false));
+        File.WriteAllText(Path.Combine(copiedStartupSessions,"grandchild.jsonl"),Startup("startup-grandchild","startup-child").Replace(Stamp(2,0),Stamp(2,2))+startupEvent,new UTF8Encoding(false));
+        Check(Total(Read(copiedStartup))==110,"Copying a known inherited startup snapshot cannot reintroduce its totals or drop original parent consumption");
         var order=Dir(root,"order");
         var orderSessions=Dir(order,"sessions");
         var last=E(2,15,C(300,200,50),C(10,4,2),"pro");
@@ -311,7 +368,7 @@ Add-Type -TypeDefinition $harness -ReferencedAssemblies System.dll,System.Core.d
 $root=Join-Path ([IO.Path]::GetTempPath()) ('codex-local-usage-test-'+[Guid]::NewGuid().ToString('N'))
 try {
     [LocalUsageRegressions]::Run($root)
-    'Local usage regressions: 65 groups passed (cumulative, date range, copies, forks, append, subsets, truncation, unknown model/provider, inherited baseline, API exclusion, malformed/tail records, empty data, validation, response privacy).'
+    'Local usage regressions: 81 groups passed (cumulative, date range, identified copies, independent threads, nested fork history, missing/restored ancestors, cyclic ancestry, warm EOF, append, subsets, truncation, unknown model/provider, inherited baseline, API exclusion, malformed/oversized tails, empty data, validation, response privacy).'
 } finally {
     $resolved=[IO.Path]::GetFullPath($root)
     if ($resolved.StartsWith([IO.Path]::GetFullPath([IO.Path]::GetTempPath()),[StringComparison]::OrdinalIgnoreCase) -and [IO.Path]::GetFileName($resolved).StartsWith('codex-local-usage-test-')) {

@@ -58,6 +58,30 @@ ConvertTo-Json -Compress -InputObject $results
     def test_root_and_skill_doctors_are_exact_mirrors(self):
         self.assertEqual(ROOT_DOCTOR, SKILL_DOCTOR)
 
+    @unittest.skipUnless(shutil.which('powershell.exe') and shutil.which('pwsh'), 'Both PowerShell versions required')
+    def test_cdp_target_arrays_select_each_main_page_without_joining_urls(self):
+        start = ROOT_DOCTOR.index('            $items = ')
+        end = ROOT_DOCTOR.index('          } catch {', start)
+        selection = ROOT_DOCTOR[start:end]
+        main = dict(type='page', url='app://-/index.html', webSocketDebuggerUrl='ws://127.0.0.1:1234/devtools/page/main')
+        other = dict(type='page', url='https://example.test/', webSocketDebuggerUrl='ws://127.0.0.1:1234/devtools/page/other')
+        worker = dict(type='worker', url='app://-/worker.js', webSocketDebuggerUrl='ws://127.0.0.1:1234/devtools/worker/background')
+        second = dict(main, webSocketDebuggerUrl='ws://127.0.0.1:1234/devtools/page/second')
+        cases = [([], []), ([main], [main['webSocketDebuggerUrl']]),
+                 ([worker, other, main, dict(main, webSocketDebuggerUrl='')], [main['webSocketDebuggerUrl']]),
+                 ([main, worker, second], [main['webSocketDebuggerUrl'], second['webSocketDebuggerUrl']])]
+        for shell in ('powershell.exe', 'pwsh'):
+            for targets, expected in cases:
+                with self.subTest(shell=shell, count=len(targets)):
+                    encoded = base64.b64encode(json.dumps(targets).encode()).decode('ascii')
+                    command = "$ErrorActionPreference='Stop'\n$targets=@()\n$json=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('" + encoded + "'))\n" + selection + '''
+[string[]]$selected = @($targets | ForEach-Object { $_.WebSocketDebuggerUrl })
+ConvertTo-Json -Compress -InputObject $selected
+'''
+                    result = subprocess.run([shell, '-NoProfile', '-Command', command],
+                                            capture_output=True, text=True, check=True, timeout=15)
+                    self.assertEqual(json.loads(result.stdout), expected)
+
     @unittest.skipUnless(shutil.which('powershell.exe') and shutil.which('pwsh'), 'Windows PowerShell and PowerShell 7 required')
     def test_cdp_json_roundtrip_preserves_network_timestamp_in_both_powershell_versions(self):
         start = ROOT_DOCTOR.index('$jsonReadOptions = ')

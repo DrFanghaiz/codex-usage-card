@@ -1557,6 +1557,170 @@ async function showLocalUsage(page) {
 }
 async function updateLocalUsage(page,data,id) {await page.evaluate(({data,id})=>__codexQuotaUpdateLocalUsage(data,id),{data,id});await settle(page);}
 
+test('statistics opening measures its skeleton and retargets early replies without an end-frame jump',async()=>{
+  for(const reply of ['loading','success','failure']) {
+    const page=await pageFor();
+    try {
+      await page.evaluate(()=>{const info=console.info;console.info=(...args)=>{if(args[0]==='__codexQuotaLocalUsageRequest__')globalThis.__codexQuotaLocalUsageTestRequestId=args[1];info.apply(console,args);};});
+      await open(page);await page.emulateMedia({reducedMotion:'no-preference'});
+      await page.locator('.cq-local-usage-button').evaluate(el=>el.click());
+      const {range,id}=await localUsageRequest(page);
+      const sample=await page.evaluate(async({reply,data,id})=>{
+        const popup=document.getElementById('codex-quota-popover');
+        const top=()=>popup.getBoundingClientRect().top+parseFloat(getComputedStyle(popup).clipPath.match(/^inset\(([-\d.]+)px/)?.[1]||0);
+        let replyJump=0;
+        if(reply!=='loading') {
+          for(const animation of popup.getAnimations({subtree:true})){animation.pause();animation.currentTime=90;}
+          const before=top();__codexQuotaUpdateLocalUsage(reply==='success'?data:{errorCode:'TIMEOUT'},id);
+          for(const animation of popup.getAnimations({subtree:true})){animation.pause();animation.currentTime=0;}
+          replyJump=Math.abs(top()-before);
+        }
+        const animations=popup.getAnimations({subtree:true});
+        for(const animation of animations){animation.pause();animation.currentTime=Math.max(0,Number(animation.effect.getTiming().duration)-.01);}
+        const before=top();for(const animation of animations)animation.finish();
+        await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+        return {replyJump,endJump:Math.abs(top()-before),loaded:document.querySelector('.cq-local-result').dataset.loaded==='true',retry:!!document.querySelector('.cq-local-placeholder button'),skeleton:!!document.querySelector('.cq-local-skeleton')};
+      },{reply,data:localUsagePayload(range),id});
+      assert.ok(sample.replyJump<1,JSON.stringify(sample));assert.ok(sample.endJump<1,JSON.stringify(sample));
+      assert.equal(sample.loaded,reply==='success');assert.equal(sample.retry,reply==='failure');assert.equal(sample.skeleton,reply==='loading');
+      await page.emulateMedia({reducedMotion:'reduce'});await settle(page);await assertMotionClean(page);
+    } finally {await close(page);}
+  }
+});
+
+test('statistics height motion hands its visible edge to Back and Collapse without snapping',async()=>{
+  for(const action of ['.cq-local-close','.cq-collapse-button']) {
+    const page=await pageFor(officialPayload(),{width:1024,height:900},{deviceScaleFactor:1.25});
+    try {
+      await showLocalUsage(page);const {range,id}=await localUsageRequest(page);await updateLocalUsage(page,localUsagePayload(range),id);
+      await page.emulateMedia({reducedMotion:'no-preference'});
+      const jump=await page.evaluate(action=>{
+        const popup=document.getElementById('codex-quota-popover');
+        const top=()=>popup.getBoundingClientRect().top+parseFloat(getComputedStyle(popup).clipPath.match(/^inset\(([-\d.]+)px/)?.[1]||0);
+        const titleTop=()=>document.getElementById('cq-local-title').getBoundingClientRect().top;
+        document.querySelector('[data-local-page="2"]').click();
+        for(const animation of popup.getAnimations({subtree:true})){animation.pause();animation.currentTime=70;}
+        const before=top(),titleBefore=titleTop();document.querySelector(action).click();
+        for(const animation of popup.getAnimations({subtree:true})){animation.pause();animation.currentTime=0;}
+        return {edge:Math.abs(top()-before),title:Math.abs(titleTop()-titleBefore)};
+      },action);
+      assert.ok(jump.edge<1 && jump.title<1,`${action} jumped ${JSON.stringify(jump)}`);
+      await page.emulateMedia({reducedMotion:'reduce'});await settle(page);await assertMotionClean(page);
+      assert.equal(await page.locator('#cq-local-usage').count(),0);
+      assert.equal(await page.locator('#codex-quota-popover').isVisible(),action==='.cq-local-close');
+    } finally {await close(page);}
+  }
+});
+
+test('current statistics tabs are no-ops and resized daily charts preserve selection and exact values',async()=>{
+  const page=await pageFor(officialPayload(),{width:1024,height:1000},{deviceScaleFactor:1.25});
+  try {
+    const {range,id}=await customDailyRange(page);await updateLocalUsage(page,dailyChartPayload(range),id);
+    await page.locator('.cq-local-day[data-date="2026-10-08"]').click();
+    await page.evaluate(()=>globalThis.selectedDayNode=document.querySelector('.cq-local-day[aria-pressed=true]'));
+    await page.emulateMedia({reducedMotion:'no-preference'});
+    await page.locator('[data-local-page="1"]').click();
+    await page.locator('[data-date-field=start]').click();await page.locator('[data-local-page="1"]').focus();await page.keyboard.press('Enter');
+    assert.equal(await page.locator('.cq-local-calendar').isVisible(),false);
+    assert.equal(await page.evaluate(()=>selectedDayNode===document.querySelector('.cq-local-day[aria-pressed=true]')),true);
+    assert.equal(await page.locator('#codex-quota-popover').evaluate(el=>el.getAnimations({subtree:true}).length),0);
+    await page.locator('.cq-local-day[aria-pressed=true]').focus();
+    for(const width of [196,288]) {
+      await page.locator('.sidebar-navigation').evaluate((el,width)=>el.style.width=width+'px',width);await settle(page);
+      const chart=await page.locator('.cq-local-chart-plot').evaluate(el=>{
+        const selected=el.querySelector('[aria-pressed=true]'),a=selected.getBoundingClientRect(),b=el.querySelector('.cq-local-day-selection').getBoundingClientRect();
+        return {count:el.querySelectorAll('button').length,date:selected.dataset.date,error:Math.abs(a.left+a.width/2-b.left-b.width/2)};
+      });
+      assert.equal(chart.count,width===196?5:7);assert.equal(chart.date,'2026-10-08');assert.ok(chart.error<1,JSON.stringify(chart));
+      assert.equal(await page.locator('.cq-local-day[aria-pressed=true]').evaluate(el=>el===document.activeElement),true);
+    }
+    assert.equal((await localUsageRequest(page)).id,id);
+    await page.emulateMedia({reducedMotion:'reduce'});await page.locator('[data-local-page="0"]').click();
+    await page.locator('[data-local-page="0"]').focus();await page.keyboard.press('Home');
+    assert.equal(await page.locator('[data-local-page="0"]').evaluate(el=>el===document.activeElement),true);
+    assert.equal(await page.locator('#codex-quota-popover').evaluate(el=>el.getAnimations({subtree:true}).length),0);
+  } finally {await close(page);}
+});
+
+test('statistics first read has visible placeholders, retries failures and preserves successful ranges while reading',async()=>{
+  const page=await pageFor();
+  try {
+    await showLocalUsage(page);let request=await localUsageRequest(page);
+    assert.equal(await page.locator('.cq-local-page:not([hidden]) .cq-local-skeleton').isVisible(),true);
+    assert.match(await page.locator('.cq-local-page:not([hidden]) .cq-local-placeholder').innerText(),/正在读取/);
+    assert.equal(await page.locator('.cq-local-value-number').count(),0);
+    await page.locator('[data-period=week]').click();const week=await localUsageRequest(page);
+    await updateLocalUsage(page,localUsagePayload(request.range),request.id);
+    assert.equal(await page.locator('.cq-local-page:not([hidden]) .cq-local-skeleton').isVisible(),true);
+    await page.locator('[data-local-page="1"]').click();
+    await updateLocalUsage(page,{errorCode:'TIMEOUT'},week.id);
+    assert.equal(await page.locator('.cq-local-skeleton').count(),0);
+    await page.locator('.cq-local-page:not([hidden]) .cq-local-placeholder button').click();request=await localUsageRequest(page);
+    assert.notEqual(request.id,week.id);assert.equal(await page.locator('.cq-local-page:not([hidden]) .cq-local-skeleton').isVisible(),true);
+    await updateLocalUsage(page,localUsagePayload(request.range),request.id);
+    await page.locator('[data-local-page="0"]').click();
+    const old=await page.locator('.cq-local-range-label').textContent(),height=(await geometry(page)).popup.height;
+    await page.locator('[data-period=today]').click();
+    assert.equal(await page.locator('.cq-local-range-label').textContent(),old);
+    assert.match(await page.locator('.cq-local-estimate strong').textContent(),/2%/);
+    assert.equal(await page.locator('.cq-local-skeleton').count(),0);
+    assert.ok(Math.abs((await geometry(page)).popup.height-height)<1);
+  } finally {await close(page);}
+});
+
+test('statistics pages keep compact bounds, keyboard navigation and interruptible presentation without new queries',async()=>{
+  const dir=join(__dirname,'../.runtime-test/stats-content-height-20261028');mkdirSync(dir,{recursive:true});
+  for(const column of [196,288])for(const dark of [false,true]) {
+    const page=await pageFor(officialPayload(),{width:1024,height:800},{deviceScaleFactor:1.25});
+    try {
+      await page.locator('.sidebar-navigation').evaluate((el,width)=>el.style.width=width+'px',column);
+      if(dark)await page.evaluate(()=>{document.documentElement.classList.add('dark');document.documentElement.style.cssText='color-scheme:dark;--color-surface-elevated-secondary:#262724;--color-text:#f1f1eb;--color-text-secondary:#b0b2a8;--color-border:#494b43';});
+      await settle(page);await showLocalUsage(page);const {range,id}=await localUsageRequest(page);
+      await page.locator('#codex-quota-popover').screenshot({path:join(dir,`loading-${column}-${dark}.png`)});
+      await updateLocalUsage(page,localUsagePayload(range),id);const box=await geometry(page);
+      assert.ok(box.popup.height<=420,JSON.stringify(box.popup));
+      assert.ok(await page.locator('.cq-local-status').evaluate(el=>getComputedStyle(el).position==='absolute'),'quiet status must not reserve a footer row');
+      const overview=await page.locator('#cq-local-page-overview').evaluate(el=>({height:el.clientHeight,scroll:el.scrollHeight,parts:[...el.querySelectorAll('.cq-local-range-label,.cq-local-highlights,.cq-local-usage-group,.cq-local-metrics,.cq-local-cache')].map(n=>({name:n.className,height:n.getBoundingClientRect().height}))}));
+      assert.ok(overview.scroll<=overview.height,`overview must fit: ${JSON.stringify(overview)}`);
+      const before=await page.evaluate(()=>globalThis.__codexQuotaOfficialRequestId);
+      for(const index of [0,1,2]) {
+        await page.locator(`[data-local-page="${index}"]`).click();
+        const current=await geometry(page);
+        assert.ok(Math.abs(current.popup.bottom-box.popup.bottom)<1,'content changes keep the bottom anchored');
+        if(index===2) {
+          assert.ok(current.popup.height<box.popup.height-100,'collapsed details must shrink to their own rows');
+          assert.ok(await page.locator('.cq-local-result').evaluate(el=>el.getBoundingClientRect().height<100),'details cannot inherit the chart height');
+        }
+        assert.equal(await page.locator('.cq-local-page:not([hidden])').count(),1);
+        assert.equal(await page.locator('.cq-local-page[aria-hidden=false]').count(),1);
+        assert.equal(await page.locator('#cq-local-usage').evaluate(el=>el.scrollWidth-el.clientWidth),0);
+        if(index===1) assert.ok(await page.locator('#cq-local-page-daily').evaluate(el=>el.querySelector('.cq-local-chart-legend').getBoundingClientRect().bottom<=el.getBoundingClientRect().bottom+1),'daily chart and legend must fit');
+        await page.locator('#codex-quota-popover').screenshot({path:join(dir,`page-${index}-${column}-${dark}.png`)});
+      }
+      await page.locator('[data-local-page="2"]').focus();await page.keyboard.press('Home');
+      assert.equal(await page.locator('[data-local-page="0"]').getAttribute('aria-selected'),'true');
+      await page.emulateMedia({reducedMotion:'no-preference'});
+      const continuity=await page.evaluate(()=>{
+        const panel=document.querySelector('#cq-local-page-overview'),popup=document.getElementById('codex-quota-popover');
+        const top=()=>popup.getBoundingClientRect().top+parseFloat(getComputedStyle(popup).clipPath.match(/^inset\(([-\d.]+)px/)?.[1]||0);
+        document.querySelector('[data-local-page="2"]').click();
+        for(const animation of popup.getAnimations({subtree:true})){animation.pause();animation.currentTime=70;}
+        const from=panel.getBoundingClientRect().left,oldTop=top();
+        document.querySelector('[data-local-page="0"]').click();
+        for(const animation of popup.getAnimations({subtree:true})){animation.pause();animation.currentTime=0;}
+        const to=panel.getBoundingClientRect().left,newTop=top();
+        for(const animation of document.querySelector('#cq-local-usage').getAnimations({subtree:true}))animation.finish();
+        return {horizontal:Math.abs(from-to),vertical:Math.abs(oldTop-newTop)};
+      });
+      assert.ok(continuity.horizontal<1,`page reversal jumped ${JSON.stringify(continuity)}`);
+      assert.ok(continuity.vertical<1,`height reversal jumped ${JSON.stringify(continuity)}`);
+      assert.equal((await localUsageRequest(page)).id,id);assert.equal(await page.evaluate(()=>globalThis.__codexQuotaOfficialRequestId),before);
+      await page.emulateMedia({reducedMotion:'reduce'});await settle(page);
+      assert.equal(await page.locator('#cq-local-usage').evaluate(el=>el.getAnimations({subtree:true}).length),0);
+    } finally {await close(page);}
+  }
+});
+
 test('local usage opens in place and estimates only referenced models without changing official data',async()=>{
   const page=await pageFor();
   try {
@@ -1585,6 +1749,47 @@ test('local usage opens in place and estimates only referenced models without ch
     assert.equal(await page.locator('#cq-local-usage').isVisible(),false);
     assert.equal(await page.locator('#outside').evaluate(el=>el===document.activeElement),true);
   } finally {await close(page);}
+});
+
+test('graphical model breakdown preserves exact shares and aligns with structured references in narrow themes',async()=>{
+  const dir=join(__dirname,'../.runtime-test/stats-details-20261028');mkdirSync(dir,{recursive:true});
+  for(const column of [196,288])for(const dark of [false,true]) {
+    const page=await pageFor(officialPayload(),{width:1024,height:850},{deviceScaleFactor:1.25});
+    try {
+      await page.locator('.sidebar-navigation').evaluate((el,width)=>el.style.width=width+'px',column);
+      if(dark)await page.evaluate(()=>{document.documentElement.classList.add('dark');document.documentElement.style.cssText='color-scheme:dark;--color-surface-elevated-secondary:#262724;--color-text:#f1f1eb;--color-text-secondary:#b0b2a8;--color-border:#494b43';});
+      await settle(page);await showLocalUsage(page);const {range,id}=await localUsageRequest(page);
+      const models=[
+        {model:'codex-auto-review',inputTokens:40000,cachedInputTokens:20000,outputTokens:10000,totalTokens:50000},
+        {model:'gpt-6-astra',inputTokens:140000,cachedInputTokens:100000,outputTokens:10000,totalTokens:150000},
+        {model:'gpt-6.1-sol',inputTokens:700000,cachedInputTokens:600000,outputTokens:100000,totalTokens:800000}];
+      await updateLocalUsage(page,localUsagePayload(range,{models}),id);
+      await page.locator('[data-local-page="2"]').click();await page.locator('.cq-local-models summary').click();
+      assert.deepEqual(await page.locator('.cq-local-model-value').evaluateAll(nodes=>nodes.map(n=>n.getAttribute('aria-label'))),['800,000 token','150,000 token','50,000 token']);
+      assert.deepEqual(await page.locator('.cq-local-model-track').evaluateAll(nodes=>nodes.map(n=>Number(n.getAttribute('aria-valuenow')))),[80,15,5]);
+      const layout=await page.evaluate(()=>{
+        const rect=el=>{const r=el.getBoundingClientRect();return {left:r.left,right:r.right,width:r.width};};
+        return {rows:[...document.querySelectorAll('.cq-local-model')].map(el=>({name:rect(el.querySelector('.cq-local-model-name')),value:rect(el.querySelector('strong')),track:rect(el.querySelector('.cq-local-model-track')),fill:rect(el.querySelector('i'))})),
+          headers:[...document.querySelectorAll('.cq-local-models > summary,.cq-local-reference > summary')].map(rect),overflow:document.querySelector('#cq-local-page-details').scrollWidth-document.querySelector('#cq-local-page-details').clientWidth};
+      });
+      assert.equal(layout.overflow,0);
+      for(const row of layout.rows)for(const [part,edge] of [['name','left'],['value','right'],['track','left'],['track','right']])assert.ok(Math.abs(row[part][edge]-layout.rows[0][part][edge])<.5);
+      layout.rows.forEach((row,i)=>assert.ok(Math.abs(row.fill.width/row.track.width*100-[80,15,5][i])<.5));
+      assert.ok(Math.abs(layout.headers[0].left-layout.headers[1].left)<.5);assert.ok(Math.abs(layout.headers[0].right-layout.headers[1].right)<.5);
+      await page.locator('#codex-quota-popover').screenshot({path:join(dir,`models-${column}-${dark}.png`)});
+      await page.locator('.cq-local-models summary').click();await page.locator('.cq-local-reference > summary').click();
+      assert.deepEqual(await page.locator('.cq-local-baselines dd').evaluateAll(nodes=>nodes.map(n=>n.title)),['438,000,000 token','2,354,000,000 token']);
+      assert.ok(await page.locator('.cq-local-baselines dd').evaluateAll(nodes=>Math.abs(nodes[0].getBoundingClientRect().right-nodes[1].getBoundingClientRect().right)<.5));
+      assert.equal(await page.locator('.cq-local-caveats').getAttribute('open'),null);
+      assert.equal(await page.locator('.cq-local-reference a').count(),2);
+      await page.locator('#codex-quota-popover').screenshot({path:join(dir,`references-${column}-${dark}.png`)});
+      await page.locator('.cq-local-caveats > summary').click();assert.match(await page.locator('.cq-local-caveats p').innerText(),/非官方上限.*不是实付账单/);
+      assert.equal((await localUsageRequest(page)).id,id);
+      await page.locator('[data-period=today]').click();const request=await localUsageRequest(page);
+      await updateLocalUsage(page,localUsagePayload(request.range,{models:[{...models[0],inputTokens:0,cachedInputTokens:0,outputTokens:0,totalTokens:0}]}),request.id);
+      assert.equal(await page.locator('.cq-local-model-track').getAttribute('role'),'img');assert.equal(await page.locator('.cq-local-model-track').getAttribute('aria-valuenow'),null);assert.equal(await page.locator('.cq-local-model-track i').getAttribute('hidden'),'');
+    } finally {await close(page);}
+  }
 });
 
 test('local date presets and custom queries reject stale replies and allow over 100 percent',async()=>{
@@ -1657,7 +1862,9 @@ test('local API equivalent separates cache reads and writes and exposes safe cov
     await updateLocalUsage(page,localUsagePayload(range,{models:[row],partial:true,issues:[{code:'SOURCE_UNCONFIRMED',count:2,missingTokens:12345,affectsTotals:true,dateUnknown:false}]}),id);
     assert.match(await page.locator('.cq-local-cost strong').textContent(),/\$3\.35.*\$4\.60/);
     assert.match(await page.locator('.cq-local-status').innerText(),/来源未确认 2/);
+    await page.locator('[data-local-page="2"]').click();
     await page.locator('.cq-local-issues summary').click();assert.match(await page.locator('.cq-local-issues').innerText(),/12,345 token/);
+    await page.locator('[data-local-page="0"]').click();
     await page.locator('[data-period=today]').click();({range,id}=await localUsageRequest(page));
     await updateLocalUsage(page,localUsagePayload(range,{models:[{...row,cacheWriteKnown:false}],issues:[]}),id);
     assert.match(await page.locator('.cq-local-api-note').innerText(),/写缓存计数不完整/);
@@ -1706,11 +1913,11 @@ test('statistics hierarchy keeps exact counts, unknown states and narrow DPR lay
       });
       assert.equal(presentation.columns,2);assert.ok(presentation.primary>presentation.unit+3);assert.equal(presentation.overflow,0);
       assert.equal(presentation.exact[0],'27,921,500 token');
-      assert.equal(await page.locator('.cq-local-metrics').isVisible(),false);
-      await page.locator('.cq-local-usage-details summary').click();assert.equal(await page.locator('.cq-local-metrics').isVisible(),true);
-      await page.locator('.cq-local-usage-details summary').click();
+      assert.equal(await page.locator('.cq-local-metrics').isVisible(),true);
+      await page.locator('[data-local-page="2"]').click();
       await page.locator('.cq-local-models summary').click();assert.equal(await page.locator('.cq-local-excluded').isVisible(),true);
       await page.locator('.cq-local-models summary').click();
+      await page.locator('[data-local-page="0"]').click();
       await page.locator('[data-period=today]').click();({range,id}=await localUsageRequest(page));
       await updateLocalUsage(page,localUsagePayload(range,{models:[],eventCount:0}),id);
       assert.equal(await page.locator('.cq-local-cache-track').getAttribute('role'),'img');
@@ -1734,7 +1941,7 @@ const dailyChartPayload = range => {
 async function customDailyRange(page) {
   await showLocalUsage(page);await page.locator('[data-period=custom]').click();
   await page.locator('[name=start]').fill('2026-10-01');await page.locator('[name=end]').fill('2026-10-14');
-  await page.locator('.cq-local-dates button[type=submit]').click();return localUsageRequest(page);
+  await page.locator('.cq-local-dates button[type=submit]').click();await page.locator('[data-local-page="1"]').click();return localUsageRequest(page);
 }
 
 test('daily bars page actual dates and select exact token and API totals without extra requests',async()=>{
@@ -1807,9 +2014,10 @@ test('statistics details animate on a fixed bottom, reverse mid-frame and clean 
   const page=await pageFor(officialPayload(),{width:1024,height:1100},{deviceScaleFactor:1.25});
   try {
     await showLocalUsage(page);const {range,id}=await localUsageRequest(page);await updateLocalUsage(page,localUsagePayload(range),id);
+    await page.locator('[data-local-page="2"]').click();
     await page.emulateMedia({reducedMotion:'no-preference'});
     const frames=await page.evaluate(()=>{
-      const popup=document.getElementById('codex-quota-popover'),details=document.querySelector('.cq-local-usage-details'),summary=details.querySelector('summary');
+      const popup=document.getElementById('codex-quota-popover'),details=document.querySelector('.cq-local-models'),summary=details.querySelector('summary');
       const button=document.querySelector('.cq-collapse-button'),rect=()=>{const r=button.getBoundingClientRect();return [r.right,r.bottom];};
       const axis=rect();summary.click();
       const animations=popup.getAnimations({subtree:true});
@@ -1840,6 +2048,9 @@ test('statistics details animate on a fixed bottom, reverse mid-frame and clean 
     assert.deepEqual(reference.actual,reference.expected,'outgoing reference content keeps its typography');
     await page.waitForTimeout(300);
     await page.locator('.cq-local-models summary').click();
+    await page.locator('.cq-local-models summary').click();
+    await page.locator('[data-local-page="0"]').click();
+    assert.equal(await page.locator('#cq-local-usage > [aria-hidden=true]').count(),0,'switching pages removes outgoing details');
     await page.locator('.cq-local-close').evaluate(el=>el.click());
     await page.waitForTimeout(800);await assertMotionClean(page);
     assert.equal(await page.locator('#cq-local-usage').count(),0);
@@ -1880,19 +2091,20 @@ test('statistics chart range transitions use current bar heights and shrink empt
   } finally {await close(page);}
 });
 
-test('statistics inner layout preserves a scrolled short viewport and disposes on reinjection',async()=>{
+test('statistics inner pages preserve their own scroll in a short viewport and dispose on reinjection',async()=>{
   const page=await pageFor(officialPayload(),{width:390,height:600},{deviceScaleFactor:1.25});
   try {
     await showLocalUsage(page);const {range,id}=await localUsageRequest(page);await updateLocalUsage(page,localUsagePayload(range),id);
-    await page.locator('.cq-local-usage-details summary').click();
-    await page.locator('#codex-quota-popover').evaluate(el=>el.scrollTop=80);
+    await page.locator('[data-local-page="2"]').click();
+    await page.locator('.cq-local-reference > summary').click();
+    await page.locator('#cq-local-page-details').evaluate(el=>el.scrollTop=40);
     await page.emulateMedia({reducedMotion:'no-preference'});
-    const scroll=await page.locator('#codex-quota-popover').evaluate(el=>{
+    const scroll=await page.locator('#cq-local-page-details').evaluate(el=>{
       const before=el.scrollTop;el.querySelector('.cq-local-models summary').click();return before;
     });
     assert.ok(scroll>0);
     await page.waitForTimeout(300);
-    assert.ok(Math.abs(await page.locator('#codex-quota-popover').evaluate(el=>el.scrollTop)-scroll)<1);
+    assert.ok(Math.abs(await page.locator('#cq-local-page-details').evaluate(el=>el.scrollTop)-scroll)<1);
     await page.locator('.cq-local-models summary').evaluate(el=>el.click());
     await page.evaluate(source);await page.waitForTimeout(800);
     assert.equal(await page.locator('#cq-local-usage').count(),0);await assertMotionClean(page);
