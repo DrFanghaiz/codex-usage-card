@@ -894,7 +894,7 @@
     state.popup.scrollTop=state.scroll;
     positionPopover();
   };
-  const localBlocks = panel => [...panel.children].flatMap(node => node.matches(".cq-local-result") ? [...node.children] : [node]);
+  const localBlocks = panel => [...panel.children].flatMap(node => node.matches(".cq-local-result") && !node.querySelector(".cq-local-page") ? [...node.children] : [node]);
   const localDetailBodies = panel => {
     for (const details of panel.querySelectorAll("details")) {
       if (details.querySelector(":scope > .cq-local-detail-body")) continue;
@@ -903,8 +903,13 @@
     }
   };
   const animateLocalLayout = (panel, change) => {
+    if (paneMotion?.panel === panel) {
+      if (paneMotion.open && paneMotion.settings) animatePane(paneMotion.host,panel,true,true,()=>{change();localDetailBodies(panel);});
+      else {change();localDetailBodies(panel);}
+      return;
+    }
     const popup = panel.parentElement;
-    const enabled = !paneMotion && !sharedPopover && popup?.matches(":popover-open") && !reducedMotion.matches && document.visibilityState === "visible";
+    const enabled = !panel.hidden && !paneMotion && !sharedPopover && popup?.matches(":popover-open") && !reducedMotion.matches && document.visibilityState === "visible";
     const oldBox = popup.getBoundingClientRect(), clip = parseFloat(getComputedStyle(popup).clipPath.match(/^inset\(([-\d.]+)px/)?.[1] || 0);
     const before = new Map(localBlocks(panel).filter(node=>node.getClientRects().length && !node.hasAttribute("data-cq-quiet"))
       .map(node => [node.tagName + node.className, node.getBoundingClientRect()]));
@@ -934,14 +939,14 @@
       else if (target.height && !node.hasAttribute("data-cq-quiet")) run(node,{opacity:[.4,1],clipPath:["inset(0 0 100% 0)","inset(0)"]});
     }
     for (const [arrow, transform] of arrows) if (arrow.isConnected) run(arrow,{transform:[transform,getComputedStyle(arrow).transform]});
-    for (const {node,box:bodyBox,copy,opacity,clipPath} of bodies) if (node.isConnected && !node.parentElement.open) {
+    for (const {node,box:bodyBox,copy,opacity,clipPath} of bodies) if (node.isConnected && !node.parentElement.open && !node.closest(".cq-local-page")?.inert) {
       copy.setAttribute("aria-hidden","true");copy.inert=true;copy.cqSource=node;
       copy.className=node.className+" "+node.parentElement.className;
       Object.assign(copy.style,{position:"absolute",left:(bodyBox.left-panelBox.left)+"px",top:(bodyBox.top-oldBox.top-clip-parseFloat(css.paddingTop)+state.scroll)+"px",width:bodyBox.width+"px",pointerEvents:"none",margin:"0",padding:"0",border:"0"});
       panel.append(copy);state.ghosts.push(copy);
       run(copy,{opacity:[opacity,0],clipPath:[clipPath==="none"?"inset(0)":clipPath,"inset(0 0 100% 0)"]});
     }
-    for (const body of panel.querySelectorAll("details[open] > .cq-local-detail-body")) {
+    for (const body of panel.querySelectorAll("details[open] > .cq-local-detail-body")) if (!body.closest(".cq-local-page")?.inert) {
       const prior = bodies.find(item=>item.node===body);
       if (!prior || Number(prior.opacity)<1 || prior.clipPath!=="none") run(body,{opacity:[prior?.opacity || .4,1],clipPath:[prior?.clipPath || "inset(0 0 100% 0)","inset(0)"]});
     }
@@ -951,6 +956,71 @@
     const bar = day.querySelector('.cq-local-day-bar[aria-hidden="true"]') || day.querySelector(".cq-local-day-bar");
     return {height:bar.getBoundingClientRect().height,opacity:Number(getComputedStyle(bar).opacity),copy:bar.cloneNode(true)};
   });
+  const selectLocalPage = (panel, index, focus = false) => {
+    const pages = [...panel.querySelectorAll(".cq-local-page")], previous = Number(panel.dataset.page || 0);
+    index = Math.max(0, Math.min(pages.length - 1, index));
+    panel.cqCloseCalendar?.(false);
+    if (index === previous) {
+      if (focus) panel.querySelector(`[data-local-page="${index}"]`)?.focus({preventScroll:true});
+      return;
+    }
+    animateLocalLayout(panel, () => {
+    panel.dataset.page = String(index);
+    panel.querySelectorAll("[data-local-page]").forEach((button,i) => {
+      button.setAttribute("aria-selected", String(i === index));button.tabIndex = i === index ? 0 : -1;
+      if (focus && i === index) button.focus({preventScroll:true});
+    });
+    pages.forEach((page,i) => {
+      const wasHidden = page.hidden, style = getComputedStyle(page);
+      const from = wasHidden ? `translateX(${(index > previous ? 1 : -1) * 20}px)` : style.transform;
+      const opacity = wasHidden ? 0 : Number(style.opacity);
+      stopMotion(page);
+      page.inert = i !== index;page.setAttribute("aria-hidden",String(i !== index));
+      if (i === index) {
+        page.hidden = false;
+        page.querySelector(".cq-local-daily")?.cqRenderPage?.();
+        move(page,{transform:[from === "none" ? "translateX(0px)" : from,"translateX(0px)"],opacity:[opacity,1]},
+          {type:"spring",stiffness:420,damping:42,mass:1},()=>{page.style.removeProperty("transform");page.style.removeProperty("opacity");});
+      } else if (!wasHidden) {
+        move(page,{transform:[from === "none" ? "translateX(0px)" : from,`translateX(${(index > previous ? -1 : 1) * 20}px)`],opacity:[opacity,0]},
+          {duration:.18},()=>{page.hidden=true;page.style.removeProperty("transform");page.style.removeProperty("opacity");});
+      }
+    });
+    });
+  };
+  const arrangeLocalPages = panel => {
+    const result = panel.querySelector(".cq-local-result"), reference = panel.querySelector(".cq-local-reference");
+    const nodes = [...result.children];
+    const pages = ["overview","daily","details"].map((name,index)=>{
+      const page=document.createElement("section");page.className="cq-local-page";page.id=`cq-local-page-${name}`;
+      page.tabIndex=0;
+      page.setAttribute("role","tabpanel");page.setAttribute("aria-labelledby",`cq-local-tab-${name}`);
+      page.hidden=index!==Number(panel.dataset.page || 0);page.inert=page.hidden;page.setAttribute("aria-hidden",String(page.hidden));
+      result.append(page);return page;
+    });
+    for (const node of nodes) pages[node.matches(".cq-local-daily") ? 1 : node.matches(".cq-local-models,.cq-local-issues,.cq-local-excluded") ? 2 : 0].append(node);
+    if (reference) pages[2].append(reference);
+    if (!pages[1].children.length) {
+      const note=document.createElement("p");note.className="cq-local-page-note";note.textContent=words("读取完成后可查看每日用量", "Daily usage appears after reading logs");pages[1].append(note);
+    }
+  };
+  const showLocalPlaceholder = (panel, loading) => {
+    for (const [index,page] of [...panel.querySelectorAll(".cq-local-page")].entries()) {
+    page.querySelector(".cq-local-placeholder,.cq-local-page-note")?.remove();
+    if (index === 2 && loading) continue;
+    const placeholder=document.createElement("div");
+    placeholder.className="cq-local-placeholder";
+    if (loading) {
+      const skeleton=document.createElement("div");skeleton.className="cq-local-skeleton";skeleton.setAttribute("aria-hidden","true");
+      skeleton.innerHTML='<i></i><i></i><i></i><i></i><i></i>';placeholder.append(skeleton);
+    }
+    const label=document.createElement("p");label.textContent=loading ? words("正在读取本机日志…", "Reading local logs…") : words("本机用量暂不可用", "Local usage unavailable");placeholder.append(label);
+    if (!loading) {
+      const retry=document.createElement("button");retry.type="button";retry.textContent=words("重试", "Retry");retry.onclick=()=>requestLocalUsage(panel);placeholder.append(retry);
+    }
+    page.prepend(placeholder);
+    }
+  };
   const renderLocalDaily = (data, result, addText, previousBars = []) => {
     const chart = addText("section", "cq-local-daily", "", result);
     chart.setAttribute("aria-label", words("每日 token 用量", "Daily token usage"));
@@ -973,19 +1043,22 @@
       const item = addText("span", "", label, legend);item.dataset.kind = kind;
     }
     const first = localDayIndex(data.start), last = localDayIndex(data.end);
-    const count = chart.clientWidth - 16 >= 168 ? 7 : 5;
+    let count = 5, chartWidth = 0;
     const days = new Map(data.daily.map(day=>[day.date,day]));
     let pageEnd = last, selected = data.end, shown = false;
     const dailyTotal = day => day?.models.reduce((sum,row)=>sum+row.totalTokens,0) || 0;
+    const positionSelection = animated => {
+      const button = plot.querySelector(`button[data-date="${selected}"]`), box = button.getBoundingClientRect(), area = plot.getBoundingClientRect();
+      const current = getComputedStyle(selection).transform;
+      stopMotion(selection);selection.style.width = Math.min(24,box.width)+"px";
+      const target = `translateX(${box.left-area.left+(box.width-Math.min(24,box.width))/2}px)`;
+      if (animated) move(selection,{transform:[current,target]},{duration:.2,ease:[.2,.8,.2,1]});else selection.style.transform=target;
+    };
     const showDay = date => {
       const changed = shown && selected !== date;
       selected = date;
       for (const button of plot.querySelectorAll("button")) button.setAttribute("aria-pressed",String(button.dataset.date === date));
-      const button = plot.querySelector(`button[data-date="${date}"]`), box = button.getBoundingClientRect(), area = plot.getBoundingClientRect();
-      const current = getComputedStyle(selection).transform;
-      stopMotion(selection);selection.style.width = Math.min(24,box.width)+"px";
-      const target = `translateX(${box.left-area.left+(box.width-Math.min(24,box.width))/2}px)`;
-      if (shown) move(selection,{transform:[current,target]},{duration:.2,ease:[.2,.8,.2,1]});else selection.style.transform=target;
+      positionSelection(shown);
       const day = days.get(date), tokens = dailyTotal(day);
       detail.replaceChildren();
       addText("div", "cq-local-day-date", `${date.replaceAll("-",".")}${day?.partial ? words(" · 统计不完整", " · Incomplete") : ""}`, detail);
@@ -1013,6 +1086,8 @@
       shown = true;
     };
     const renderPage = () => {
+      count = chart.clientWidth - 16 >= 168 ? 7 : 5;
+      chartWidth = chart.getBoundingClientRect().width;
       const pageStart = Math.max(first,pageEnd-count+1);
       previous.disabled = pageStart <= first;next.disabled = pageEnd >= last;
       const oldBars = plot.querySelector(".cq-local-day") ? localBarSnapshots(plot) : previousBars;
@@ -1024,6 +1099,7 @@
       pageLabel.textContent = `${localDayKey(pageStart).slice(5).replace("-",".")} – ${localDayKey(pageEnd).slice(5).replace("-",".")}`;
       addText("span", "", maximum ? `${compactLocalTokens(maximum).text} token` : words("无已知计数", "No recorded counts"), pageLabel);
       plot.style.gridTemplateColumns = `repeat(${visible.length},minmax(0,1fr))`;
+      const bars=[];
       for (const [slot,date] of visible.entries()) {
         const day = days.get(date), total = dailyTotal(day), button = addText("button", "cq-local-day", "", plot);
         button.type = "button";button.dataset.date = date;
@@ -1040,19 +1116,7 @@
           ["cache",day.models.reduce((sum,row)=>sum+row.cachedInputTokens,0)],["output",day.models.reduce((sum,row)=>sum+row.outputTokens,0)]]) {
           const segment = addText("i", "", "", bar);segment.dataset.kind=kind;segment.style.flexGrow=String(value);segment.hidden=!value;
         }
-        const height = bar.getBoundingClientRect().height;
-        if (height) {
-          // Seed the presentation synchronously so another click before RAF can retarget it.
-          bar.style.transform=`scaleY(${(oldBars[slot]?.height || 0)/height})`;bar.style.opacity=String(oldBars[slot]?.opacity ?? 1);
-          move(bar,{transform:[bar.style.transform,"scaleY(1)"],opacity:[Number(bar.style.opacity),1]},
-            {duration:.24,ease:[.2,.8,.2,1]},()=>{bar.style.removeProperty("transform");bar.style.removeProperty("opacity");});
-        }
-        else if (oldBars[slot]?.height && !reducedMotion.matches) {
-          const ghost = oldBars[slot].copy;ghost.setAttribute("aria-hidden","true");
-          Object.assign(ghost.style,{position:"absolute",bottom:"0",height:oldBars[slot].height+"px",transform:"none",opacity:String(oldBars[slot].opacity)});
-          rail.append(ghost);
-          move(ghost,{transform:["scaleY(1)","scaleY(0)"],opacity:[oldBars[slot].opacity,0]},{duration:.2,ease:[.2,.8,.2,1]},()=>ghost.remove());
-        }
+        bars.push({bar,rail,slot});
         if (day?.partial) {button.dataset.partial="";addText("span","cq-local-day-incomplete","?",rail);}
         addText("span", "cq-local-day-label", date.slice(8), button);
         button.onclick = () => showDay(date);
@@ -1063,16 +1127,50 @@
           event.preventDefault();index=Math.max(0,Math.min(visible.length-1,index));showDay(visible[index]);plot.querySelectorAll("button")[index].focus({preventScroll:true});
         };
       }
+      // Measure only after every column exists, avoiding a layout flush per bar.
+      const heights=bars.map(({bar})=>bar.getBoundingClientRect().height);
+      bars.forEach(({bar,slot},index)=>{
+        if (!heights[index]) return;
+        bar.style.transform=`scaleY(${(oldBars[slot]?.height || 0)/heights[index]})`;bar.style.opacity=String(oldBars[slot]?.opacity ?? 1);
+      });
+      for (const [index,{bar,rail,slot}] of bars.entries()) {
+        const height=heights[index];
+        if (height) {
+          // Seed the presentation synchronously so another click before RAF can retarget it.
+          move(bar,{transform:[bar.style.transform,"scaleY(1)"],opacity:[Number(bar.style.opacity),1]},
+            {duration:.24,ease:[.2,.8,.2,1]},()=>{bar.style.removeProperty("transform");bar.style.removeProperty("opacity");});
+        }
+        else if (oldBars[slot]?.height && !reducedMotion.matches) {
+          const ghost = oldBars[slot].copy;ghost.setAttribute("aria-hidden","true");
+          Object.assign(ghost.style,{position:"absolute",bottom:"0",height:oldBars[slot].height+"px",transform:"none",opacity:String(oldBars[slot].opacity)});
+          rail.append(ghost);
+          move(ghost,{transform:["scaleY(1)","scaleY(0)"],opacity:[oldBars[slot].opacity,0]},{duration:.2,ease:[.2,.8,.2,1]},()=>ghost.remove());
+        }
+      }
       showDay(selected >= visible[0] && selected <= visible.at(-1) ? selected : visible.at(-1));
     };
     previous.onclick = () => {pageEnd=Math.max(first,pageEnd-count);renderPage();};
     next.onclick = () => {pageEnd=Math.min(last,pageEnd+count);renderPage();};
+    chart.cqRenderPage=renderPage;
+    chart.cqResize=()=>{
+      const width=chart.getBoundingClientRect().width;
+      if (!width || width===chartWidth) return;
+      const nextCount=chart.clientWidth-16>=168 ? 7 : 5;
+      if (nextCount!==count) {
+        const focusedDate=plot.contains(document.activeElement) ? document.activeElement.dataset.date : null;
+        const selectedDay=localDayIndex(selected);
+        if (selectedDay<pageEnd-nextCount+1) pageEnd=Math.min(last,selectedDay+nextCount-1);
+        renderPage();
+        if (focusedDate) (plot.querySelector(`button[data-date="${focusedDate}"]`) || plot.querySelector('[aria-pressed="true"]')).focus({preventScroll:true});
+      } else chartWidth=width;
+      positionSelection(false);
+    };
     renderPage();
   };
   const closeLocalUsage = () => {
     const panel = document.getElementById("cq-local-usage");
     if (!panel) return;
-    finishLocalLayout();stopLocalMotions(panel);
+    stopLocalMotions(panel);
     animatePane(panel.cqHost, panel, false);
     panel.cqOpener?.focus({preventScroll:true});
   };
@@ -1103,6 +1201,7 @@
     const result = panel.querySelector(".cq-local-result");
     animateLocalLayout(panel,()=>{
       change();
+      if (!result.dataset.loaded) showLocalPlaceholder(panel,true);
       result.setAttribute("aria-busy", "true");
       panel.querySelector(".cq-local-estimate-tag").textContent=words("读取中", "Reading");
       panel.querySelector(".cq-local-status").setAttribute("data-cq-quiet", "");
@@ -1125,6 +1224,7 @@
       validLocalIssues(data.issues) && validLocalDaily(data);
     if (!valid) {
       animateLocalLayout(panel,()=>{
+      if (!result.dataset.loaded) showLocalPlaceholder(panel,false);
       panel.querySelector(".cq-local-estimate-tag").textContent=words("估算", "Estimate");
       status.removeAttribute("data-cq-quiet");
       status.textContent = result.dataset.loaded ? words("读取失败；保留上次结果，请重试。", "Read failed; previous results retained. Retry.")
@@ -1137,6 +1237,8 @@
     result.dataset.loaded = "true";
     animateLocalLayout(panel, () => {
     panel.querySelector(".cq-local-estimate-tag").textContent=words("估算", "Estimate");
+    const reference=panel.querySelector(".cq-local-reference");
+    panel.append(reference);
     result.replaceChildren();
     const totals = data.models.reduce((sum,row) => ({input:sum.input+row.inputTokens, cache:sum.cache+row.cachedInputTokens,
       output:sum.output+row.outputTokens, tokens:sum.tokens+row.totalTokens}), {input:0,cache:0,output:0,tokens:0});
@@ -1179,6 +1281,7 @@
     if (priced.some(item => item.row.cacheWriteKnown === false)) addText("p", "cq-local-api-note", words("写缓存计数不完整，API 等值可能偏低。", "Cache-write counts are incomplete; API equivalent may be understated."));
     renderLocalDaily(data,result,addText,previousBars);
     const usageDetails = addText("details", "cq-local-usage-details", "");
+    usageDetails.open=true;
     const usageSummary = addText("summary", "", "", usageDetails);
     addText("span", "", words("用量明细", "Usage breakdown"), usageSummary);
     addText("span", "cq-local-detail-meta", compactLocalTokens(totals.tokens).text, usageSummary);
@@ -1207,13 +1310,24 @@
     const cacheFill = addText("i", "", "", track);cacheFill.style.width = (cacheRate || 0) + "%";cacheFill.hidden = !cacheRate;
     const breakdown = addText("details", "cq-local-models", "");
     const modelSummary = addText("summary", "", "", breakdown);
-    addText("span", "", words("模型明细", "Model breakdown"), modelSummary);
+    addText("span", "", words("模型 token 分布", "Tokens by model"), modelSummary);
     addText("span", "cq-local-detail-meta", String(data.models.length), modelSummary);
     modelSummary.append(toolIcon("back", "cq-local-detail-arrow"));
-    for (const row of data.models) {
+    for (const row of [...data.models].sort((a,b)=>b.totalTokens-a.totalTokens || a.model.localeCompare(b.model))) {
       const line = addText("div", "cq-local-model", "", breakdown);
-      addText("span", "", row.model === "unknown" ? words("未知模型", "Unknown model") : row.model.replace(/^gpt-/, "GPT-"), line);
-      addText("span", "", `${numberText(row.totalTokens)} token`, line);
+      const name=row.model === "unknown" ? words("未知模型", "Unknown model") : row.model.replace(/^gpt-/, "GPT-");
+      addText("span", "cq-local-model-name", name, line).title=name;
+      const amount=addText("strong", "cq-local-model-value", compactLocalTokens(row.totalTokens).text, line);
+      amount.title=`${numberText(row.totalTokens)} token`;amount.setAttribute("aria-label",amount.title);
+      const share=totals.tokens ? row.totalTokens/totals.tokens*100 : null;
+      const meter=addText("div", "cq-local-model-track", "", line);
+      meter.setAttribute("role",share === null ? "img" : "meter");
+      meter.setAttribute("aria-label",`${name} · ${words("占本机区间 token", "Share of local range tokens")}`);
+      if(share!==null){meter.setAttribute("aria-valuemin","0");meter.setAttribute("aria-valuemax","100");meter.setAttribute("aria-valuenow",String(share));}
+      const fill=addText("i", "", "", meter);fill.hidden=!share;fill.style.width=(share || 0)+"%";
+      fill.dataset.modelTone=row.model==="gpt-6-astra" ? "warm" : row.model==="gpt-6.1-sol" ? "sage" : "slate";
+      const percent=addText("span", "cq-local-model-share", share===null ? "—" : `${share>0 && share<.1 ? "<0.1" : new Intl.NumberFormat(navigator.language,{maximumFractionDigits:1}).format(share)}%`, line);
+      percent.title=words("占所选区间本机 token 的比例", "Share of local tokens in the selected range");
     }
     const sameCoverage = excluded > 0 && data.models.every(row => localUsageBaselines.has(row.model) === localApiPrices.has(row.model));
     if (sameCoverage) addText("p", "cq-local-excluded", words(`其他模型 ${numberText(excluded)} token：无周基准与 API 价格，未折算。`,
@@ -1235,6 +1349,7 @@
       summary.append(toolIcon("back", "cq-local-detail-arrow"));
       for (const issue of issues) addText("p", "", `${localIssueLabels[issue.code]}: ${numberText(issue.count)}${issue.missingTokens ? ` · ${numberText(issue.missingTokens)} token` : ""}${issue.dateUnknown ? words("（日期未知）", " (date unknown)") : ""}`, details);
     }
+    arrangeLocalPages(panel);
     });
   };
   const installLocalCalendar = panel => {
@@ -1342,6 +1457,7 @@
     panel.innerHTML = `<header><h2 id="cq-local-title"></h2><button type="button" class="cq-local-close"></button></header>
       <div class="cq-local-periods" role="group"><button type="button" data-period="today"></button><button type="button" data-period="week"></button><button type="button" data-period="custom"></button></div>
       <form class="cq-local-dates" hidden><label><span></span><span class="cq-local-date-field"><input type="text" name="start" placeholder="YYYY-MM-DD" autocomplete="off" required><button type="button" data-date-field="start"></button></span></label><label><span></span><span class="cq-local-date-field"><input type="text" name="end" placeholder="YYYY-MM-DD" autocomplete="off" required><button type="button" data-date-field="end"></button></span></label><button type="submit"></button></form>
+      <div class="cq-local-tabs" role="tablist"></div>
       <div class="cq-local-result" role="region" aria-busy="false"></div><p class="cq-local-status" role="status"></p>
       <details class="cq-local-reference"><summary></summary><p></p></details>`;
     panel.querySelector("h2").textContent = words("本机用量", "Local usage");
@@ -1358,15 +1474,44 @@
       input.oninput = () => {input.setCustomValidity("");form.elements.end.setCustomValidity("");};
     }
     form.onsubmit = event => {event.preventDefault(); requestLocalUsage(panel);};
+    const tabs=panel.querySelector(".cq-local-tabs");tabs.setAttribute("aria-label",words("统计内容", "Statistics pages"));
+    ["overview","daily","details"].forEach((name,index)=>{
+      const button=document.createElement("button");button.type="button";button.id=`cq-local-tab-${name}`;button.dataset.localPage=String(index);
+      button.setAttribute("role","tab");button.setAttribute("aria-controls",`cq-local-page-${name}`);button.setAttribute("aria-selected",String(index===0));button.tabIndex=index===0?0:-1;
+      button.textContent=[words("用量", "Overview"),words("每日", "Daily"),words("详情", "Details")][index];
+      button.onclick=()=>selectLocalPage(panel,index);
+      button.onkeydown=event=>{let next=index;if(event.key==="ArrowRight")next=(index+1)%3;else if(event.key==="ArrowLeft")next=(index+2)%3;else if(event.key==="Home")next=0;else if(event.key==="End")next=2;else return;event.preventDefault();selectLocalPage(panel,next,true);};
+      tabs.append(button);
+    });
     panel.querySelector(".cq-local-result").setAttribute("aria-label", words("本机用量统计结果", "Local usage results"));
     panel.querySelector("summary").textContent = words("估算依据", "References");
     panel.querySelector("summary").append(toolIcon("back", "cq-local-detail-arrow"));
     panel.querySelector("details p").textContent = words(
       "ModelDial 2026-10-05 Pro 200 新额度样本：Astra 4.38 亿、Sol 23.54 亿 token／周，已是新额度，不再减半。原研究按月归一为周，负载与缓存比例可能不同；非官方上限，未按当前账号校准。周估算仍按总 token 比例，不用 API 美元推导。API 等值按 2026-10-27 官方 Standard 短上下文单价，区分普通输入／缓存读取／写入／输出；写入时长未知时给出价格区间。不含长上下文、加速、地区、工具等附加费，不是实付账单。仅本机现存日志，可能含历史账户或导入记录。本周按本地周一至今，跨周期可超过 100%。",
       "ModelDial's 2026-10-05 Pro 200 new-limit sample: Astra 438M, Sol 2.354B tokens/week, already reduced; not halved again. Monthly research values were normalized to weeks with a different workload. Not an official limit or calibrated to this account. Weekly fractions use total tokens, not API dollars. API equivalent uses OpenAI Standard short-context prices checked 2026-10-27, separating ordinary input, cache reads/writes and output. Unknown write retention produces a price range. Excludes long-context, speed, regional and tool fees; not a bill. Local files may include old accounts or imported histories. Weeks start Monday; ranges can exceed 100%.");
-    for (const [label,url] of [["ModelDial","https://modeldial.com/subscriptions"],[words("OpenAI 价格", "OpenAI pricing"),"https://developers.openai.com/api/docs/pricing"]]) {
-      const link=document.createElement("a");link.textContent=label;link.href=url;link.target="_blank";link.rel="noopener noreferrer";panel.querySelector("details").append(link);
+    const reference=panel.querySelector(".cq-local-reference"), explanation=reference.querySelector("p");
+    const referenceText=(tag,className,text,parent=reference)=>{const node=document.createElement(tag);node.className=className;node.textContent=text;parent.append(node);return node;};
+    const weeklyReference=referenceText("section","cq-local-reference-section","");
+    const weeklyHeading=referenceText("div","cq-local-reference-heading","",weeklyReference);
+    referenceText("strong","",words("Pro 200 周参考", "Pro 200 weekly reference"),weeklyHeading);
+    referenceText("span","","token",weeklyHeading);
+    const baselineTable=referenceText("dl","cq-local-baselines","",weeklyReference);
+    for(const [model,label] of [["gpt-6-astra","GPT-6 Astra"],["gpt-6.1-sol","GPT-6.1 Sol"]]) {
+      const row=referenceText("div","","",baselineTable), tokens=localUsageBaselines.get(model);
+      referenceText("dt","",label,row);
+      const value=referenceText("dd","",isChinese ? compactLocalTokens(tokens).text : `${numberText(tokens/1e6)}M`,row);
+      value.title=`${numberText(tokens)} token`;value.setAttribute("aria-label",value.title);
     }
+    const apiReference=referenceText("section","cq-local-reference-section","");
+    const apiHeading=referenceText("div","cq-local-reference-heading","",apiReference);
+    referenceText("strong","",words("API 等值", "API equivalent"),apiHeading);referenceText("span","","USD",apiHeading);
+    referenceText("p","cq-local-reference-formula",words("用量 × 对应单价", "Usage × category price"),apiReference);
+    for (const [parent,label,url] of [[weeklyReference,"ModelDial · 2026.10.05","https://modeldial.com/subscriptions"],[apiReference,words("OpenAI 价格 · 2026.10.27", "OpenAI pricing · 2026.10.27"),"https://developers.openai.com/api/docs/pricing"]]) {
+      const link=referenceText("a","",label,parent);link.href=url;link.target="_blank";link.rel="noopener noreferrer";
+    }
+    const caveats=referenceText("details","cq-local-caveats","");
+    const caveatSummary=referenceText("summary","",words("口径与限制", "Scope and limitations"),caveats);
+    caveatSummary.append(toolIcon("back","cq-local-detail-arrow"));caveats.append(explanation);
     const choose = period => {
       const now = new Date(), start = new Date(now);
       if (period === "week") start.setDate(start.getDate()-(start.getDay()+6)%7);
@@ -1388,11 +1533,12 @@
     });
     panel.addEventListener("toggle", () => {if (!paneMotion && !localLayout) positionPopover();},true);
     localDetailBodies(panel);
+    arrangeLocalPages(panel);
     panel.hidden = true;
     popup.append(panel);
     installLocalCalendar(panel);
-    animatePane(host,panel,true);
     choose("today");
+    animatePane(host,panel,true);
     close.focus({preventScroll:true});
   };
 
@@ -1630,7 +1776,21 @@
       #cq-local-usage .cq-calendar-footer { display: flex; justify-content: space-between; gap: 8px; margin-top: 8px; padding-top: 4px; border-top: 1px solid var(--cq-border); }
       #cq-local-usage .cq-calendar-footer button { color: var(--cq-muted); padding: 2px 4px; }
       @media (forced-colors: active) { #cq-local-usage .cq-local-calendar { background: Canvas; color: CanvasText; border-color: CanvasText; } #cq-local-usage .cq-calendar-grid button[aria-selected=true] { forced-color-adjust: none; background: Highlight; color: HighlightText; } }
-      #cq-local-usage .cq-local-result { container-type: inline-size; min-height: 460px; padding: 0 16px 0 8px; }
+      #cq-local-usage .cq-local-tabs { display: flex; gap: 16px; margin: 8px 16px 0 8px; border-bottom: 1px solid var(--cq-border); }
+      #cq-local-usage .cq-local-tabs button { position: relative; padding: 4px 0 8px; min-width: 32px; color: var(--cq-muted); border-radius: 0; }
+      #cq-local-usage .cq-local-tabs button[aria-selected=true] { color: var(--cq-ink); font-weight: 600; }
+      #cq-local-usage .cq-local-tabs button[aria-selected=true]::after { content: ""; position: absolute; bottom: -1px; left: 0; right: 0; height: 2px; background: var(--cq-fill); }
+      #cq-local-usage .cq-local-result { container-type: inline-size; position: relative; overflow: clip; }
+      #cq-local-usage .cq-local-page { position: absolute; inset: 0; padding: 0 16px 0 8px; max-height: clamp(220px,calc(100dvh - 300px),256px); overflow-y: auto; overflow-x: hidden; scrollbar-width: none; overscroll-behavior: contain; overflow-anchor: none; }
+      #cq-local-usage .cq-local-page[aria-hidden=false] { position: relative; inset: auto; }
+      #cq-local-usage .cq-local-page-note { color: var(--cq-muted); font-size: 11px; line-height: 20px; margin: 24px 0; }
+      #cq-local-usage .cq-local-placeholder { padding-top: 24px; color: var(--cq-muted); font-size: 11px; line-height: 20px; }
+      #cq-local-usage .cq-local-placeholder p { margin: 16px 0 8px; }
+      #cq-local-usage .cq-local-placeholder button { background: var(--cq-hover); }
+      #cq-local-usage .cq-local-skeleton { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+      #cq-local-usage .cq-local-skeleton i { display: block; height: 32px; border-radius: 4px; background: color-mix(in srgb,var(--cq-ink) 7%,transparent); }
+      #cq-local-usage .cq-local-skeleton i:nth-child(n+3) { height: 16px; }
+      #cq-local-usage .cq-local-skeleton i:last-child { grid-column: 1/-1; width: 72%; }
       #cq-local-usage .cq-local-range-label { margin: 16px 0; color: var(--cq-muted); font-size: 10px; line-height: 16px; }
       #cq-local-usage .cq-local-highlights { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr); gap: 16px; margin: 0 0 20px; }
       #cq-local-usage .cq-local-metric-label { display: block; color: var(--cq-muted); font-size: 11px; line-height: 16px; margin-bottom: 6px; }
@@ -1644,6 +1804,18 @@
       #cq-local-usage strong[data-unavailable] { font-size: 13px; font-weight: 500; letter-spacing: 0; }
       #cq-local-usage .cq-local-usage-group { padding: 12px; margin-bottom: 16px; border-radius: var(--radius-sm,6px); background: color-mix(in srgb,var(--cq-ink) 3%,transparent); }
       #cq-local-usage .cq-local-usage-details { border-top: 1px solid var(--cq-border); }
+      #cq-local-usage #cq-local-page-overview > .cq-local-usage-details { border: 0; }
+      #cq-local-usage #cq-local-page-overview > .cq-local-usage-details > summary { display: none; }
+      #cq-local-usage #cq-local-page-overview .cq-local-range-label { margin: 12px 0 8px; }
+      #cq-local-usage #cq-local-page-overview .cq-local-highlights { margin-bottom: 8px; }
+      #cq-local-usage #cq-local-page-overview .cq-local-usage-group { padding: 8px; margin: 0; }
+      #cq-local-usage #cq-local-page-overview .cq-local-metrics { gap: 8px 12px; }
+      #cq-local-usage #cq-local-page-overview .cq-local-cache { margin-top: 8px; padding-top: 8px; }
+      #cq-local-usage #cq-local-page-daily .cq-local-daily { margin: 8px 0 0; }
+      #cq-local-usage #cq-local-page-daily .cq-local-day-detail { min-height: 64px; margin-bottom: 8px; }
+      #cq-local-usage #cq-local-page-daily .cq-local-chart-plot, #cq-local-usage #cq-local-page-daily .cq-local-day { height: 96px; }
+      #cq-local-usage #cq-local-page-daily .cq-local-chart-plot { background-size: 100% 76px; }
+      #cq-local-usage #cq-local-page-daily .cq-local-day-rail, #cq-local-usage #cq-local-page-daily .cq-local-day-selection { height: 76px; }
       #cq-local-usage .cq-local-metrics { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr); gap: 16px 12px; margin: 0; }
       #cq-local-usage .cq-local-metrics > div { display: flex; flex-direction: column-reverse; gap: 3px; }
       #cq-local-usage .cq-local-metrics dt { color: var(--cq-muted); font-size: 11px; line-height: 16px; }
@@ -1686,14 +1858,36 @@
       #cq-local-usage .cq-local-chart-legend [data-kind=cache]::before { background: var(--cq-chart-cache); }
       #cq-local-usage .cq-local-chart-legend [data-kind=output]::before { background: var(--cq-chart-output); }
       #cq-local-usage .cq-local-models { border-top: 1px solid var(--cq-border); font-size: 11px; }
-      #cq-local-usage .cq-local-model { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 8px; padding-top: 8px; font-size: 11px; }
+      #cq-local-usage .cq-local-model { display: grid; grid-template-columns: minmax(0,1fr) 64px; align-items: center; gap: 4px 8px; padding: 4px 0; font-size: 11px; line-height: 16px; }
+      #cq-local-usage .cq-local-model-name { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+      #cq-local-usage .cq-local-model-value { font-size: 12px; font-weight: 600; text-align: right; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
+      #cq-local-usage .cq-local-model-share { color: var(--cq-muted); font-size: 10px; text-align: right; font-variant-numeric: tabular-nums; }
+      #cq-local-usage .cq-local-model-track { height: 3px; border-radius: 2px; background: var(--cq-track); overflow: hidden; }
+      #cq-local-usage .cq-local-model-track i { display: block; height: 100%; min-width: 2px; max-width: 100%; border-radius: inherit; background: var(--cq-chart-output); }
+      #cq-local-usage .cq-local-model-track [data-model-tone=warm] { background: var(--cq-chart-input); }
+      #cq-local-usage .cq-local-model-track [data-model-tone=sage] { background: var(--cq-chart-cache); }
+      #cq-local-usage .cq-local-models .cq-local-excluded { margin: 8px 0 12px; font-size: 10px; line-height: 16px; }
       #cq-local-usage .cq-local-api-note { color: var(--cq-muted); font-size: 10px; line-height: 16px; margin: 4px 0 0; }
       #cq-local-usage .cq-local-excluded, #cq-local-usage .cq-local-status, #cq-local-usage .cq-local-reference, #cq-local-usage .cq-local-issues { margin: 16px 0 0; color: var(--cq-muted); font-size: 11px; line-height: 16px; overflow-wrap: anywhere; }
+      #cq-local-usage .cq-local-status { max-height: 48px; margin-top: 8px; overflow-y: auto; scrollbar-width: none; font-size: 10px; }
+      #cq-local-usage .cq-local-status[data-cq-quiet] { position: absolute; width: 1px; height: 1px; margin: 0; overflow: hidden; clip-path: inset(50%); }
       #cq-local-usage .cq-local-status:empty { display: none; }
-      #cq-local-usage .cq-local-status[data-cq-quiet] { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; margin: 0; }
-      #cq-local-usage .cq-local-status, #cq-local-usage .cq-local-reference { margin-right: 16px; margin-left: 8px; }
-      #cq-local-usage .cq-local-reference { border-top: 1px solid var(--cq-border); padding-top: 0; margin-top: 0; }
-      #cq-local-usage .cq-local-reference a { display: inline-block; margin: 8px 16px 0 0; text-decoration: underline; text-underline-offset: 2px; color: var(--cq-ink); }
+      #cq-local-usage .cq-local-status { margin-right: 16px; margin-left: 8px; }
+      #cq-local-usage .cq-local-reference { border-top: 1px solid var(--cq-border); padding-top: 0; margin: 0; }
+      #cq-local-usage .cq-local-reference a { display: inline-block; margin: 8px 0 0; font-size: 10px; text-decoration: underline; text-underline-offset: 2px; color: var(--cq-muted); }
+      #cq-local-usage .cq-local-reference-section { margin: 8px 0 16px; font-size: 11px; line-height: 16px; }
+      #cq-local-usage .cq-local-reference-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+      #cq-local-usage .cq-local-reference-heading strong { color: var(--cq-ink); font-weight: 500; }
+      #cq-local-usage .cq-local-reference-heading > span { font-size: 10px; }
+      #cq-local-usage .cq-local-baselines { display: grid; gap: 8px; margin: 0; padding: 8px; border-radius: var(--radius-sm,6px); background: color-mix(in srgb,var(--cq-ink) 3%,transparent); }
+      #cq-local-usage .cq-local-baselines > div { display: grid; grid-template-columns: minmax(0,1fr) auto; align-items: baseline; gap: 8px; }
+      #cq-local-usage .cq-local-baselines dt { color: var(--cq-muted); overflow-wrap: anywhere; }
+      #cq-local-usage .cq-local-baselines dd { margin: 0; color: var(--cq-ink); font-size: 12px; font-weight: 600; white-space: nowrap; text-align: right; font-variant-numeric: tabular-nums; }
+      #cq-local-usage .cq-local-reference-formula { color: var(--cq-ink); }
+      #cq-local-usage .cq-local-caveats { border-top: 1px solid var(--cq-border); }
+      #cq-local-usage .cq-local-caveats > summary { font-size: 11px; color: var(--cq-muted); }
+      #cq-local-usage .cq-local-caveats p { font-size: 10px; line-height: 16px; }
+      @media (forced-colors: active) { #cq-local-usage .cq-local-model-track { forced-color-adjust: none; background: GrayText; } #cq-local-usage .cq-local-model-track i[data-model-tone] { background: Highlight; } #cq-local-usage .cq-local-baselines { outline: 1px solid CanvasText; } }
       #cq-local-usage summary { display: flex; align-items: center; gap: 8px; min-height: 36px; list-style: none; cursor: pointer; font-size: 12px; font-weight: 500; color: var(--cq-ink); }
       #cq-local-usage summary::-webkit-details-marker { display: none; }
       #cq-local-usage .cq-local-detail-meta { margin-left: auto; color: var(--cq-muted); font-size: 11px; font-weight: 400; }
@@ -2477,6 +2671,7 @@
     const rightEdge = column ? Math.min(innerWidth - 12, column.right - 8) : innerWidth - 12;
     const width = Math.max(0, Math.min(272, column ? column.width - 16 : 272, rightEdge - leftEdge));
     popup.style.width = width + "px";
+    popup.querySelector('.cq-local-page[aria-hidden="false"] .cq-local-daily')?.cqResize?.();
     const bottom = column ? Math.min(rect.bottom, column.bottom, innerHeight) : innerHeight - 12;
     popup.style.maxHeight = Math.max(0, bottom - 12) + "px";
     const left = column ? rect.right - width : rect.right + 8;
@@ -2730,6 +2925,10 @@
   const animatePopover = (open) => {
     const {popup, trigger} = quotaShell;
     if (paneMotion) { animatePane(paneMotion.host, paneMotion.panel, paneMotion.settings, open); return; }
+    if (localLayout) {
+      const panel=document.getElementById("cq-local-usage");
+      if (panel) {animatePane(panel.cqHost,panel,true,open);return;}
+    }
     if (animateSharedPopover(open)) return;
     const rect = settlePopoverMotion();
     if (reducedMotion.matches || document.visibilityState !== "visible" || !visible(trigger)) return;
@@ -2774,13 +2973,24 @@
     positionPopover();
     syncReleaseUI();
   };
-  const animatePane = (host, panel, settings, open = quotaShell.popup.matches(":popover-open")) => {
-    finishLocalLayout();
+  const animatePane = (host, panel, settings, open = quotaShell.popup.matches(":popover-open"), change) => {
     const {popup, trigger, collapse} = quotaShell;
+    let presentation = {}, heightVelocity = 0;
+    if (change && paneMotion) {
+      const previous=paneMotion, elapsed=Number(previous.animations?.[0]?.currentTime || 0);
+      presentation=previous.frameAt(previous.generator.next(elapsed).value);
+      heightVelocity=previous.generator.velocity(elapsed)*previous.heightDelta;
+      finishPaneMotion();
+      change();
+    } else if (localLayout) {
+      const box=popup.getBoundingClientRect(), clip=parseFloat(getComputedStyle(popup).clipPath.match(/^inset\(([-\d.]+)px/)?.[1] || 0);
+      presentation.height=box.height-clip;
+    }
+    finishLocalLayout();
     if (!paneMotion) {
       const material = sharedPopover?.rail ? getComputedStyle(popup) : null;
       const matrix = material && new DOMMatrixReadOnly(material.transform);
-      const presentation = material ? {opacity: Number(material.opacity), x: matrix.m41, y: matrix.m42} : {};
+      if (material) Object.assign(presentation,{opacity: Number(material.opacity), x: matrix.m41, y: matrix.m42});
       settlePopoverMotion();
       const initial = Number(host.hidden);
       const rects = [false, true].map(value => {
@@ -2788,7 +2998,7 @@
         positionPopover();
         return {box: popup.getBoundingClientRect(), content: (value ? panel : host).getBoundingClientRect()};
       });
-      popup.style.height = Math.max(...rects.map(rect => rect.box.height)) + "px";
+      popup.style.height = Math.max(...rects.map(rect => rect.box.height),presentation.height || 0) + "px";
       positionPopover();
       const box = popup.getBoundingClientRect(), css = getComputedStyle(popup);
       for (const [index, node] of [host, panel].entries()) {
@@ -2810,7 +3020,7 @@
     // Carry the visible edge's velocity when retargeting, including mid-pane close/reopen.
     const distance = to.height - from.height;
     state.velocity = state.generator ? state.generator.velocity(elapsed) * (distance ? state.heightDelta / distance
-      : to.opacity !== from.opacity ? (state.opacityDelta || 0) / (to.opacity - from.opacity) : 0) : 0;
+      : to.opacity !== from.opacity ? (state.opacityDelta || 0) / (to.opacity - from.opacity) : 0) : distance ? heightVelocity/distance : 0;
     state.generator = null;
     state.initial = 0;
     state.heightDelta = distance;

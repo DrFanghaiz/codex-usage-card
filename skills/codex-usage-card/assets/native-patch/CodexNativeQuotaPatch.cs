@@ -21,7 +21,7 @@ internal static class CodexNativeQuotaPatch
     private static string NativeScript;
     private static int NextCommandId;
     private const int IoDeadlineMilliseconds = 15000;
-    private const string ProductVersion = "2.6.0";
+    private const string ProductVersion = "2.6.1";
     private static volatile string SessionScope = Guid.NewGuid().ToString("N");
     private static string LoginFingerprint;
     private static int SessionGeneration;
@@ -320,7 +320,7 @@ internal static class CodexNativeQuotaPatch
         }
         private sealed class Snapshot
         {
-            public string Session, Thread, Parent, Key, EventKey, Fingerprint;
+            public string Session, Thread, Parent, Key, EventKey, HistoryKey, Fingerprint;
             public DateTimeOffset At;
             public bool Startup, ConfirmedConsumption;
         }
@@ -404,6 +404,19 @@ internal static class CodexNativeQuotaPatch
         private static readonly object Gate = new object();
         private static string Root;
         private static readonly Dictionary<string, Log> Logs = new Dictionary<string, Log>(StringComparer.OrdinalIgnoreCase);
+        private static string OriginalEventKey(Dictionary<string, string> history, string key)
+        {
+            string parent;
+            if (!history.TryGetValue(key, out parent)) return key;
+            var visited = new HashSet<string> { key };
+            var original = key;
+            while (history.TryGetValue(original, out parent))
+            {
+                if (!visited.Add(parent)) return key;
+                original = parent;
+            }
+            return original;
+        }
         private static DateTime Date(string value)
         {
             DateTime result;
@@ -447,6 +460,7 @@ internal static class CodexNativeQuotaPatch
                 foreach (var file in Logs.Keys) if (!present.Contains(file)) removed.Add(file);
                 foreach (var file in removed) Logs.Remove(file);
                 var selected = new Dictionary<string, Entry>();
+                var entries = new List<Entry>();
                 var snapshots = new Dictionary<string, DateTimeOffset>();
                 var allSnapshots = new List<Snapshot>();
                 foreach (var file in present)
@@ -463,15 +477,11 @@ internal static class CodexNativeQuotaPatch
                         if (!snapshots.TryGetValue(key, out earliest) || snapshot.At < earliest) snapshots[key] = snapshot.At;
                     }
                     if (log.Tail != null) queryIssues.Add(log.Tail);
-                    foreach (var entry in log.Entries)
-                    {
-                        Entry existing;
-                        if (!selected.TryGetValue(entry.Key, out existing) || (!existing.HasBaseline && entry.HasBaseline) ||
-                            (existing.HasBaseline == entry.HasBaseline && existing.Model == "unknown" && entry.Model != "unknown" && existing.Usage.Key == entry.Usage.Key) ||
-                            (existing.HasBaseline == entry.HasBaseline && !existing.Usage.WriteKnown && entry.Usage.WriteKnown && existing.Usage.Key == entry.Usage.Key))
-                            selected[entry.Key] = entry;
-                    }
+                    entries.AddRange(log.Entries);
                 }
+                var history = new Dictionary<string, string>();
+                foreach (var snapshot in allSnapshots)
+                    if (snapshot.HistoryKey != null) history[snapshot.EventKey] = snapshot.HistoryKey;
                 var confirmed = new Dictionary<string, List<Snapshot>>();
                 foreach (var snapshot in allSnapshots)
                 {
@@ -483,7 +493,7 @@ internal static class CodexNativeQuotaPatch
                 var inherited = new HashSet<string>();
                 foreach (var snapshot in allSnapshots)
                 {
-                    if (!snapshot.Startup || snapshot.Fingerprint == null) continue;
+                    if (!snapshot.Startup || snapshot.HistoryKey != null || snapshot.Fingerprint == null) continue;
                     List<Snapshot> matching;
                     if (!confirmed.TryGetValue(snapshot.Fingerprint, out matching)) continue;
                     foreach (var prior in matching)
@@ -492,11 +502,21 @@ internal static class CodexNativeQuotaPatch
                         { inherited.Add(snapshot.EventKey); break; }
                     }
                 }
+                foreach (var entry in entries)
+                {
+                    var key = OriginalEventKey(history, entry.Key);
+                    if (inherited.Contains(entry.Key) || inherited.Contains(key)) continue;
+                    Entry existing;
+                    if (!selected.TryGetValue(key, out existing) || (!existing.HasBaseline && entry.HasBaseline) ||
+                        (existing.HasBaseline == entry.HasBaseline && existing.Model == "unknown" && entry.Model != "unknown" && existing.Usage.Key == entry.Usage.Key) ||
+                        (existing.HasBaseline == entry.HasBaseline && !existing.Usage.WriteKnown && entry.Usage.WriteKnown && existing.Usage.Key == entry.Usage.Key))
+                        selected[key] = entry;
+                }
                 var overall = new Bucket();
                 var days = new SortedDictionary<DateTime, Bucket>();
                 foreach (var entry in selected.Values)
                 {
-                    if (entry.Day < first || entry.Day > last || inherited.Contains(entry.Key)) continue;
+                    if (entry.Day < first || entry.Day > last) continue;
                     overall.Add(entry);
                     DayBucket(days, entry.Day).Add(entry);
                     if (!entry.Usage.WriteKnown) queryIssues.Add(new Issue { Code = "CACHE_WRITE_UNRECORDED", Key = entry.Key,
@@ -506,14 +526,15 @@ internal static class CodexNativeQuotaPatch
                 foreach (var issue in queryIssues)
                 {
                     if (issue.Day.HasValue && (issue.Day.Value < first || (!issue.Before && issue.Day.Value > last))) continue;
-                    if (inherited.Contains(issue.Key)) continue;
+                    var key = OriginalEventKey(history, issue.Key);
+                    if (inherited.Contains(issue.Key) || inherited.Contains(key)) continue;
                     Entry entry;
                     DateTimeOffset predecessor;
                     if (issue.NeedsBaseline && !String.IsNullOrEmpty(issue.Session) && issue.BaselineKey != null &&
                         snapshots.TryGetValue(issue.Session + "/" + issue.BaselineKey, out predecessor) && predecessor < issue.At) continue;
-                    if (issue.NeedsBaseline && selected.TryGetValue(issue.Key, out entry) && entry.HasBaseline) continue;
-                    if (issue.Code == "SOURCE_UNCONFIRMED" && selected.ContainsKey(issue.Key)) continue;
-                    if (!issueKeys.Add(issue.Code + "/" + issue.Key)) continue;
+                    if (issue.NeedsBaseline && selected.TryGetValue(key, out entry) && entry.HasBaseline) continue;
+                    if (issue.Code == "SOURCE_UNCONFIRMED" && selected.ContainsKey(key)) continue;
+                    if (!issueKeys.Add(issue.Code + "/" + key)) continue;
                     overall.Add(issue);
                     var issueFirst = issue.Day.HasValue && !issue.Before ? issue.Day.Value : first;
                     var issueLast = issue.Day.HasValue ? (issue.Day.Value < last ? issue.Day.Value : last) : last;
@@ -548,6 +569,7 @@ internal static class CodexNativeQuotaPatch
             log.Tail = null;
             log.Created = file.CreationTimeUtc;
             log.Written = file.LastWriteTimeUtc;
+            if (log.Offset > 0 && log.Offset == file.Length) return;
             using (var input = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
             {
                 input.Seek(log.Offset, SeekOrigin.Begin);
@@ -589,7 +611,11 @@ internal static class CodexNativeQuotaPatch
                         }
                     }
                     // Only an unfinished token event affects usage; a chat/tool line cannot change token totals.
-                    if (line.Length != 0)
+                    if (oversized)
+                    {
+                        if (IsTokenLine(oversizedPrefix)) log.Tail = ParseIssue(oversizedPrefix, log, "INVALID_TOKEN_EVENT");
+                    }
+                    else if (line.Length != 0)
                     {
                         var text = Encoding.UTF8.GetString(line.GetBuffer(), 0, (int)line.Length);
                         if (IsTokenLine(text)) log.Tail = ParseIssue(text, log, "INVALID_TOKEN_EVENT");
@@ -625,7 +651,7 @@ internal static class CodexNativeQuotaPatch
         {
             var match = Regex.Match(line ?? "", @"""timestamp""\s*:\s*""([^""]+)""");
             var day = match.Success ? EventDay(match.Groups[1].Value) : null;
-            return new Issue { Code = code, Key = (log.Session ?? log.FileKey) + "/" + log.Line.ToString(CultureInfo.InvariantCulture) + "/" + (match.Success ? match.Groups[1].Value : "unknown"),
+            return new Issue { Code = code, Key = (log.Thread ?? log.FileKey) + "/" + log.Line.ToString(CultureInfo.InvariantCulture) + "/" + (match.Success ? match.Groups[1].Value : "unknown"),
                 Day = day, Line = log.Line };
         }
         private static bool OfficialWindow(object raw)
@@ -715,10 +741,15 @@ internal static class CodexNativeQuotaPatch
                 if (total == null) { log.Issues.Add(ParseIssue(line, log, "INVALID_TOKEN_EVENT")); return; }
                 DateTimeOffset stamp;
                 var hasStamp = DateTimeOffset.TryParse(StringValue(root, "timestamp"), CultureInfo.InvariantCulture, DateTimeStyles.None, out stamp);
-                var eventKey = StringValue(root, "timestamp") + "/" + total.Key;
+                var eventSuffix = StringValue(root, "timestamp") + "/" + total.Key;
+                var eventKey = log.Thread == null ? eventSuffix : log.Thread + "/" + eventSuffix;
+                // Only declared history from before the child existed belongs to its parent.
+                var historyKey = log.Thread != null && log.Parent != null && log.Thread != log.Parent && log.Subagent &&
+                    !log.NewRequestSeen && log.HistoryStart >= log.Line && hasStamp && log.MetadataAt.HasValue && stamp < log.MetadataAt.Value
+                    ? log.Parent + "/" + eventSuffix : null;
                 var fingerprintTotal = Counts.Fingerprint(info.TryGetValue("total_token_usage", out raw) ? raw : null);
                 var fingerprintLast = Counts.Fingerprint(info.TryGetValue("last_token_usage", out raw) ? raw : null);
-                var snapshot = new Snapshot { Session = log.Session, Thread = log.Thread, Parent = log.Parent, Key = total.Key, At = stamp, EventKey = eventKey,
+                var snapshot = new Snapshot { Session = log.Session, Thread = log.Thread, Parent = log.Parent, Key = total.Key, At = stamp, EventKey = eventKey, HistoryKey = historyKey,
                     Fingerprint = fingerprintTotal != null && fingerprintLast != null ? fingerprintTotal + fingerprintLast : null,
                     Startup = !log.SeenCounts && !log.NewRequestSeen && log.MetadataAt.HasValue && log.Thread != null && log.Parent != null && log.Parent != log.Thread && log.Subagent && log.HistoryStart >= log.Line };
                 log.SeenCounts = true;

@@ -247,7 +247,7 @@ if (-not $codexInspectionFailed -and -not $codexRunning) {
         foreach ($port in $ports) {
           try {
             $json = $client.GetStringAsync('http://127.0.0.1:{0}/json/list' -f $port).GetAwaiter().GetResult()
-            $items = @(ConvertFrom-Json -InputObject $json)
+            $items = ConvertFrom-Json -InputObject $json
             $cdpEndpointFound = $true
             foreach ($item in $items) {
               if ($item.type -eq 'page' -and
