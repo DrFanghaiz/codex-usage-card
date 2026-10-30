@@ -21,7 +21,7 @@ internal static class CodexNativeQuotaPatch
     private static string NativeScript;
     private static int NextCommandId;
     private const int IoDeadlineMilliseconds = 15000;
-    private const string ProductVersion = "2.6.1";
+    private const string ProductVersion = "2.6.2";
     private static volatile string SessionScope = Guid.NewGuid().ToString("N");
     private static string LoginFingerprint;
     private static int SessionGeneration;
@@ -29,6 +29,7 @@ internal static class CodexNativeQuotaPatch
     private static readonly object PayloadGate = new object();
     private static string CachedPayloadScope;
     private static Dictionary<string, object> CachedPayload;
+    private static volatile Dictionary<string, string> LastPlan;
     private static DateTimeOffset CachedPayloadExpiresAt;
     private static readonly HashSet<string> ObservedCodexRoots = new HashSet<string>();
 
@@ -56,6 +57,7 @@ internal static class CodexNativeQuotaPatch
                 NativeScript = File.ReadAllText(
                     Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "native_patch.js"),
                     Encoding.UTF8);
+                Task.Run(() => ModelDialReferences.RunAsync(AppDomain.CurrentDomain.BaseDirectory));
                 using (var shortcuts = new OfficialShortcutMonitor())
                     MainAsync().GetAwaiter().GetResult();
             }
@@ -242,12 +244,29 @@ internal static class CodexNativeQuotaPatch
         var range = remote != null && remote.ContainsKey("value") ? remote["value"] as Dictionary<string, object> : null;
         var start = range == null ? null : StringValue(range, "start");
         var end = range == null ? null : StringValue(range, "end");
+        var intervalStart = range != null && range.ContainsKey("intervalStart") ? StringValue(range, "intervalStart") : null;
+        var intervalEnd = range != null && range.ContainsKey("intervalEnd") ? StringValue(range, "intervalEnd") : null;
+        var referencePlan = range == null ? "" : StringValue(range, "referencePlan");
+        var proTier = referencePlan == "pro100" || referencePlan == "pro200" || referencePlan == "pro500" ? referencePlan.Substring(3) : "";
         var target = socket.Endpoint;
         var scope = socket.Scope;
         var generation = socket.Generation;
+        var accountKey = LoginFingerprint;
         Task.Run(() => {
             Dictionary<string, object> payload;
-            try { payload = LocalUsage.Read(ConfigurationRoot(), start, end); }
+            try
+            {
+                payload = LocalUsage.Read(ConfigurationRoot(), start, end, DateTimeOffset.UtcNow, intervalStart, intervalEnd);
+                var official = LastPlan;
+                var planName = official != null && official["scope"] == scope ? official["plan"] : "";
+                payload["reference"] = ModelDialReferences.Snapshot(planName, proTier);
+                if (payload.ContainsKey("interval"))
+                {
+                    var interval = (Dictionary<string, object>)payload["interval"];
+                    interval["account"] = RecentUsage.Read(AppDomain.CurrentDomain.BaseDirectory, accountKey, DateTimeOffset.Parse(intervalStart, CultureInfo.InvariantCulture), DateTimeOffset.Parse(intervalEnd, CultureInfo.InvariantCulture));
+                }
+            }
+            catch (ArgumentException) { payload = new Dictionary<string, object> { { "errorCode", "INVALID_RANGE" } }; }
             catch { payload = new Dictionary<string, object> { { "errorCode", "LOCAL_USAGE_UNAVAILABLE" } }; }
             if (scope != SessionScope || generation != Volatile.Read(ref SessionGeneration)) return;
             try
@@ -314,6 +333,7 @@ internal static class CodexNativeQuotaPatch
         private sealed class Entry
         {
             public DateTime Day;
+            public DateTimeOffset At;
             public string Model, Key;
             public Counts Usage;
             public bool HasBaseline;
@@ -427,9 +447,24 @@ internal static class CodexNativeQuotaPatch
         }
         public static Dictionary<string, object> Read(string root, string start, string end)
         {
+            return Read(root, start, end, DateTimeOffset.UtcNow);
+        }
+        public static Dictionary<string, object> Read(string root, string start, string end, DateTimeOffset now, string intervalStart = null, string intervalEnd = null)
+        {
             var first = Date(start);
             var last = Date(end);
             if (last < first || last > DateTime.Today || first.Year < 2022) throw new ArgumentException("Invalid usage range");
+            var hasInterval = intervalStart != null || intervalEnd != null;
+            var selectedStart = default(DateTimeOffset);
+            var selectedEnd = default(DateTimeOffset);
+            if (hasInterval)
+            {
+                var formats = new[] { "yyyy-MM-dd'T'HH:mm:ss.FFFFFFF'Z'", "yyyy-MM-dd'T'HH:mm:ss'Z'", "yyyy-MM-dd'T'HH:mm:ss.FFFFFFFzzz", "yyyy-MM-dd'T'HH:mm:sszzz" };
+                if (!DateTimeOffset.TryParseExact(intervalStart, formats, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out selectedStart) ||
+                    !DateTimeOffset.TryParseExact(intervalEnd, formats, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out selectedEnd) ||
+                    selectedStart >= selectedEnd || selectedStart.LocalDateTime.Year < 2022 || selectedEnd > now)
+                    throw new ArgumentException("Invalid usage interval");
+            }
             lock (Gate)
             {
                 root = Path.GetFullPath(root);
@@ -513,19 +548,24 @@ internal static class CodexNativeQuotaPatch
                         selected[key] = entry;
                 }
                 var overall = new Bucket();
+                var intervalBucket = hasInterval ? new Bucket() : null;
                 var days = new SortedDictionary<DateTime, Bucket>();
                 foreach (var entry in selected.Values)
                 {
+                    var inInterval = hasInterval && entry.At > selectedStart && entry.At <= selectedEnd;
+                    if (inInterval) intervalBucket.Add(entry);
+                    if (!entry.Usage.WriteKnown && (inInterval || (entry.Day >= first && entry.Day <= last)))
+                        queryIssues.Add(new Issue { Code = "CACHE_WRITE_UNRECORDED", Key = entry.Key,
+                        Day = entry.Day, At = entry.At, Missing = 0, AffectsTotals = false });
                     if (entry.Day < first || entry.Day > last) continue;
                     overall.Add(entry);
                     DayBucket(days, entry.Day).Add(entry);
-                    if (!entry.Usage.WriteKnown) queryIssues.Add(new Issue { Code = "CACHE_WRITE_UNRECORDED", Key = entry.Key,
-                        Day = entry.Day, Missing = 0, AffectsTotals = false });
                 }
                 var issueKeys = new HashSet<string>();
                 foreach (var issue in queryIssues)
                 {
-                    if (issue.Day.HasValue && (issue.Day.Value < first || (!issue.Before && issue.Day.Value > last))) continue;
+                    if (issue.Day.HasValue && (issue.Day.Value < first || (!issue.Before && issue.Day.Value > last)) &&
+                        !(hasInterval && (issue.Before ? issue.At >= selectedStart : issue.At > selectedStart && issue.At <= selectedEnd))) continue;
                     var key = OriginalEventKey(history, issue.Key);
                     if (inherited.Contains(issue.Key) || inherited.Contains(key)) continue;
                     Entry entry;
@@ -535,6 +575,9 @@ internal static class CodexNativeQuotaPatch
                     if (issue.NeedsBaseline && selected.TryGetValue(key, out entry) && entry.HasBaseline) continue;
                     if (issue.Code == "SOURCE_UNCONFIRMED" && selected.ContainsKey(key)) continue;
                     if (!issueKeys.Add(issue.Code + "/" + key)) continue;
+                    if (hasInterval && (!issue.Day.HasValue || (issue.Before ? issue.At >= selectedStart :
+                        issue.At > selectedStart && issue.At <= selectedEnd))) intervalBucket.Add(issue);
+                    if (issue.Day.HasValue && (issue.Day.Value < first || (!issue.Before && issue.Day.Value > last))) continue;
                     overall.Add(issue);
                     var issueFirst = issue.Day.HasValue && !issue.Before ? issue.Day.Value : first;
                     var issueLast = issue.Day.HasValue ? (issue.Day.Value < last ? issue.Day.Value : last) : last;
@@ -553,7 +596,13 @@ internal static class CodexNativeQuotaPatch
                 payload["end"] = end;
                 payload["daily"] = daily;
                 payload["hasLogs"] = present.Count > 0;
-                payload["scannedAt"] = DateTimeOffset.UtcNow.ToString("o", CultureInfo.InvariantCulture);
+                payload["scannedAt"] = now.ToString("o", CultureInfo.InvariantCulture);
+                if (hasInterval)
+                {
+                    var local = intervalBucket.Payload();
+                    local["hasLogs"] = present.Count > 0;
+                    payload["interval"] = new Dictionary<string, object> { { "start", intervalStart }, { "end", intervalEnd }, { "local", local } };
+                }
                 return payload;
             }
         }
@@ -651,8 +700,10 @@ internal static class CodexNativeQuotaPatch
         {
             var match = Regex.Match(line ?? "", @"""timestamp""\s*:\s*""([^""]+)""");
             var day = match.Success ? EventDay(match.Groups[1].Value) : null;
+            DateTimeOffset at;
+            DateTimeOffset.TryParse(match.Success ? match.Groups[1].Value : null, CultureInfo.InvariantCulture, DateTimeStyles.None, out at);
             return new Issue { Code = code, Key = (log.Thread ?? log.FileKey) + "/" + log.Line.ToString(CultureInfo.InvariantCulture) + "/" + (match.Success ? match.Groups[1].Value : "unknown"),
-                Day = day, Line = log.Line };
+                Day = day, At = at, Line = log.Line };
         }
         private static bool OfficialWindow(object raw)
         {
@@ -772,7 +823,7 @@ internal static class CodexNativeQuotaPatch
                 bool excluded;
                 if (!OfficialEvent(log, data, out excluded))
                 {
-                    if (!excluded) log.Issues.Add(new Issue { Code = "SOURCE_UNCONFIRMED", Key = key, Day = day, Missing = delta.Total, Line = log.Line });
+                    if (!excluded) log.Issues.Add(new Issue { Code = "SOURCE_UNCONFIRMED", Key = key, Day = day, At = stamp, Missing = delta.Total, Line = log.Line });
                     return;
                 }
                 if (!day.HasValue) { log.Issues.Add(ParseIssue(line, log, "INVALID_TIMESTAMP")); return; }
@@ -782,7 +833,7 @@ internal static class CodexNativeQuotaPatch
                         BaselineKey = current != null && total.Input >= current.Input && total.Cached >= current.Cached && total.Output >= current.Output ?
                             new Counts { Input = total.Input - current.Input, Cached = total.Cached - current.Cached, Output = total.Output - current.Output }.Key : null });
                 snapshot.ConfirmedConsumption = true;
-                log.Entries.Add(new Entry { Day = day.Value, Model = log.Model, Usage = delta, Key = key, HasBaseline = hasBaseline || (current != null && total.Key == current.Key) });
+                log.Entries.Add(new Entry { Day = day.Value, At = stamp, Model = log.Model, Usage = delta, Key = key, HasBaseline = hasBaseline || (current != null && total.Key == current.Key) });
             }
             catch (ArgumentException) { if (IsTokenLine(line)) log.Issues.Add(ParseIssue(line, log, "INVALID_TOKEN_EVENT")); }
             catch (InvalidOperationException) { if (IsTokenLine(line)) log.Issues.Add(ParseIssue(line, log, "INVALID_TOKEN_EVENT")); }
@@ -1395,7 +1446,9 @@ internal static class CodexNativeQuotaPatch
             catch (NetworkConfigurationException exception) { payload = new Dictionary<string, object> { { "errorCode", exception.Code } }; }
             catch { payload = new Dictionary<string, object> { { "errorCode", "INVALID_RESPONSE" } }; }
             CurrentNetworkDiagnosis["LastRequestError"] = StringValue(payload, "errorCode");
+            if (StringValue(payload, "errorCode") != "") RecentUsage.Break(scope);
             payload["network"] = SanitizeNetworkDiagnosis(CurrentNetworkDiagnosis);
+            if (payload.ContainsKey("planName")) LastPlan = new Dictionary<string, string> { { "scope", scope }, { "plan", StringValue(payload, "planName").ToLowerInvariant() } };
             var seconds = StringValue(payload, "errorCode") == "RATE_LIMITED"
                 ? (payload.ContainsKey("retryAfterSeconds") ? (int)payload["retryAfterSeconds"] : 30) : 5;
             CachedPayload = payload;
@@ -1435,6 +1488,7 @@ internal static class CodexNativeQuotaPatch
 
     private static Dictionary<string, object> FetchOfficialPayload(OfficialConfiguration official)
     {
+        var scope = SessionScope;
         var request = (HttpWebRequest)WebRequest.Create(official.Url);
         request.Method = "GET";
         request.Proxy = QuotaProxy();
@@ -1458,7 +1512,195 @@ internal static class CodexNativeQuotaPatch
         var secondary = OfficialWindowPayload(rateLimit, "secondary_window", false);
         if (primary != null) windows.Add(primary);
         if (secondary != null) windows.Add(secondary);
-        return new Dictionary<string, object> { { "planName", planName }, { "windows", windows } };
+        var payload = new Dictionary<string, object> { { "planName", planName }, { "windows", windows } };
+        if (scope == SessionScope) RecentUsage.Record(AppDomain.CurrentDomain.BaseDirectory, AccountFingerprint(official), scope, payload, DateTimeOffset.UtcNow);
+        return payload;
+    }
+
+    private static class RecentUsage
+    {
+        private sealed class Sample
+        {
+            public DateTimeOffset At;
+            public double Used, Reset;
+            public string Segment;
+        }
+        private static readonly object Gate = new object();
+        private static readonly Dictionary<string, Sample> Latest = new Dictionary<string, Sample>(StringComparer.OrdinalIgnoreCase);
+        private static readonly HashSet<string> WriteFailures = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        private static string ActiveScope, Segment = Guid.NewGuid().ToString("N");
+
+        private static string Folder(string root, string accountKey)
+        {
+            return Path.Combine(root, "account-usage-history", accountKey.Replace('+', '-').Replace('/', '_').TrimEnd('='));
+        }
+
+        public static void Break(string scope)
+        {
+            lock (Gate) if (ActiveScope == scope) Segment = Guid.NewGuid().ToString("N");
+        }
+
+        private static List<Sample> ReadFile(string path, out string error)
+        {
+            error = null;
+            var samples = new List<Sample>();
+            try
+            {
+                using (var reader = new StreamReader(path, Encoding.UTF8, true))
+                {
+                    string line;
+                    while ((line = reader.ReadLine()) != null)
+                    {
+                        if (line.Length == 0) { error = "HISTORY_CORRUPT"; continue; }
+                        Dictionary<string, object> row = null;
+                        try { row = Json.DeserializeObject(line) as Dictionary<string, object>; }
+                        catch (ArgumentException) { }
+                        catch (InvalidOperationException) { }
+                        DateTimeOffset at;
+                        double used, reset;
+                        var segment = row == null ? "" : StringValue(row, "segment");
+                        if (row == null || !DateTimeOffset.TryParseExact(StringValue(row, "at"), "o", CultureInfo.InvariantCulture, DateTimeStyles.None, out at) ||
+                            at.UtcDateTime.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture) != Path.GetFileNameWithoutExtension(path) ||
+                            !NumberValue(row, "used", out used) || used < 0 || used > 100 ||
+                            !NumberValue(row, "reset", out reset) || reset < 0 || segment.Length == 0 || segment.Length > 128 ||
+                            (samples.Count > 0 && samples[samples.Count - 1].At >= at))
+                        { error = "HISTORY_CORRUPT"; continue; }
+                        samples.Add(new Sample { At = at, Used = used, Reset = reset, Segment = segment });
+                    }
+                }
+            }
+            catch (IOException) { error = "HISTORY_READ_FAILED"; }
+            catch (UnauthorizedAccessException) { error = "HISTORY_READ_FAILED"; }
+            catch (System.Security.SecurityException) { error = "HISTORY_READ_FAILED"; }
+            return samples;
+        }
+
+        public static void Record(string root, string accountKey, string scope, Dictionary<string, object> payload, DateTimeOffset now)
+        {
+            var windows = payload["windows"] as List<object>;
+            if (windows == null) return;
+            Dictionary<string, object> weekly = null;
+            foreach (var raw in windows)
+            {
+                var window = raw as Dictionary<string, object>;
+                if (window != null && StringValue(window, "label") == "Weekly") { weekly = window; break; }
+            }
+            if (weekly == null) return;
+            var folder = Folder(root, accountKey);
+            lock (Gate)
+            {
+                if (ActiveScope != scope) { ActiveScope = scope; Segment = Guid.NewGuid().ToString("N"); }
+                try
+                {
+                    Sample latest;
+                    if (!Latest.TryGetValue(folder, out latest))
+                    {
+                        if (Directory.Exists(folder))
+                        {
+                            var files = Directory.GetFiles(folder, "????-??-??.jsonl");
+                            Array.Sort(files, StringComparer.Ordinal);
+                            if (files.Length > 0)
+                            {
+                                string ignored;
+                                var saved = ReadFile(files[files.Length - 1], out ignored);
+                                if (ignored == "HISTORY_READ_FAILED") { WriteFailures.Add(folder); Segment = Guid.NewGuid().ToString("N"); return; }
+                                if (saved.Count > 0) latest = saved[saved.Count - 1];
+                            }
+                        }
+                        Latest[folder] = latest;
+                    }
+                    if (latest != null && latest.At >= now) return;
+                    var sample = new Sample { At = now.ToUniversalTime(), Used = Convert.ToDouble(weekly["usedPercent"], CultureInfo.InvariantCulture),
+                        Reset = Convert.ToDouble(weekly["resetAt"], CultureInfo.InvariantCulture), Segment = Segment };
+                    Directory.CreateDirectory(folder);
+                    var path = Path.Combine(folder, sample.At.UtcDateTime.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture) + ".jsonl");
+                    var bytes = new UTF8Encoding(false).GetBytes(Json.Serialize(new Dictionary<string, object> {
+                        { "at", sample.At.ToString("o", CultureInfo.InvariantCulture) }, { "used", sample.Used }, { "reset", sample.Reset }, { "segment", sample.Segment } }) + "\n");
+                    using (var stream = new FileStream(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.Read))
+                    {
+                        if (stream.Length > 0)
+                        {
+                            stream.Seek(-1, SeekOrigin.End);
+                            if (stream.ReadByte() != 10) stream.WriteByte(10);
+                        }
+                        stream.Seek(0, SeekOrigin.End);
+                        stream.Write(bytes, 0, bytes.Length);
+                        stream.Flush(true);
+                    }
+                    Latest[folder] = sample;
+                    WriteFailures.Remove(folder);
+                }
+                catch (IOException) { WriteFailures.Add(folder); Segment = Guid.NewGuid().ToString("N"); }
+                catch (UnauthorizedAccessException) { WriteFailures.Add(folder); Segment = Guid.NewGuid().ToString("N"); }
+                catch (System.Security.SecurityException) { WriteFailures.Add(folder); Segment = Guid.NewGuid().ToString("N"); }
+            }
+        }
+
+        public static Dictionary<string, object> Read(string root, string accountKey, DateTimeOffset start, DateTimeOffset end)
+        {
+            var result = new Dictionary<string, object> { { "requestedStartAt", start.ToString("o", CultureInfo.InvariantCulture) },
+                { "requestedEndAt", end.ToString("o", CultureInfo.InvariantCulture) },
+                { "sampledStartAt", null }, { "sampledEndAt", null }, { "usedPercent", null }, { "status", "insufficient_history" },
+                { "coveredSeconds", 0d }, { "fullWindow", false }, { "coverageStartAt", null }, { "coverageEndAt", null },
+                { "hasGaps", false }, { "historyError", null } };
+            if (String.IsNullOrEmpty(accountKey)) { result["status"] = "unavailable"; return result; }
+            var folder = Folder(root, accountKey);
+            lock (Gate)
+            {
+                if (WriteFailures.Contains(folder)) { result["historyError"] = "HISTORY_WRITE_FAILED"; result["hasGaps"] = true; result["status"] = "unavailable"; }
+                string[] files;
+                try { files = Directory.GetFiles(folder, "????-??-??.jsonl"); }
+                catch (DirectoryNotFoundException) { if (WriteFailures.Contains(folder)) result["status"] = "unavailable"; return result; }
+                catch (IOException) { result["historyError"] = "HISTORY_READ_FAILED"; result["status"] = "unavailable"; return result; }
+                catch (UnauthorizedAccessException) { result["historyError"] = "HISTORY_READ_FAILED"; result["status"] = "unavailable"; return result; }
+                catch (System.Security.SecurityException) { result["historyError"] = "HISTORY_READ_FAILED"; result["status"] = "unavailable"; return result; }
+                Array.Sort(files, StringComparer.Ordinal);
+                var samples = new List<Sample>();
+                var firstDay = start.UtcDateTime.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+                var lastDay = end.UtcDateTime.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+                bool selectedDamaged = false;
+                for (int i = 0; i < files.Length; i++)
+                {
+                    var day = Path.GetFileNameWithoutExtension(files[i]);
+                    var selected = String.CompareOrdinal(day, firstDay) >= 0 && String.CompareOrdinal(day, lastDay) <= 0;
+                    if (!selected && i != 0 && i != files.Length - 1) continue;
+                    string error;
+                    var saved = ReadFile(files[i], out error);
+                    if (error != null)
+                    {
+                        result["historyError"] = error; result["hasGaps"] = true;
+                        if (selected) selectedDamaged = true;
+                    }
+                    if (saved.Count > 0)
+                    {
+                        if (i == 0) result["coverageStartAt"] = saved[0].At.ToString("o", CultureInfo.InvariantCulture);
+                        if (i == files.Length - 1) result["coverageEndAt"] = saved[saved.Count - 1].At.ToString("o", CultureInfo.InvariantCulture);
+                        if (selected) foreach (var sample in saved) if (sample.At >= start && sample.At <= end) samples.Add(sample);
+                    }
+                }
+                if (selectedDamaged) { result["status"] = "unavailable"; return result; }
+                if (samples.Count == 0) return result;
+                var first = samples[0]; var last = samples[samples.Count - 1];
+                result["sampledStartAt"] = first.At.ToString("o", CultureInfo.InvariantCulture);
+                result["sampledEndAt"] = last.At.ToString("o", CultureInfo.InvariantCulture);
+                result["coveredSeconds"] = (last.At - first.At).TotalSeconds;
+                if (last.At <= first.At) return result;
+                var previous = first;
+                foreach (var sample in samples)
+                {
+                    if (sample.Reset != first.Reset) { result["status"] = "reset"; return result; }
+                    if (sample.Used < previous.Used) { result["status"] = "counter_decreased"; return result; }
+                    if (sample.Segment != previous.Segment) result["hasGaps"] = true;
+                    previous = sample;
+                }
+                if (first.Reset <= (last.At - new DateTimeOffset(1970, 1, 1, 0, 0, 0, TimeSpan.Zero)).TotalSeconds)
+                { result["status"] = "reset"; return result; }
+                result["usedPercent"] = last.Used - first.Used;
+                var full = first.At == start && last.At == end && !(bool)result["hasGaps"] && result["historyError"] == null;
+                result["status"] = full ? "ok" : "partial"; result["fullWindow"] = full;
+                return result;
+            }
+        }
     }
 
     private static Dictionary<string, object> ReadQuotaResponse(HttpWebRequest request)
@@ -2189,6 +2431,316 @@ internal static class CodexNativeQuotaPatch
         if (value != null && value.ContainsKey("subtype") && StringValue(value, "subtype") == "error")
             throw new InvalidOperationException("Runtime evaluation failed");
         return result;
+    }
+
+    private static class ModelDialReferences
+    {
+        private const string SourceUrl = "https://modeldial.com/subscriptions?period=week&view=insights";
+        private const int MaximumResponse = 524288;
+        private static readonly object Gate = new object();
+        private static volatile Dictionary<string, object> Current = Empty();
+
+        private static Dictionary<string, object> Empty()
+        {
+            return new Dictionary<string, object> { { "plans", null }, { "apiPlans", null }, { "legacy", null }, { "legacyErrorCode", null }, { "lastAttemptAt", null }, { "lastSuccessAt", null }, { "errorCode", null } };
+        }
+
+        private static DateTimeOffset? Stamp(object raw, DateTimeOffset now)
+        {
+            DateTimeOffset stamp;
+            return raw is string && DateTimeOffset.TryParseExact((string)raw, "o", CultureInfo.InvariantCulture, DateTimeStyles.None, out stamp) && stamp <= now.AddMinutes(5)
+                ? (DateTimeOffset?)stamp : null;
+        }
+
+        public static Dictionary<string, object> Parse(string html, bool api = false)
+        {
+            if (html == null || html.Length > MaximumResponse || !Regex.IsMatch(html, @"Token\s*单位\s*[：:]\s*亿"))
+                throw new InvalidDataException("ModelDial token unit missing");
+            var plans = new Dictionary<string, object>();
+            foreach (var tier in new[] { "plus", "100", "200", "500" }) plans[tier] = new Dictionary<string, object>();
+            foreach (Match anchor in Regex.Matches(html, @"<a\b(?<attrs>[^>]*\bhref\s*=\s*""[^""]*calc_row=[^""]*""[^>]*)>(?<body>[\s\S]*?)</a>", RegexOptions.IgnoreCase))
+            {
+                var quota = Regex.Match(anchor.Groups["body"].Value, @"<span\b[^>]*class\s*=\s*""[^""]*" + (api ? "apiValue" : "quotaNumber") + @"[^""]*""[^>]*>(?<value>[\s\S]*?)</span>", RegexOptions.IgnoreCase);
+                if (!quota.Success) continue;
+                var attrs = WebUtility.HtmlDecode(anchor.Groups["attrs"].Value);
+                if (!Regex.IsMatch(attrs, @"(?:[?&])period=week(?:&|""|\s)")) continue;
+                var id = Regex.Match(attrs, @"(?:[?&])calc_row=(?<id>[^&""\s]+)").Groups["id"].Value;
+                var row = Regex.Match(id, @"\Aopenai-(?<tier>plus|pro-5x|pro-200|pro-500)-(?<model>gpt-[0-9]+(?:\.[0-9]+)?-(?:astra|sol))(?:-[0-9]{8})?\z");
+                if (!row.Success) continue;
+                var tier = row.Groups["tier"].Value;
+                tier = tier == "plus" ? "plus" : tier == "pro-5x" ? "100" : tier.Substring(4);
+                var models = (Dictionary<string, object>)plans[tier];
+                var model = row.Groups["model"].Value;
+                var text = WebUtility.HtmlDecode(Regex.Replace(quota.Groups["value"].Value, "<[^>]*>", "")).Trim();
+                decimal tokens;
+                var number = api ? Regex.Match(text, @"\AAPI\s*等值\s*≈?\s*\$(?<number>(?:[0-9]+|[0-9]{1,3}(?:,[0-9]{3})+)(?:\.[0-9]+)?)\z").Groups["number"].Value : text.TrimStart('≈').Trim();
+                if (!(api ? number.Length > 0 : Regex.IsMatch(text, @"\A≈?\s*[0-9]+(?:\.[0-9]+)?\z")) ||
+                    !Decimal.TryParse(number, NumberStyles.AllowThousands | NumberStyles.AllowDecimalPoint, CultureInfo.InvariantCulture, out tokens) || tokens <= 0 || tokens > 100000 || models.ContainsKey(model))
+                    throw new InvalidDataException("Invalid or ambiguous ModelDial row");
+                models[model] = (double)(api ? tokens : tokens * 100000000m);
+            }
+            foreach (Dictionary<string, object> models in plans.Values)
+                if (!api && (!models.ContainsKey("gpt-6-astra") || !models.ContainsKey("gpt-6.1-sol"))) throw new InvalidDataException("Incomplete ModelDial plans");
+            return plans;
+        }
+
+        private static Dictionary<string, object> ParseLegacy(string script)
+        {
+            // Read literal row objects only; downloaded JavaScript is never executed.
+            if (script == null || script.Length > MaximumResponse) throw new InvalidDataException("ModelDial script too large");
+            var models = new Dictionary<string, object>(); var apiModels = new Dictionary<string, object>();
+            foreach (var model in new[] { "gpt-6-astra", "gpt-6.1-sol" })
+            {
+                var matches = Regex.Matches(script, "\\{\\s*\"id\"\\s*:\\s*\"openai-pro-20x-" + Regex.Escape(model) + "\"");
+                if (matches.Count != 1) throw new InvalidDataException("Missing or ambiguous legacy reference");
+                var start = matches[0].Index; int depth = 0, end = -1; bool quoted = false, escaped = false;
+                for (var index = start; index < script.Length; index++)
+                {
+                    var value = script[index];
+                    if (quoted) { if (escaped) escaped = false; else if (value == '\\') escaped = true; else if (value == '"') quoted = false; }
+                    else if (value == '"') quoted = true;
+                    else if (value == '{') depth++;
+                    else if (value == '}' && --depth == 0) { end = index + 1; break; }
+                }
+                if (end < 0) throw new InvalidDataException("Incomplete legacy object");
+                var row = Json.DeserializeObject(script.Substring(start, end - start)) as Dictionary<string, object>;
+                double tokens, usd, price;
+                if (row == null || StringValue(row, "provider") != "openai" || StringValue(row, "plan") != "Pro 20x" || StringValue(row, "currency") != "USD" || StringValue(row, "record_status") != "historical" ||
+                    !NumberValue(row, "monthly_price", out price) || price != 200 || !NumberValue(row, "weekly_tokens", out tokens) || tokens <= 0 || tokens > 10000000000000 ||
+                    !NumberValue(row, "weekly_api_equivalent_usd", out usd) || usd <= 0 || usd > 10000000)
+                    throw new InvalidDataException("Invalid legacy weekly reference");
+                models[model] = tokens; apiModels[model] = usd;
+            }
+            return new Dictionary<string, object> { { "models", models }, { "apiModels", apiModels } };
+        }
+
+        public static Dictionary<string, object> ReadLegacy(string html, Func<string, string> fetchAsset)
+        {
+            var references = Regex.Matches(html.Replace("\\\"", "\""), @"\[(?<assets>[^\[\]]{1,4096})\],""SubscriptionPage""");
+            if (references.Count != 1 || fetchAsset == null) throw new InvalidDataException("Legacy source asset unavailable");
+            var paths = new List<string>();
+            foreach (Match match in Regex.Matches(references[0].Groups["assets"].Value, @"""(?<path>/_next/static/chunks/[A-Za-z0-9_-]+\.js)"""))
+                if (!paths.Contains(match.Groups["path"].Value)) paths.Add(match.Groups["path"].Value);
+            if (paths.Count == 0 || paths.Count > 8) throw new InvalidDataException("Legacy asset list changed");
+            for (var index = paths.Count - 1; index >= 0; index--)
+            {
+                var url = "https://modeldial.com" + paths[index];
+                var script = fetchAsset(url);
+                if (script == null || script.Length > MaximumResponse) throw new InvalidDataException("ModelDial script too large");
+                if (!script.Contains("openai-pro-20x-gpt-6-astra")) continue;
+                var legacy = ParseLegacy(script); legacy["sourceUrl"] = url; return legacy;
+            }
+            throw new InvalidDataException("Legacy weekly reference not found");
+        }
+
+        private static Dictionary<string, object> Load(string path, DateTimeOffset now)
+        {
+            var state = Empty();
+            if (!File.Exists(path) || new FileInfo(path).Length > MaximumResponse) return state;
+            Dictionary<string, object> saved;
+            try { saved = Json.DeserializeObject(File.ReadAllText(path, Encoding.UTF8)) as Dictionary<string, object>; }
+            catch (ArgumentException) { return state; }
+            catch (InvalidOperationException) { return state; }
+            if (saved == null) return state;
+            foreach (var key in new[] { "lastAttemptAt", "lastSuccessAt" })
+            {
+                object raw;
+                var stamp = saved.TryGetValue(key, out raw) ? Stamp(raw, now) : null;
+                if (stamp.HasValue) state[key] = stamp.Value.ToString("o", CultureInfo.InvariantCulture);
+            }
+            object rawPlans;
+            var plans = saved.TryGetValue("plans", out rawPlans) ? rawPlans as Dictionary<string, object> : null;
+            if (plans != null && state["lastSuccessAt"] != null)
+            {
+                var validated = new Dictionary<string, object>();
+                foreach (var tier in new[] { "plus", "100", "200", "500" })
+                {
+                    object rawModels;
+                    var models = plans.TryGetValue(tier, out rawModels) ? rawModels as Dictionary<string, object> : null;
+                    if (models == null || !models.ContainsKey("gpt-6-astra") || !models.ContainsKey("gpt-6.1-sol")) { validated.Clear(); break; }
+                    var values = new Dictionary<string, object>();
+                    foreach (var item in models)
+                    {
+                        double value;
+                        if (!Regex.IsMatch(item.Key, @"\Agpt-[0-9]+(?:\.[0-9]+)?-(?:astra|sol)\z") || !NumberValue(models, item.Key, out value) || value <= 0 || value > 10000000000000)
+                        { values.Clear(); break; }
+                        values[item.Key] = value;
+                    }
+                    if (values.Count != models.Count || values.Count == 0) { validated.Clear(); break; }
+                    validated[tier] = values;
+                }
+                if (validated.Count == 4) state["plans"] = validated;
+            }
+            if (state["plans"] == null) state["lastSuccessAt"] = null;
+            object rawApiPlans;
+            var apiPlans = saved.TryGetValue("apiPlans", out rawApiPlans) ? rawApiPlans as Dictionary<string, object> : null;
+            if (apiPlans != null)
+            {
+                var validated = new Dictionary<string, object>();
+                foreach (var tier in new[] { "plus", "100", "200", "500" })
+                {
+                    object rawModels; var models = apiPlans.TryGetValue(tier, out rawModels) ? rawModels as Dictionary<string, object> : null;
+                    if (models == null) { validated.Clear(); break; }
+                    var values = new Dictionary<string, object>();
+                    foreach (var item in models)
+                    {
+                        double value;
+                        if (!Regex.IsMatch(item.Key, @"\Agpt-[0-9]+(?:\.[0-9]+)?-(?:astra|sol)\z") || !NumberValue(models, item.Key, out value) || value <= 0 || value > 10000000) { values.Clear(); break; }
+                        values[item.Key] = value;
+                    }
+                    if (values.Count != models.Count) { validated.Clear(); break; }
+                    validated[tier] = values;
+                }
+                if (validated.Count == 4) state["apiPlans"] = validated;
+            }
+            object rawLegacy;
+            var legacy = saved.TryGetValue("legacy", out rawLegacy) ? rawLegacy as Dictionary<string, object> : null;
+            if (legacy != null && legacy.ContainsKey("checkedAt") && Stamp(legacy["checkedAt"], now).HasValue &&
+                Regex.IsMatch(StringValue(legacy, "sourceUrl") ?? "", @"\Ahttps://modeldial\.com/_next/static/chunks/[A-Za-z0-9_-]+\.js\z"))
+            {
+                bool valid = true; var validated = new Dictionary<string, object>();
+                foreach (var key in new[] { "models", "apiModels" })
+                {
+                    object rawModels; var models = legacy.TryGetValue(key, out rawModels) ? rawModels as Dictionary<string, object> : null;
+                    if (models == null || models.Count != 2) { valid = false; break; }
+                    var values = new Dictionary<string, object>();
+                    foreach (var model in new[] { "gpt-6-astra", "gpt-6.1-sol" })
+                    {
+                        double value;
+                        if (!NumberValue(models, model, out value) || value <= 0 || value > (key == "models" ? 10000000000000 : 10000000)) valid = false;
+                        values[model] = value;
+                    }
+                    validated[key] = values;
+                }
+                if (valid) { validated["sourceUrl"] = legacy["sourceUrl"]; validated["checkedAt"] = legacy["checkedAt"]; state["legacy"] = validated; }
+            }
+            if (StringValue(saved, "legacyErrorCode") == "REFERENCE_CHECK_FAILED") state["legacyErrorCode"] = "REFERENCE_CHECK_FAILED";
+            if (StringValue(saved, "errorCode") == "REFERENCE_CHECK_FAILED") state["errorCode"] = "REFERENCE_CHECK_FAILED";
+            return state;
+        }
+
+        private static void Save(string path, Dictionary<string, object> state)
+        {
+            var temporary = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+            try
+            {
+                File.WriteAllText(temporary, Json.Serialize(state), new UTF8Encoding(false));
+                if (File.Exists(path)) File.Replace(temporary, path, null); else File.Move(temporary, path);
+            }
+            finally { if (File.Exists(temporary)) File.Delete(temporary); }
+        }
+
+        public static Dictionary<string, object> Check(string root, DateTimeOffset now, Func<string> fetch, Func<string, string> fetchAsset = null)
+        {
+            lock (Gate)
+            {
+                var path = Path.Combine(root, "modeldial-state.json");
+                var state = Empty();
+                try
+                {
+                    state = Load(path, now);
+                    var attempt = Stamp(state["lastAttemptAt"], now);
+                    if (!attempt.HasValue || now >= attempt.Value.AddDays(1))
+                    {
+                        state["lastAttemptAt"] = now.ToString("o", CultureInfo.InvariantCulture);
+                        state["errorCode"] = "REFERENCE_CHECK_FAILED";
+                        state["legacyErrorCode"] = "REFERENCE_CHECK_FAILED";
+                        Save(path, state);
+                        var html = fetch(); var plans = Parse(html); var apiPlans = Parse(html, true);
+                        var successful = new Dictionary<string, object>(state);
+                        successful["plans"] = plans; successful["apiPlans"] = apiPlans; successful["lastSuccessAt"] = now.ToString("o", CultureInfo.InvariantCulture); successful["errorCode"] = null;
+                        try
+                        {
+                            var legacy = ReadLegacy(html, fetchAsset); legacy["checkedAt"] = now.ToString("o", CultureInfo.InvariantCulture);
+                            successful["legacy"] = legacy; successful["legacyErrorCode"] = null;
+                        }
+                        catch (Exception error)
+                        {
+                            if (!(error is WebException || error is IOException || error is InvalidDataException || error is ArgumentException || error is InvalidOperationException)) throw;
+                        }
+                        Save(path, successful); state = successful;
+                    }
+                }
+                catch (Exception error)
+                {
+                    if (!(error is WebException || error is IOException || error is InvalidDataException || error is UnauthorizedAccessException || error is ArgumentException ||
+                        error is FormatException || error is InvalidOperationException || error is CryptographicException ||
+                        error is System.Security.SecurityException || error is NetworkConfigurationException)) throw;
+                    state["errorCode"] = "REFERENCE_CHECK_FAILED";
+                    if (state["lastAttemptAt"] == null) state["lastAttemptAt"] = now.ToString("o", CultureInfo.InvariantCulture);
+                }
+                state["nextCheckAt"] = (Stamp(state["lastAttemptAt"], now) ?? now).AddDays(1).ToString("o", CultureInfo.InvariantCulture);
+                Current = state;
+                return new Dictionary<string, object>(state);
+            }
+        }
+
+        public static Dictionary<string, object> Snapshot(string planName, string selectedProTier)
+        {
+            var state = Current;
+            var tier = String.Equals(planName, "plus", StringComparison.OrdinalIgnoreCase) ? "plus" :
+                String.Equals(planName, "pro", StringComparison.OrdinalIgnoreCase) && (selectedProTier == "100" || selectedProTier == "200" || selectedProTier == "500") ? selectedProTier : null;
+            var plans = state["plans"] as Dictionary<string, object>;
+            if (tier == "200")
+            {
+                // ModelDial's explicit weekly fields, not the insights chart's monthly totals.
+                var legacy = state["legacy"] as Dictionary<string, object>;
+                return new Dictionary<string, object> { { "planName", planName }, { "selectedPlan", "pro200" },
+                    { "models", legacy != null ? legacy["models"] : new Dictionary<string, object> { { "gpt-6-astra", 849560154d }, { "gpt-6.1-sol", 4782528501.084447d } } },
+                    { "apiModels", legacy != null ? legacy["apiModels"] : new Dictionary<string, object> { { "gpt-6-astra", 1313.419998084d }, { "gpt-6.1-sol", 942.1581147136362d } } },
+                    { "referenceKind", "legacy20x" }, { "referenceSnapshotAt", legacy != null ? ((string)legacy["checkedAt"]).Substring(0, 10) : "2026-10-30" },
+                    { "referenceSourceUrl", legacy != null ? legacy["sourceUrl"] : "https://modeldial.com/_next/static/chunks/0yf-t1ygnk8ho.js" },
+                    { "status", legacy == null ? "snapshot" : state["legacyErrorCode"] != null ? "stale" : "ok" }, { "referenceCheckFailed", state["legacyErrorCode"] != null }, { "lastSuccessAt", legacy != null ? legacy["checkedAt"] : null },
+                    { "lastAttemptAt", state["lastAttemptAt"] }, { "nextCheckAt", state.ContainsKey("nextCheckAt") ? state["nextCheckAt"] : null }, { "sourceUrl", SourceUrl } };
+            }
+            var apiPlans = state["apiPlans"] as Dictionary<string, object>;
+            return new Dictionary<string, object> { { "planName", planName }, { "selectedPlan", tier == null ? null : tier == "plus" ? "plus" : "pro" + tier }, { "models", tier != null && plans != null ? plans[tier] : null },
+                { "apiModels", tier != null && apiPlans != null ? apiPlans[tier] : null }, { "referenceKind", "current" }, { "referenceSnapshotAt", state["lastSuccessAt"] != null ? ((string)state["lastSuccessAt"]).Substring(0, 10) : null }, { "referenceSourceUrl", SourceUrl },
+                { "status", tier == null ? String.Equals(planName, "pro", StringComparison.OrdinalIgnoreCase) ? "needs_plan" : "unavailable" : plans == null ? "unavailable" : state["errorCode"] != null ? "stale" : "ok" },
+                { "lastSuccessAt", state["lastSuccessAt"] }, { "lastAttemptAt", state["lastAttemptAt"] },
+                { "nextCheckAt", state.ContainsKey("nextCheckAt") ? state["nextCheckAt"] : null }, { "sourceUrl", SourceUrl } };
+        }
+
+        public static string Fetch()
+        {
+            return FetchPublic(SourceUrl);
+        }
+
+        private static string FetchPublic(string url)
+        {
+            var request = (HttpWebRequest)WebRequest.Create(url);
+            request.Method = "GET"; request.AllowAutoRedirect = false;
+            request.Proxy = SettingsProxy(ReadNetworkSettings(), null);
+            request.Timeout = 10000; request.ReadWriteTimeout = 10000;
+            request.UserAgent = "Mozilla/5.0 (compatible; CodexUsageCard/" + ProductVersion + ")";
+            request.Accept = "text/html";
+            request.AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate;
+            using (var deadline = new CancellationTokenSource(IoDeadlineMilliseconds))
+            using (deadline.Token.Register(request.Abort))
+            using (var response = (HttpWebResponse)request.GetResponse())
+            using (var reader = new StreamReader(response.GetResponseStream(), Encoding.UTF8))
+            {
+                if (response.StatusCode != HttpStatusCode.OK) throw new InvalidDataException("ModelDial request failed");
+                var buffer = new char[4096]; var text = new StringBuilder(); int count;
+                while ((count = reader.Read(buffer, 0, buffer.Length)) > 0)
+                {
+                    if (text.Length + count > MaximumResponse) throw new InvalidDataException("ModelDial response too large");
+                    text.Append(buffer, 0, count);
+                }
+                return text.ToString();
+            }
+        }
+
+        public static async Task RunAsync(string root)
+        {
+            while (true)
+            {
+                var state = Check(root, DateTimeOffset.UtcNow, Fetch, FetchPublic);
+                var next = DateTimeOffset.Parse((string)state["nextCheckAt"], CultureInfo.InvariantCulture);
+                var delay = next - DateTimeOffset.UtcNow;
+                await Task.Delay(delay > TimeSpan.Zero ? delay : TimeSpan.FromSeconds(1));
+            }
+        }
     }
 
     private static string StringValue(Dictionary<string, object> values, string key)

@@ -5,6 +5,8 @@ native-patch/*.exe
 native-patch/api-proxy.dat
 native-patch/network-settings.json
 native-patch/release-state.json*
+native-patch/modeldial-state.json*
+native-patch/account-usage-history/
 auth.json
 config.toml
 api-proxy.dat

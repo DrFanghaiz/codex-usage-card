@@ -358,6 +358,46 @@ public static class LocalUsageRegressions
         Check(Daily(result).Count==0 && Total(result)==0 && !(bool)result["partial"],"Inherited-only query day is omitted, with no invented consumption or warning");DailyMatches(result);
         Check(Daily(Read(empty)).Count==0,"A range without records or issues returns an empty sparse daily array");
         Check(!Json.Serialize(result).Contains(root),"Response excludes local paths");
+        var recentRoot=Dir(root,"recent");var recentSessions=Dir(recentRoot,"sessions");
+        var recentFile=Path.Combine(recentSessions,"events.jsonl");
+        var recentNow=new DateTimeOffset(2026,9,2,0,5,0,TimeZoneInfo.Local.GetUtcOffset(new DateTime(2026,9,2,0,5,0)));
+        Func<int,long,string> recentEvent=(offset,recentCount)=>E(2,47,CW(recentCount,0,0,0),CW(recentCount,0,0,0),"pro")
+            .Replace(Stamp(2,47),recentNow.AddMinutes(offset).ToString("o"));
+        var recentText=Meta("openai")+Model("gpt-6-astra")+recentEvent(-181,1)+recentEvent(-180,10)+recentEvent(-61,100)+
+            recentEvent(-60,1000)+recentEvent(-11,10000)+recentEvent(-10,100000)+recentEvent(-1,1000000)+recentEvent(1,10000000);
+        File.WriteAllText(recentFile,recentText,new UTF8Encoding(false));
+        result=LocalUsage.Read(recentRoot,"2026-09-02","2026-09-02",recentNow);
+        Check(!result.ContainsKey("interval") && !result.ContainsKey("recent"),"Ordinary daily requests do not compute or return arbitrary fixed windows");
+        var ordinaryTotal=Total(result);
+        var intervalStart=recentNow.AddMinutes(-10).ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'",CultureInfo.InvariantCulture);
+        var intervalEnd=recentNow.AddMinutes(-1).ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'",CultureInfo.InvariantCulture);
+        result=LocalUsage.Read(recentRoot,"2026-09-02","2026-09-02",recentNow,intervalStart,intervalEnd);
+        var interval=(Dictionary<string,object>)result["interval"];
+        Check((string)interval["start"]==intervalStart && (string)interval["end"]==intervalEnd && Total((Dictionary<string,object>)interval["local"])==900000,"Arbitrary interval echoes JS ISO endpoints exactly and uses left-open/right-closed event boundaries");
+        Check(Total(result)==ordinaryTotal,"Selecting a precise interval does not truncate the independent inclusive day range");DailyMatches(result);
+        result=LocalUsage.Read(recentRoot,"2026-09-02","2026-09-02",recentNow,recentNow.AddMinutes(-17).ToString("o"),recentNow.AddMinutes(-2).ToString("o"));
+        Check(Total((Dictionary<string,object>)((Dictionary<string,object>)result["interval"])["local"])==99000,"Nonpreset historical endpoints select only events inside their exact time span");
+        result=LocalUsage.Read(recentRoot,"2026-09-02","2026-09-02",recentNow,recentNow.AddMinutes(-182).ToString("o"),recentNow.AddMinutes(-180).ToString("o"));
+        Check(Total((Dictionary<string,object>)((Dictionary<string,object>)result["interval"])["local"])==10,"Local custom intervals can reach earlier than the old three-hour window and across local midnight");
+        result=LocalUsage.Read(recentRoot,"2026-09-02","2026-09-02",recentNow,recentNow.AddMinutes(-10).AddMilliseconds(-1).ToString("o"),recentNow.AddMinutes(-1).AddMilliseconds(-1).ToString("o"));
+        Check(Total((Dictionary<string,object>)((Dictionary<string,object>)result["interval"])["local"])==90000,"Subsecond endpoints preserve exact boundary selection without rounding");
+        File.WriteAllText(Path.Combine(recentSessions,"copy.jsonl"),recentText,new UTF8Encoding(false));
+        result=LocalUsage.Read(recentRoot,"2026-09-01","2026-09-01",recentNow,intervalStart,intervalEnd);
+        interval=(Dictionary<string,object>)result["interval"];
+        Check(Total((Dictionary<string,object>)interval["local"])==900000,"Interval aggregation uses shared deduplicated entries even when queried dates are historical");
+        File.AppendAllText(recentFile,"{\"timestamp\":\""+recentNow.AddMinutes(-2).ToString("o")+"\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",broken}\n",new UTF8Encoding(false));
+        result=LocalUsage.Read(recentRoot,"2026-09-01","2026-09-01",recentNow,intervalStart,intervalEnd);
+        interval=(Dictionary<string,object>)result["interval"];
+        Check((bool)((Dictionary<string,object>)interval["local"])["partial"],"Malformed interval records retain counts and mark partial coverage outside the main date selection");
+        result=LocalUsage.Read(empty,"2026-09-01","2026-09-01",recentNow,intervalStart,intervalEnd);
+        interval=(Dictionary<string,object>)result["interval"];
+        Check(!(bool)((Dictionary<string,object>)interval["local"])["hasLogs"],"No local logs remains explicitly unavailable for a selected interval");
+        foreach(var pair in new[]{new[]{intervalStart,(string)null},new[]{intervalEnd,intervalStart},new[]{intervalStart,intervalStart},
+            new[]{"2026-09-01T12:00:00",intervalEnd},new[]{"2026-02-30T00:00:00Z",intervalEnd},new[]{intervalStart,recentNow.AddSeconds(1).ToString("o")}})
+        {
+            bool rejected=false;try{LocalUsage.Read(recentRoot,"2026-09-01","2026-09-01",recentNow,pair[0],pair[1]);}catch(ArgumentException){rejected=true;}
+            Check(rejected,"Malformed, incomplete, unzoned, reverse, equal or future intervals cannot fall back to fixed windows");
+        }
     }
 __LOCAL_USAGE__
 __STRING_VALUE__
@@ -368,7 +408,7 @@ Add-Type -TypeDefinition $harness -ReferencedAssemblies System.dll,System.Core.d
 $root=Join-Path ([IO.Path]::GetTempPath()) ('codex-local-usage-test-'+[Guid]::NewGuid().ToString('N'))
 try {
     [LocalUsageRegressions]::Run($root)
-    'Local usage regressions: 81 groups passed (cumulative, date range, identified copies, independent threads, nested fork history, missing/restored ancestors, cyclic ancestry, warm EOF, append, subsets, truncation, unknown model/provider, inherited baseline, API exclusion, malformed/oversized tails, empty data, validation, response privacy).'
+    'Local usage regressions: 91 groups passed (cumulative, date range, identified copies, independent threads, nested fork history, missing/restored ancestors, cyclic ancestry, warm EOF, append, subsets, truncation, unknown model/provider, inherited baseline, API exclusion, malformed/oversized tails, arbitrary precise intervals, unchanged day buckets, interval validation, response privacy).'
 } finally {
     $resolved=[IO.Path]::GetFullPath($root)
     if ($resolved.StartsWith([IO.Path]::GetFullPath([IO.Path]::GetTempPath()),[StringComparison]::OrdinalIgnoreCase) -and [IO.Path]::GetFileName($resolved).StartsWith('codex-local-usage-test-')) {

@@ -47,7 +47,7 @@ $end = $source.IndexOf('    private static Dictionary<string, object> SharedPayl
 $publishMethods = $source.Substring($start, $end - $start)
 $start = $source.IndexOf('    private static Dictionary<string, object> FetchOfficialPayload(')
 $end = $source.IndexOf('    private static IWebProxy QuotaProxy()', $start)
-$httpMethods = $source.Substring($start, $end - $start).Replace('FetchOfficialPayload(', 'FetchOfficialPayloadReal(')
+$httpMethods = $source.Substring($start, $end - $start).Replace('FetchOfficialPayload(', 'FetchOfficialPayloadReal(').Replace('AppDomain.CurrentDomain.BaseDirectory, AccountFingerprint(official)', 'TestRoot, AccountFingerprint(official)')
 $start = $source.IndexOf('    private static bool NumberValue(')
 $end = $source.IndexOf('    private static void LaunchCodex()', $start)
 $httpMethods += $source.Substring($start, $end - $start)
@@ -93,6 +93,7 @@ public static class NativeHelperRegressions
     private static readonly object PayloadGate = new object();
     private static string CachedPayloadScope;
     private static Dictionary<string, object> CachedPayload;
+    private static volatile Dictionary<string, string> LastPlan;
     private static DateTimeOffset CachedPayloadExpiresAt;
     private static int FetchCount;
     private static bool FetchLimited;
@@ -107,7 +108,7 @@ public static class NativeHelperRegressions
         Thread.Sleep(50);
         return FetchLimited
             ? new Dictionary<string, object> { { "errorCode", "RATE_LIMITED" }, { "retryAfterSeconds", 60 } }
-            : new Dictionary<string, object> { { "value", 42 } };
+            : new Dictionary<string, object> { { "value", 42 }, { "planName", "pro" } };
     }
     private static readonly ManualResetEventSlim ReleasePages = new ManualResetEventSlim();
     private static readonly ManualResetEventSlim BothPages = new ManualResetEventSlim();
@@ -559,6 +560,7 @@ __HTTP_METHODS__
         for (int i = 0; i < 8; i++) fetches.Add(Task.Run(() => Check((int)SharedPayload(SessionScope, SessionGeneration)["value"] == 42, "Shared fetch result")));
         Task.WaitAll(fetches.ToArray());
         Check(FetchCount == 1, "Concurrent windows must share one HTTP request");
+        Check(LastPlan["scope"] == SessionScope && LastPlan["plan"] == "pro", "Reference plan comes from the successful scoped official reply");
         SessionScope = "new-login";
         SharedPayload(SessionScope, SessionGeneration);
         Check(FetchCount == 2, "Login scope invalidates cached quota");

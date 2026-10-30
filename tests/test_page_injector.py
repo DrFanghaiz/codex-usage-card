@@ -107,7 +107,7 @@ class PageInjectorTests(unittest.TestCase):
             self.assertNotIn(obsolete, NATIVE_QUOTA_SCRIPT)
 
     def test_sidebar_v3_bundles_the_approved_track_and_host_tokens(self):
-        for contract in ('#e2d8c4', 'min-width: 3px', 'backdrop-filter: blur(8px)', '--color-surface-elevated-secondary',
+        for contract in ('#e2d8c4', 'min-width: 3px', 'border: .8px solid var(--cq-border)', '--color-surface-elevated-secondary',
                          '--color-text', 'prefers-reduced-motion: reduce',
                          '上次成功', '暂不可用'):
             self.assertIn(contract, NATIVE_QUOTA_SCRIPT)
