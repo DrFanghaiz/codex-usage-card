@@ -9,7 +9,7 @@ Codex Usage Card 在 Codex 桌面端列表侧栏底部提供一行额度入口�
 在 PowerShell 7 中运行：
 
 ```powershell
-$installer = Join-Path $env:TEMP 'install-codex-usage-card.ps1'; Invoke-WebRequest 'https://raw.githubusercontent.com/DrFanghaiz/codex-usage-card/v2.6.1/install.ps1' -OutFile $installer; Unblock-File -LiteralPath $installer; & $installer
+$installer = Join-Path $env:TEMP 'install-codex-usage-card.ps1'; Invoke-WebRequest 'https://raw.githubusercontent.com/DrFanghaiz/codex-usage-card/v2.6.2/install.ps1' -OutFile $installer; Unblock-File -LiteralPath $installer; & $installer
 ```
 
 安装器会校验发布包的 SHA-256，把 Skill 安装到 `$CODEX_HOME\skills`（未设置时为 `$env:USERPROFILE\.codex\skills`），把无窗口修复器部署到 `$env:LOCALAPPDATA\CodexUsageCard`，并注册当前用户的计划任务 `Codex Usage Card`。从旧版升级时，只迁移路径与动作完全匹配的旧任务。安装完成后会输出 `ActivationState`、`StageCodes` 和 `CardVisible` 等只读验收结果；Codex 未运行时显示等待状态，不把已完成安装误报为失败。
@@ -21,6 +21,14 @@ python "$env:USERPROFILE\.codex\skills\.system\skill-installer\scripts\install-s
 ```
 
 安装后重新启动 Codex，使新 Skill 出现在可用 Skill 列表中。
+
+## v2.6.2 区间查询与旧 Pro 20x 估算
+
+- 区间页提供独立的起止日期、秒级时间和滑轨，增加 5min／10min／30min／1h 滑动快捷选择；调整只修改草稿，点击“查询”提交，读取时保留原结果。
+- Pro $200 使用旧 20x 的真实周参考字段；分别计算 Token 与 API 等值比例，显示两口径参考范围，详情保留拆分。该范围不是置信区间，估算不影响官方额度。
+- 账号官方成功采样按账号在本机持久保存，重启恢复，支持任意已采集历史区间；采样不足、间断及跨重置如实标示，不增加官方请求。
+- 统计页宽度重新限制在列表列内，统一数字、语义色和对齐；优化切页及快捷选中动效，保留可打断、键盘和减少动态效果支持。
+- 安装、验证及分发摘要见 [v2.6.2 发布记录](docs/releases/v2.6.2.md)。
 
 ## v2.6.1 统计页与可靠性改进
 
@@ -52,7 +60,7 @@ python "$env:USERPROFILE\.codex\skills\.system\skill-installer\scripts\install-s
 
 ## 工作方式
 
-- 新版界面的初始数据和几何契约见 [`spec.md`](docs/quota-sidebar-v3/spec.md)，后续已确认的外观与动画以[当前设计方案](docs/codex-bar-proposal-20260926.html)为准；发布验证见 [v2.6.1 验证记录](docs/releases/v2.6.1.md)。官方模式沿用 Helper 校验后的真实额度窗口；原生单窗口数据仍可作为回退来源，未知窗口逐条呈现。
+- 新版界面的初始数据和几何契约见 [`spec.md`](docs/quota-sidebar-v3/spec.md)，后续已确认的外观与动画以[当前设计方案](docs/codex-bar-proposal-20260926.html)为准；发布验证见 [v2.6.2 验证记录](docs/releases/v2.6.2.md)。官方模式沿用 Helper 校验后的真实额度窗口；原生单窗口数据仍可作为回退来源，未知窗口逐条呈现。
 - 入口上沿按宿主头像实际矩形对齐，兼容宿主自身缩放；footer 在 `.sidebar-navigation` 中正常留位。弹层打开时按实测列表列宽取 `min(272px, 列宽 − 16px)`，不越出列表列，矮窗口可内部滚动。官方横线表示已用，高 2px，L2 方案填充至少 3px。浅色轨道 `#E2D8C4`、填充 `#8E4617`，额度数字字重 600；时间环为 10px/描边 2.75。深色填充结合宿主前景调亮，表面与文字优先使用宿主 token。
 - 折叠侧栏入口使用 20px 自绘仪表，1.33px 轮廓、三枚轻刻度与轴心，背景和图标色与宿主导航一致。指针显示官方剩余额度：左 0%、上 50%、右 100%；多窗口采用剩余最少者，悬停说明窗口。随现有刷新回包更新并平滑转动，不额外轮询；失败保留上次值，无数据隐藏指针。
 - 页面可见时使用唯一的自适应单次计时器：最近聚焦 5 分钟内每 2 分钟、聚焦后 5 分钟至 1 小时每 5 分钟、闲置 1–4 小时每 15 分钟、超过 4 小时每 30 分钟；若额度值刚发生变化则维持 5 分钟档。页面隐藏时立即停表，恢复可见或重新聚焦时按新鲜度补刷新。失败重试继续服从至少 60 秒及服务端 `Retry-After` 冷却，不监听键盘、不扫描进程或会话文件。
@@ -178,7 +186,17 @@ node --check native-patch\native_patch.js
 
 额度展开后的刷新按钮旁新增“本机用量”按钮，在原位置切换至统计页，复用现有可打断的展开、返回和收起动画，查询今日、本周（本地时区周一至今）或自选日期（含首尾）。官方额度仍保留在原额度页。只读本机 `sessions` 与 `archived_sessions` 的官方用量日志，按累计增量去重，分别显示输入、其中缓存、输出及总 token；不上传会话正文。统计可能包含本机不同账户或导入的历史记录，无法据此证明日志的物理设备来源，也不代表账户全量。
 
-周额度估算采用 [ModelDial](https://modeldial.com/subscriptions) 的 **Pro 200 新额度参考样本**：GPT-6 Astra 每周 4.38 亿 token，GPT-6.1 Sol 每周 23.54 亿 token。2026-10-27 核实这组值已被来源标为新额度，不再次减半；来源为 2026-10-05 Agent 负载研究，将月值归一为周，并非固定官方 token 上限。按各模型总 token 与参考总量的比例相加，不套 API 价格、不额外猜测缓存权重。无基准模型仅统计；没有记录时不生成百分比。基准未按当前套餐和账户切换时点校准，跨周期查询可超过 100%。
+周额度估算采用 [ModelDial 每周参考](https://modeldial.com/subscriptions?period=week&view=insights)：Plus 自动匹配；Pro $100／$200／$500 在“详情 → 估算依据”选择，通用 Pro 标签不能证明价格档位。$200 现使用旧 20x 参考，严格取源数据的周字段，不能将图表月值当周值。Token 与 API 分别按同一批模型的“用量 ÷ 对应周参考”相加，显示两口径的最小至最大参考范围；不平均、不叠加两者。范围不是置信区间，不保证真实扣量在内。缺少可比 API 基准时明确显示仅 Token 口径；无基准模型仅统计，无记录不伪造零。
+
+Helper 每 24 小时匿名检查公开页面，旧 20x 从同站有界静态数据读取周 Token／USD，不执行下载的脚本；持久记录成功／失败尝试，重启不绕过限频，不上传账户或日志。失败保留上次成功参考；旧档尚无成功缓存时明确使用已核实的 2026-10-30 快照，不借用新额度，也不伪装为刚更新。旧周参考和计算边界见[旧 Pro 20x 与双口径估算](docs/legacy-pro20x-20261030.md)。官方额度卡与账号实测保持原有数据来源。
+
+“区间”页支持任意起止日期时间（精确到秒）：开始／结束分别提供自绘日历、独立时间输入和独立滑轨。滑轨下方提供 `5min / 10min / 30min / 1h` 快捷切换，填写截至当前的最近时段；当前时长和“查询”单独一行，保留任意区间编辑。默认最近一小时只是初值，可改为日志覆盖内的任意区间；本机按 `(开始,结束]` 汇总，并显示周额度估算、token 和 API 等值。快捷切换、日期、时间、拖动及键盘调整均先修改草稿，统一点击“查询”提交；读取时按钮显示“读取中…”，保留上次结果及其区间，同一区间的重复在途点击不再排队。首次进入读取一次，此后切页复用结果，不增加官方请求。本机仍复用现有增量扫描，实际采样覆盖时间在比较结果下方单独展示。
+
+账号只取所选区间内的真实成功样本，至少两点才计算周额度百分点差，包含其他设备，不插值。采样按稳定账号摘要隔离，追加保存在安装目录的 `native-patch/account-usage-history/<匿名账号摘要>/UTC日期.jsonl`；仅有时间、周已用比例、重置时间与随机采样段标记，不含凭证、账号原始 ID 或会话正文，不上传。取消四小时裁剪，重启后恢复已采集历史；查询只读取所选日期及必要的边界日期，不全量载入历史。升级和卸载保留此数据目录。
+
+未覆盖完整起止点时标注“仅覆盖部分区间”；Helper 重启、账号切换或请求失败造成的采样段变化会显示“采样存在间断”。同周期已知端点可以给出明确标为部分覆盖的差值；跨重置或计数回落不拼接，损坏／不可读的所选记录保持未知。写入失败只提示历史保存失败，不让官方额度请求变成失败。仍不增加官方请求：仅记录原有成功 HTTP 结果，缓存重放不重复保存。开始采集前或从未采集的数据无法补回，不能靠任意时间输入生成历史。
+
+Pro 参考选择在当前 Helper 账号会话内记住；切换账号或重启 Helper 后重新确认，避免把另一账号的 Pro 档位带入。未选择时也可从“区间”直接进入选档。实现与本机验证见 [区间消耗验收记录](docs/recent-usage-20261028.md)。
 
 API 等值独立按 [OpenAI 价格](https://developers.openai.com/api/docs/pricing) 的 2026-10-27 Standard 短上下文单价折算普通输入、缓存读取、缓存写入和输出；未知写入保留时长时给出价格区间。未记录的写缓存、长上下文／加速／地区／工具附加费，以及历史调价，均不冒充已核实的实付金额。无价格模型明确未计价。此功能不恢复 API 登录或余额卡，也不以 API 等值推导官方周额度。
 

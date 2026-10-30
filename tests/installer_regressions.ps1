@@ -140,6 +140,12 @@ try {
     $scripts = Join-Path $caseRoot 'skill\scripts'
     $assets = Join-Path $caseRoot 'skill\assets\native-patch'
     New-Item -ItemType Directory -Path $scripts, $assets, (Join-Path $global:installerTest_destination 'native-patch') -Force | Out-Null
+    if ($global:installerTest_scenario -eq 'shortcut-create') {
+      $historyFixture = Join-Path $global:installerTest_destination 'native-patch\account-usage-history\fixture-account\2026-01-01.jsonl'
+      New-Item -ItemType Directory -Path (Split-Path -Parent $historyFixture) -Force | Out-Null
+      [IO.File]::WriteAllText($historyFixture, "retained history fixture`n", [Text.UTF8Encoding]::new($false))
+      $historyHash = (Get-FileHash -LiteralPath $historyFixture -Algorithm SHA256).Hash
+    }
     $shortcutPath = Join-Path $caseRoot 'launcher.lnk'
     $previousShortcut = $null
     if ($global:installerTest_scenario -in @('shortcut-target', 'shortcut-arguments', 'shortcut-working-directory', 'shortcut-existing', 'shortcut-rollback', 'skip-success')) {
@@ -236,6 +242,7 @@ function Restore-CodexOfficialShortcuts {
     }
     $officialExpected = if (($successExpected -and $global:installerTest_scenario -ne 'skip-success') -or $global:installerTest_scenario -eq 'official-undo-failure') { 'configured official shortcut' } else { 'original official shortcut' }
     Assert ((Get-Content -LiteralPath $global:installerTest_officialPath -Raw).Trim() -ceq $officialExpected) 'Official shortcut configuration or rollback was not preserved'
+    if ($global:installerTest_scenario -eq 'shortcut-create') { Assert ((Get-FileHash -LiteralPath $historyFixture -Algorithm SHA256).Hash -eq $historyHash) 'Upgrade changed persisted account history' }
     if ($successExpected -and $global:installerTest_scenario -ne 'skip-success') {
       Assert ($installOutput -match 'OfficialShortcutStatus\s*:\s*Configured') 'Official shortcut result was not reported'
     }
@@ -342,6 +349,7 @@ function Restore-CodexOfficialShortcuts {
       Assert (-not (Test-Path -LiteralPath $repairModulePath)) 'Uninstall retained the repair module after synchronized restoration'
       if ($global:installerTest_scenario -eq 'shortcut-create') {
         Assert ($global:installerTest_officialRestores -eq 1) 'Uninstall did not restore the official shortcut'
+        Assert ((Get-FileHash -LiteralPath $historyFixture -Algorithm SHA256).Hash -eq $historyHash) 'Uninstall removed or changed persisted account history'
         Assert (-not (Test-Path -LiteralPath $repairModulePath)) 'Uninstall retained the repair module after restoring shortcuts'
         Assert ($uninstallOutput -match 'OfficialShortcutsRestored\s*:\s*1') 'Uninstall did not report restored official shortcut'
         Assert ((Get-Content -LiteralPath $global:installerTest_officialPath -Raw).Trim() -ceq 'original official shortcut') 'Uninstall removed or failed to restore original official link'

@@ -811,9 +811,16 @@
     back.focus({preventScroll: true});
   };
 
-  // Reference totals are empirical Pro 200 samples, not official subscription limits.
-  const localUsageBaselines = new Map([["gpt-6-astra", 438000000], ["gpt-6.1-sol", 2354000000]]);
-  // OpenAI Standard short-context list prices, USD / 1M tokens, checked 2026-10-27.
+  // Only the helper's matched public references can produce a weekly estimate.
+  const localUsageBaselines = new Map();
+  const localApiBaselines = new Map();
+  let localReferencePlan="", localReferenceScope=globalThis.__codexQuotaSessionScope;
+  try {
+    const stored=JSON.parse(localStorage.getItem("codexQuotaReferencePlan") || "null");
+    if(stored?.scope===localReferenceScope) localReferencePlan=stored.plan;
+  } catch {}
+  if (!["pro100","pro200","pro500"].includes(localReferencePlan)) localReferencePlan="";
+  // OpenAI Standard short-context list prices, USD / 1M tokens, checked 2026-10-30.
   const localApiPrices = new Map([
     ["gpt-6-astra", [10, 1, 50, 12.5, 25]], ["gpt-6.1-sol", [2, .1, 10, 2.5, 5]],
     ["gpt-6.1-terra", [1, .05, 5, 1.25, 2.5]], ["gpt-6-luna", [.1, .01, .5, .125, .25]],
@@ -835,9 +842,24 @@
     const common = ordinary * rates[0] + row.cachedInputTokens * rates[1] + row.outputTokens * rates[2];
     return [(common + write * rates[3]) / 1e6, (common + write * rates[4]) / 1e6];
   };
+  const localQuotaEstimate = models => {
+    // Compare the same models: these two views describe one workload, not additive or independent evidence.
+    const covered=models.filter(row=>localUsageBaselines.has(row.model));
+    const token=covered.length ? covered.reduce((sum,row)=>sum+row.totalTokens/localUsageBaselines.get(row.model)*100,0) : null;
+    const priced=covered.map(row=>({row,cost:apiEquivalent(row)}));
+    const api=covered.length && priced.every(({row,cost})=>cost && localApiBaselines.has(row.model))
+      ? priced.reduce((sum,{row,cost})=>[sum[0]+cost[0]/localApiBaselines.get(row.model)*100,sum[1]+cost[1]/localApiBaselines.get(row.model)*100],[0,0]) : null;
+    return {token,api,range:token===null ? null : api ? [Math.min(token,api[0]),Math.max(token,api[1])] : [token,token],partial:covered.length<models.length};
+  };
+  const localPercent = value => value>0 && value<.01 ? "<0.01" : new Intl.NumberFormat(navigator.language,{maximumFractionDigits:2}).format(value);
+  const localEstimateText = estimate => {
+    if(!estimate.range)return "—";
+    const [low,high]=estimate.range.map(localPercent);return `≈ ${low}${low===high ? "" : `–${high}`}%`;
+  };
   const moneyText = value => value > 0 && value < .01 ? "<$0.01" : new Intl.NumberFormat(navigator.language,{style:"currency",currency:"USD",currencyDisplay:"narrowSymbol"}).format(value);
   const localDate = date => `${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,"0")}-${String(date.getDate()).padStart(2,"0")}`;
   let localUsageTimer, localUsageRequestId, localUsageSequence = 0;
+  const localPageNames = ["overview","daily","details","recent"];
   const numberText = value => new Intl.NumberFormat(navigator.language, {maximumFractionDigits: 0}).format(value);
   const compactLocalTokens = value => {
     const units = isChinese ? [[1e8,"亿"],[1e4,"万"]] : [[1e9,"B"],[1e6,"M"],[1e3,"K"]];
@@ -966,6 +988,8 @@
     }
     animateLocalLayout(panel, () => {
     panel.dataset.page = String(index);
+    panel.querySelector(".cq-interval-controls").hidden=index!==3;
+    panel.querySelector(".cq-interval-controls").cqPositionPresets?.();
     panel.querySelectorAll("[data-local-page]").forEach((button,i) => {
       button.setAttribute("aria-selected", String(i === index));button.tabIndex = i === index ? 0 : -1;
       if (focus && i === index) button.focus({preventScroll:true});
@@ -987,21 +1011,25 @@
       }
     });
     });
+    if(index===3 && !panel.cqIntervalRequested){panel.cqIntervalRequested=true;panel.cqAppliedInterval=panel.cqGetInterval(true);requestLocalUsage(panel);}
   };
   const arrangeLocalPages = panel => {
     const result = panel.querySelector(".cq-local-result"), reference = panel.querySelector(".cq-local-reference");
     const nodes = [...result.children];
-    const pages = ["overview","daily","details"].map((name,index)=>{
+    const pages = localPageNames.map((name,index)=>{
       const page=document.createElement("section");page.className="cq-local-page";page.id=`cq-local-page-${name}`;
       page.tabIndex=0;
       page.setAttribute("role","tabpanel");page.setAttribute("aria-labelledby",`cq-local-tab-${name}`);
       page.hidden=index!==Number(panel.dataset.page || 0);page.inert=page.hidden;page.setAttribute("aria-hidden",String(page.hidden));
       result.append(page);return page;
     });
-    for (const node of nodes) pages[node.matches(".cq-local-daily") ? 1 : node.matches(".cq-local-models,.cq-local-issues,.cq-local-excluded") ? 2 : 0].append(node);
+    for (const node of nodes) pages[node.matches(".cq-local-recent") ? 3 : node.matches(".cq-local-daily") ? 1 : node.matches(".cq-local-models,.cq-local-issues,.cq-local-excluded,.cq-local-estimate-methods") ? 2 : 0].append(node);
     if (reference) pages[2].append(reference);
     if (!pages[1].children.length) {
       const note=document.createElement("p");note.className="cq-local-page-note";note.textContent=words("读取完成后可查看每日用量", "Daily usage appears after reading logs");pages[1].append(note);
+    }
+    if (!pages[3].children.length) {
+      const note=document.createElement("p");note.className="cq-local-page-note";note.textContent=words("选择起止时间，查看区间消耗", "Choose start and end times to measure usage");pages[3].append(note);
     }
   };
   const showLocalPlaceholder = (panel, loading) => {
@@ -1025,7 +1053,7 @@
     const chart = addText("section", "cq-local-daily", "", result);
     chart.setAttribute("aria-label", words("每日 token 用量", "Daily token usage"));
     const heading = addText("div", "cq-local-chart-heading", "", chart);
-    addText("span", "", words("每日用量", "Daily usage"), heading);
+    const dayDate=addText("span", "cq-local-day-date", "", heading);
     if (!data.daily) {addText("p", "cq-local-day-note", words("每日明细暂不可用，请更新 Helper。", "Daily details unavailable; update the helper."),chart);return;}
     const navigation = addText("span", "cq-local-chart-nav", "", heading);
     const previous = addText("button", "", "", navigation), next = addText("button", "", "", navigation);
@@ -1061,7 +1089,7 @@
       positionSelection(shown);
       const day = days.get(date), tokens = dailyTotal(day);
       detail.replaceChildren();
-      addText("div", "cq-local-day-date", `${date.replaceAll("-",".")}${day?.partial ? words(" · 统计不完整", " · Incomplete") : ""}`, detail);
+      dayDate.textContent=`${date.replaceAll("-",".")}${day?.partial ? words(" · 统计不完整", " · Incomplete") : ""}`;
       const values = addText("div", "cq-local-day-values", "", detail);
       const token = addText("div", "", "", values), api = addText("div", "", "", values);
       const tokenValue = addText("strong", "", day?.eventCount ? compactLocalTokens(tokens).text : day?.partial ? words("暂不可用", "Unavailable") : words("无记录", "No records"), token);
@@ -1075,6 +1103,7 @@
       const apiLabel = addText("span", "", words("API 等值", "API equivalent"), api);
       const unpriced = (day?.models || []).filter(row=>!localApiPrices.has(row.model)).reduce((sum,row)=>sum+row.totalTokens,0);
       if (unpriced || day?.models.some(row=>row.cacheWriteKnown === false)) {
+        apiLabel.className="cq-local-partial";
         apiLabel.textContent = words("部分 API 等值", "Partial API eq.");
         costValue.title += words("；仅覆盖已有价格与计数", "; recorded counts with known prices only");
       }
@@ -1096,7 +1125,8 @@
       const visible = [];
       for (let index=pageStart;index<=pageEnd;index++) visible.push(localDayKey(index));
       const maximum = Math.max(0,...visible.map(date=>dailyTotal(days.get(date))));
-      pageLabel.textContent = `${localDayKey(pageStart).slice(5).replace("-",".")} – ${localDayKey(pageEnd).slice(5).replace("-",".")}`;
+      pageLabel.textContent = pageStart===pageEnd ? "" : `${localDayKey(pageStart).slice(5).replace("-",".")} – ${localDayKey(pageEnd).slice(5).replace("-",".")}`;
+      pageLabel.toggleAttribute("data-single",pageStart===pageEnd);
       addText("span", "", maximum ? `${compactLocalTokens(maximum).text} token` : words("无已知计数", "No recorded counts"), pageLabel);
       plot.style.gridTemplateColumns = `repeat(${visible.length},minmax(0,1fr))`;
       const bars=[];
@@ -1182,8 +1212,9 @@
     delete globalThis.__codexQuotaLocalUsageRange;
     delete globalThis.__codexQuotaUpdateLocalUsage;
   };
-  const requestLocalUsage = (panel, change = () => {}) => {
+  const requestLocalUsage = (panel, change = () => {}, applyDates = false) => {
     const form = panel.querySelector("form");
+    if(applyDates) {
     const today = localDate(new Date());
     for (const input of form.querySelectorAll("input")) {
       input.max = today;
@@ -1194,15 +1225,22 @@
     const start = form.elements.start.value, end = form.elements.end.value;
     if (!form.elements.end.validationMessage && start > end) form.elements.end.setCustomValidity(words("结束日期不能早于开始日期", "End date must not precede start date"));
     if (!form.reportValidity()) return;
+    panel.cqDateRange={start,end};
+    }
+    const {start,end}=panel.cqDateRange;
+    const interval=panel.cqAppliedInterval;
+    if(panel.dataset.page==="3" && !interval)return;
     panel.cqCloseCalendar?.(false);
     clearTimeout(localUsageTimer);
     localUsageRequestId = `local-${uiRevision}-${++localUsageSequence}-${Date.now()}`;
-    globalThis.__codexQuotaLocalUsageRange = {start, end};
+    if(localReferenceScope!==globalThis.__codexQuotaSessionScope) {localReferencePlan="";localReferenceScope=globalThis.__codexQuotaSessionScope;}
+    globalThis.__codexQuotaLocalUsageRange = {start, end, ...interval, ...(localReferencePlan ? {referencePlan:localReferencePlan} : {})};
     const result = panel.querySelector(".cq-local-result");
     animateLocalLayout(panel,()=>{
       change();
       if (!result.dataset.loaded) showLocalPlaceholder(panel,true);
       result.setAttribute("aria-busy", "true");
+      const query=panel.querySelector('.cq-interval-actions button');query.textContent=words("读取中…", "Reading…");query.setAttribute("aria-busy","true");
       panel.querySelector(".cq-local-estimate-tag").textContent=words("读取中", "Reading");
       panel.querySelector(".cq-local-status").setAttribute("data-cq-quiet", "");
       panel.querySelector(".cq-local-status").textContent = words("正在读取本机日志…", "Reading local logs…");
@@ -1217,8 +1255,10 @@
     clearTimeout(localUsageTimer);
     const result = panel.querySelector(".cq-local-result"), status = panel.querySelector(".cq-local-status");
     result.setAttribute("aria-busy", "false");
+    const query=panel.querySelector('.cq-interval-actions button');query.textContent=words("查询", "Apply");query.setAttribute("aria-busy","false");
     const range = globalThis.__codexQuotaLocalUsageRange;
     const valid = data && !data.errorCode && data.start === range?.start && data.end === range?.end &&
+      (!range.intervalStart || data.interval?.start===range.intervalStart && data.interval?.end===range.intervalEnd) &&
       validLocalModels(data.models) &&
       Number.isSafeInteger(data.eventCount) && data.eventCount >= 0 && typeof data.partial === "boolean" &&
       validLocalIssues(data.issues) && validLocalDaily(data);
@@ -1227,6 +1267,7 @@
       if (!result.dataset.loaded) showLocalPlaceholder(panel,false);
       panel.querySelector(".cq-local-estimate-tag").textContent=words("估算", "Estimate");
       status.removeAttribute("data-cq-quiet");
+      status.setAttribute("data-cq-warning", "");
       status.textContent = result.dataset.loaded ? words("读取失败；保留上次结果，请重试。", "Read failed; previous results retained. Retry.")
         : words("暂不可用，请重试；旧版 Helper 可能需要更新。", "Unavailable; retry or update the helper.");
       });
@@ -1238,31 +1279,141 @@
     animateLocalLayout(panel, () => {
     panel.querySelector(".cq-local-estimate-tag").textContent=words("估算", "Estimate");
     const reference=panel.querySelector(".cq-local-reference");
+    {
+      const source=data.reference || {models:null,status:"unavailable",selectedPlan:null,planName:""}, entries=source.models && typeof source.models==="object" && !Array.isArray(source.models) ? Object.entries(source.models) : [];
+      const apiEntries=source.apiModels && typeof source.apiModels==='object' && !Array.isArray(source.apiModels) ? Object.entries(source.apiModels) : [];
+      const validReference=["ok","stale","snapshot","needs_plan","unavailable"].includes(source.status) &&
+        [null,"plus","pro100","pro200","pro500"].includes(source.selectedPlan) &&
+        (source.selectedPlan!=='pro200' || source.referenceKind==='legacy20x') &&
+        entries.length<=16 && entries.every(([model,tokens])=>/^gpt-[a-z0-9.-]{1,60}$/.test(model) && Number.isFinite(tokens) && tokens>0 && tokens<1e14) &&
+        (source.apiModels==null || typeof source.apiModels==='object' && !Array.isArray(source.apiModels) && apiEntries.length<=16 && apiEntries.every(([model,usd])=>entries.some(([name])=>name===model) && Number.isFinite(usd) && usd>0 && usd<1e9)) &&
+        (source.referenceCheckFailed==null || typeof source.referenceCheckFailed==='boolean');
+      localUsageBaselines.clear();localApiBaselines.clear();
+      if(validReference) {for(const [model,tokens] of entries) localUsageBaselines.set(model,tokens);for(const [model,usd] of apiEntries)localApiBaselines.set(model,usd);}
+      const weekly=reference.querySelector(".cq-local-weekly-reference"), table=weekly.querySelector("dl");
+      table.replaceChildren();
+      table.hidden=!localUsageBaselines.size;
+      const label={plus:"Plus",pro100:"Pro $100",pro200:"Pro 20x",pro500:"Pro $500"}[source.selectedPlan];
+      weekly.querySelector("strong").textContent=label ? words(`${label} 周参考`, `${label} weekly reference`) : words("周额度参考", "Weekly reference");
+      weekly.querySelector('.cq-local-reference-heading > span').textContent=localApiBaselines.size ? 'Token / USD' : 'token';
+      for(const [model,tokens] of localUsageBaselines) {
+        const row=document.createElement("div"),name=document.createElement("dt"),value=document.createElement("dd");
+        name.textContent=model.replace(/^gpt-/,"GPT-");value.textContent=compactLocalTokens(tokens).text;value.title=`${numberText(tokens)} token`;row.append(name,value);
+        if(localApiBaselines.has(model)){row.dataset.dual="";const api=document.createElement('dd');api.textContent=moneyText(localApiBaselines.get(model));api.title=words('每周 API 等值参考','Weekly API-equivalent reference');row.append(api);}
+        table.append(row);
+      }
+      const select=weekly.querySelector("select");select.hidden=source.planName!=="pro";select.value=localReferencePlan;
+      const note=weekly.querySelector(".cq-local-reference-status");
+      note.textContent=!validReference || source.status==="unavailable" ? words("参考数据暂不可用，次日自动重试。", "References unavailable; retries tomorrow.")
+        :source.status==="needs_plan" ? ""
+        :source.status==="snapshot" ? source.referenceCheckFailed ? words("旧档检查失败；使用参考快照", "Legacy check failed; using snapshot") : words("旧 20x 参考快照", "Legacy 20x reference snapshot")
+        :source.status==="stale" ? words("更新失败；保留上次成功基准。", "Update failed; previous references retained.") : "";
+      note.toggleAttribute('data-cq-warning',source.status==='stale' || Boolean(source.referenceCheckFailed));
+      const link=weekly.querySelector("a");link.href="https://modeldial.com/subscriptions?period=week&view=insights";
+      link.textContent=releaseDate(source.lastSuccessAt) ? `ModelDial · ${words("已核对", "Checked")} ${new Date(source.lastSuccessAt).toLocaleDateString()}`
+        : /^\d{4}-\d\d-\d\d$/.test(source.referenceSnapshotAt || '') ? `ModelDial · ${source.referenceSnapshotAt}` : "ModelDial";
+      link.title=[releaseDate(source.lastSuccessAt) ? words(`上次成功 ${new Date(source.lastSuccessAt).toLocaleString()}`, `Last success ${new Date(source.lastSuccessAt).toLocaleString()}`) : "",releaseDate(source.nextCheckAt) ? words(`下次检查 ${new Date(source.nextCheckAt).toLocaleString()}`, `Next check ${new Date(source.nextCheckAt).toLocaleString()}`) : ""].filter(Boolean).join(" · ");
+    }
     panel.append(reference);
     result.replaceChildren();
     const totals = data.models.reduce((sum,row) => ({input:sum.input+row.inputTokens, cache:sum.cache+row.cachedInputTokens,
       output:sum.output+row.outputTokens, tokens:sum.tokens+row.totalTokens}), {input:0,cache:0,output:0,tokens:0});
     const covered = data.models.filter(row => localUsageBaselines.has(row.model));
     const excluded = data.models.filter(row => !localUsageBaselines.has(row.model)).reduce((sum,row) => sum+row.totalTokens,0);
-    const estimate = covered.reduce((sum,row) => sum+row.totalTokens/localUsageBaselines.get(row.model)*100,0);
+    const estimate=localQuotaEstimate(data.models);
     const priced = data.models.map(row => ({row,cost:apiEquivalent(row)})).filter(item => item.cost);
     const cost = priced.reduce((sum,item)=>[sum[0]+item.cost[0],sum[1]+item.cost[1]],[0,0]);
     const unpriced = data.models.filter(row => !localApiPrices.has(row.model)).reduce((sum,row)=>sum+row.totalTokens,0);
     const issues = data.issues || [];
     const addText = (tag, className, text, parent = result) => {const node = document.createElement(tag); node.className = className; node.textContent = text; parent.append(node); return node;};
+    const recent = addText("section", "cq-local-recent", "");
+    recent.setAttribute("aria-label",words("区间周额度消耗", "Interval weekly consumption"));
+    if(data.reference?.status==="needs_plan" && data.reference.planName==="pro") {
+      const choosePlan=addText("button","cq-local-recent-plan",words("选择 Pro 套餐", "Choose Pro tier"),recent);
+      choosePlan.type="button";choosePlan.onclick=()=>{reference.open=true;selectLocalPage(panel,2,true);reference.querySelector("select").focus({preventScroll:true});};
+    }
+    const row = data.interval;
+    const historyErrors={HISTORY_WRITE_FAILED:words("历史保存失败", "History could not be saved"),HISTORY_READ_FAILED:words("历史暂不可读", "History could not be read"),HISTORY_CORRUPT:words("历史记录损坏", "History contains damaged records")};
+    const validInterval = row && releaseDate(row.start) && releaseDate(row.end) && Date.parse(row.start)<Date.parse(row.end) &&
+      validLocalModels(row.local?.models) && Number.isSafeInteger(row.local.eventCount) && row.local.eventCount>=0 &&
+      typeof row.local.partial==="boolean" && row.account &&
+      ["ok","partial","insufficient_history","reset","counter_decreased","unavailable"].includes(row.account.status) &&
+      (row.account.hasGaps==null || typeof row.account.hasGaps==="boolean") &&
+      (row.account.historyError==null || Object.hasOwn(historyErrors,row.account.historyError)) &&
+      (row.account.usedPercent===null || Number.isFinite(row.account.usedPercent) && row.account.usedPercent>=0 && row.account.usedPercent<=100) &&
+      (!["ok","partial"].includes(row.account.status) || row.account.usedPercent!==null && releaseDate(row.account.sampledStartAt) && releaseDate(row.account.sampledEndAt) &&
+        Date.parse(row.account.sampledStartAt)>=Date.parse(row.start) && Date.parse(row.account.sampledStartAt)<Date.parse(row.account.sampledEndAt) && Date.parse(row.account.sampledEndAt)<=Date.parse(row.end));
+    const intervalEstimate=validInterval ? localQuotaEstimate(row.local.models) : null;
+    if (validInterval) {
+      const stamp=value=>new Date(value).toLocaleString(navigator.language,{year:"numeric",month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit",second:"2-digit",hour12:false});
+      const intervalStamp=(start,end)=>new Date(start).toDateString()===new Date(end).toDateString()
+        ? `${stamp(start)} — ${new Date(end).toLocaleTimeString(navigator.language,{hour:"2-digit",minute:"2-digit",second:"2-digit",hour12:false})}`
+        : `${stamp(start)} — ${stamp(end)}`;
+      const intervalLabel=addText("p","cq-local-interval-range",intervalStamp(row.start,row.end),recent);
+      intervalLabel.title=`${row.start} — ${row.end}`;
+      const values=addText("div","cq-local-recent-row","",recent);
+      const local=addText("div","cq-local-recent-local","",values);
+      addText("span","cq-local-metric-label",words("本机估算", "Local estimate"),local);
+      const known=row.local.models.filter(model=>localUsageBaselines.has(model.model));
+      const percent=value=>`${value>0 && value<.01 ? "<0.01" : new Intl.NumberFormat(navigator.language,{maximumFractionDigits:2}).format(value)}%`;
+      const intervalValue=addText("strong","",localEstimateText(intervalEstimate),local);
+      intervalValue.toggleAttribute('data-range',Boolean(intervalEstimate.api));
+      intervalValue.title=intervalEstimate.token===null ? '' : `Token ${percent(intervalEstimate.token)}${intervalEstimate.api ? ` · API ${percent(intervalEstimate.api[0])}–${percent(intervalEstimate.api[1])}` : words(' · 仅 Token 口径',' · Token only')}`;
+      if(intervalEstimate.token!==null && !intervalEstimate.api)addText('small','',words('仅 Token 口径','Token only'),local);
+      const tokens=row.local.models.reduce((sum,model)=>sum+model.totalTokens,0);
+      addText("small","",row.local.eventCount ? `${compactLocalTokens(tokens).text} token` : words("无记录", "No records"),local).title=`${numberText(tokens)} token`;
+      if(row.local.partial || known.length>0 && known.length<row.local.models.length) addText("small","cq-local-partial",words("部分统计", "Partial coverage"),local);
+      const priced=row.local.models.map(apiEquivalent).filter(Boolean);
+      if(priced.length) {
+        const cost=priced.reduce((sum,value)=>[sum[0]+value[0],sum[1]+value[1]],[0,0]);
+        addText("small","",`API ≈ ${moneyText(cost[0])}${cost[1]>cost[0] ? ` – ${moneyText(cost[1])}` : ""}`,local);
+        if(priced.length<row.local.models.length || row.local.models.some(model=>model.cacheWriteKnown===false))
+          addText("small","cq-interval-api-coverage",words("API 未完整计价", "Partial API pricing"),local).title=words("无价格模型未计价；写缓存计数缺失时等值可能偏低。", "Unpriced models excluded; missing cache-write counts may understate API equivalent.");
+      } else if(row.local.models.length) addText("small","",words("API 未计价", "API not priced"),local);
+      const account=addText("div","cq-local-recent-account","",values);
+      addText("span","cq-local-metric-label",words("账号实测", "Account measured"),account);
+      const actual=["ok","partial"].includes(row.account.status) && row.account.usedPercent!==null;
+      addText("strong","",actual ? percent(row.account.usedPercent) : "—",account);
+      const states={insufficient_history:words("该区间采样不足", "Insufficient interval samples"),reset:words("跨重置周期", "Reset crossed"),counter_decreased:words("额度已校正", "Counter corrected"),unavailable:historyErrors[row.account.historyError] || words("历史暂不可用", "History unavailable")};
+      addText("small","",actual ? row.account.status==="partial" ? words("仅覆盖部分区间", "Partial interval only") : words("完整覆盖", "Full coverage") : states[row.account.status],account);
+      if(actual && row.account.status==="partial") {
+        const coverage=addText("p","cq-interval-coverage","",recent);
+        addText("span","",words("实测覆盖", "Measured coverage"),coverage);
+        addText("span","cq-interval-sampled-range",intervalStamp(row.account.sampledStartAt,row.account.sampledEndAt),coverage);
+      }
+      account.toggleAttribute("data-cq-warning",row.account.status!=="ok" || Boolean(row.account.hasGaps || row.account.historyError));
+      if(row.account.hasGaps)addText("small","cq-history-gap",words("采样存在间断", "Sampling has gaps"),account);
+      if(row.account.historyError && row.account.status!=="unavailable")addText("small","cq-history-feedback",historyErrors[row.account.historyError],account);
+      if(releaseDate(row.account.coverageStartAt) && releaseDate(row.account.coverageEndAt))
+        account.title=words(`已有账号采样：${stamp(row.account.coverageStartAt)} — ${stamp(row.account.coverageEndAt)}`,`Available account samples: ${stamp(row.account.coverageStartAt)} — ${stamp(row.account.coverageEndAt)}`);
+    } else addText("p","cq-local-page-note",words("区间结果暂不可用，请查询有效起止时间。", "Interval unavailable; apply valid start and end times."),recent);
     const dateLabel = addText("p", "cq-local-range-label", data.start === data.end ? data.start.replaceAll("-", ".")
       : `${data.start.replaceAll("-", ".")} – ${(data.start.slice(0,4) === data.end.slice(0,4) ? data.end.slice(5) : data.end).replaceAll("-", ".")}`);
     dateLabel.title = `${data.start} — ${data.end}`;
     const highlights = addText("div", "cq-local-highlights", "");
-    move(highlights,{opacity:[.65,1]},{duration:.14},()=>highlights.style.removeProperty("opacity"));
     const estimateRow = addText("div", "cq-local-estimate", "", highlights);
     addText("span", "cq-local-metric-label", words("周额度估算", "Weekly estimate"), estimateRow);
     const estimated = addText("strong", "", "", estimateRow);
-    if (covered.length) {
+    if (estimate.range) {
       addText("span", "cq-local-value-unit", "≈ ", estimated);
-      addText("span", "cq-local-value-number", estimate > 0 && estimate < .01 ? "<0.01" : new Intl.NumberFormat(navigator.language,{maximumFractionDigits:2}).format(estimate), estimated);
-      addText("span", "cq-local-value-unit", "%", estimated);
+      const [low,high]=estimate.range.map(localPercent);
+      const lower=addText('span','cq-local-estimate-bound','',estimated);
+      addText("span", "cq-local-value-number",low,lower);
+      let upper=lower;
+      if(low!==high){estimated.dataset.range="";addText("span","cq-local-value-unit","–",lower);upper=addText('span','cq-local-estimate-bound','',estimated);addText("span","cq-local-value-number",high,upper);}
+      addText("span", "cq-local-value-unit", "%", upper);
+      if(!estimate.api)addText('small','cq-local-estimate-note',words('仅 Token 口径','Token only'),estimateRow);
+      else if(estimate.partial)addText('small','cq-local-estimate-note cq-local-partial',words('部分模型','Partial models'),estimateRow);
     } else {estimated.textContent = words("未折算", "Not estimated");estimated.dataset.unavailable = "";}
+    const methods=addText('details','cq-local-estimate-methods','');
+    const methodsSummary=addText('summary','',words('估算拆分','Estimate breakdown'),methods);methodsSummary.append(toolIcon('back','cq-local-detail-arrow'));
+    for(const [scope,part] of [[dateLabel.textContent,estimate],...(intervalEstimate ? [[words('区间','Interval'),intervalEstimate]] : [])]) {
+      addText('p','cq-local-method-scope',scope,methods);
+      const methodValues=addText('dl','cq-local-method-values','',methods);
+      for(const [label,value] of [['Token',part.token===null ? '—' : `≈ ${localPercent(part.token)}%`],['API',part.api ? `≈ ${localPercent(part.api[0])}${localPercent(part.api[0])===localPercent(part.api[1]) ? '' : `–${localPercent(part.api[1])}`}%` : '—']]) {
+        const pair=addText('div','','',methodValues);addText('dt','',label,pair);addText('dd','',value,pair);
+      }
+    }
     const costRow = addText("div", "cq-local-cost", "", highlights);
     addText("span", "cq-local-metric-label", words("API 等值", "API equivalent"), costRow);
     const costValue = addText("strong", "", "", costRow);
@@ -1325,17 +1476,16 @@
       meter.setAttribute("aria-label",`${name} · ${words("占本机区间 token", "Share of local range tokens")}`);
       if(share!==null){meter.setAttribute("aria-valuemin","0");meter.setAttribute("aria-valuemax","100");meter.setAttribute("aria-valuenow",String(share));}
       const fill=addText("i", "", "", meter);fill.hidden=!share;fill.style.width=(share || 0)+"%";
-      fill.dataset.modelTone=row.model==="gpt-6-astra" ? "warm" : row.model==="gpt-6.1-sol" ? "sage" : "slate";
       const percent=addText("span", "cq-local-model-share", share===null ? "—" : `${share>0 && share<.1 ? "<0.1" : new Intl.NumberFormat(navigator.language,{maximumFractionDigits:1}).format(share)}%`, line);
       percent.title=words("占所选区间本机 token 的比例", "Share of local tokens in the selected range");
     }
     const sameCoverage = excluded > 0 && data.models.every(row => localUsageBaselines.has(row.model) === localApiPrices.has(row.model));
-    if (sameCoverage) addText("p", "cq-local-excluded", words(`其他模型 ${numberText(excluded)} token：无周基准与 API 价格，未折算。`,
-      `Other models: ${numberText(excluded)} tokens without a weekly reference or API price; excluded from estimates.`), breakdown);
+    if (sameCoverage) addText("p", "cq-local-excluded", words(`未折算／计价 · ${compactLocalTokens(excluded).text} token`,
+      `Not estimated / priced · ${compactLocalTokens(excluded).text} tokens`), breakdown).title=words(`${numberText(excluded)} token：无周基准与 API 价格。`, `${numberText(excluded)} tokens without a weekly reference or API price.`);
     else {
-      if (excluded) addText("p", "cq-local-excluded", words(`其他模型 ${numberText(excluded)} token：无参考基准，未折算。`,
-        `Other models: ${numberText(excluded)} tokens without a reference; excluded.`), breakdown);
-      if (unpriced) addText("p", "cq-local-excluded", words(`${numberText(unpriced)} token 缺少 API 价格，未计价。`, `${numberText(unpriced)} tokens without API prices were excluded from cost.`), breakdown);
+      if (excluded) addText("p", "cq-local-excluded", words(`未折算 · ${compactLocalTokens(excluded).text} token`,
+        `Not estimated · ${compactLocalTokens(excluded).text} tokens`), breakdown).title=words(`${numberText(excluded)} token：无周参考基准。`, `${numberText(excluded)} tokens without a weekly reference.`);
+      if (unpriced) addText("p", "cq-local-excluded", words(`未计价 · ${compactLocalTokens(unpriced).text} token`, `Not priced · ${compactLocalTokens(unpriced).text} tokens`), breakdown).title=words(`${numberText(unpriced)} token：无 API 价格。`, `${numberText(unpriced)} tokens without API prices.`);
     }
     const missing = issues.filter(issue => issue.affectsTotals);
     status.textContent = data.partial ? `${words("统计不完整", "Incomplete")}: ${missing.length ? missing.map(issue => `${localIssueLabels[issue.code]} ${numberText(issue.count)}`).join(" · ")
@@ -1343,6 +1493,7 @@
       : !data.eventCount ? words("该区间未找到可统计的官方用量记录。", "No countable official usage records in this range.")
       : words("仅本机日志；估算未按本账号校准。", "Local logs only; estimate not calibrated to this account.");
     status.toggleAttribute("data-cq-quiet", !data.partial && data.eventCount > 0);
+    status.toggleAttribute("data-cq-warning", data.partial);
     if (issues.length) {
       const details = addText("details", "cq-local-issues", "");
       const summary = addText("summary", "", words("统计说明", "Coverage details"), details);
@@ -1353,7 +1504,7 @@
     });
   };
   const installLocalCalendar = panel => {
-    const form=panel.querySelector("form"), popup=panel.parentElement;
+    let form=panel.querySelector("form");const popup=panel.parentElement;
     const calendar=document.createElement("div");calendar.className="cq-local-calendar";calendar.hidden=true;
     calendar.setAttribute("role","dialog");calendar.setAttribute("aria-labelledby","cq-calendar-title");
     calendar.innerHTML='<div class="cq-calendar-heading"><button type="button" data-month="-1"></button><strong id="cq-calendar-title" aria-live="polite"></strong><button type="button" data-month="1"></button></div><div class="cq-calendar-grid" role="grid" aria-labelledby="cq-calendar-title"></div><div class="cq-calendar-footer"><button type="button" data-today></button><button type="button" data-close></button></div>';
@@ -1371,12 +1522,12 @@
     panel.cqCloseCalendar=close;
     panel.cqPositionCalendar=()=>{
       if(calendar.hidden)return;
-      const field=active.closest("label").getBoundingClientRect(),area=form.getBoundingClientRect(),box=popup.getBoundingClientRect();
+      const field=(active.closest('.cq-interval-endpoint') ? active : active.closest("label")).getBoundingClientRect(),area=form.getBoundingClientRect(),box=popup.getBoundingClientRect();
       const top=Math.max(box.top+8,Math.min(field.bottom+4,box.bottom-32-calendar.offsetHeight));
       calendar.style.top=(top-area.top)+"px";
     };
     const select=index=>{
-      active.value=localDayKey(index);active.dispatchEvent(new Event("input",{bubbles:true}));close();
+      active.value=localDayKey(index);active.dispatchEvent(new Event("input",{bubbles:true}));active.dispatchEvent(new Event("change",{bubbles:true}));close();
     };
     const grid=calendar.querySelector('[role="grid"]');
     const draw=(focus=false)=>{
@@ -1425,24 +1576,107 @@
     const today=calendar.querySelector("[data-today]"),dismiss=calendar.querySelector("[data-close]");
     today.textContent=words("今天","Today");today.onclick=()=>select(localDayIndex(localDate(new Date())));
     dismiss.textContent=words("关闭","Close");dismiss.onclick=()=>close();
-    for(const button of form.querySelectorAll("[data-date-field]")){
+    for(const button of panel.querySelectorAll("[data-date-field]")){
       button.setAttribute("aria-haspopup","dialog");button.setAttribute("aria-expanded","false");
-      button.setAttribute("aria-label",button.dataset.dateField==="start"?words("选择开始日期","Choose start date"):words("选择结束日期","Choose end date"));
+      button.setAttribute("aria-label",["start","intervalStart"].includes(button.dataset.dateField)?words("选择开始日期","Choose start date"):words("选择结束日期","Choose end date"));
       button.append(toolIcon("calendar",""));
       const open=()=>{
-        const input=form.elements[button.dataset.dateField];
+        const input=button.closest('form').elements[button.dataset.dateField];
         if(!calendar.hidden && active===input){close();return;}
-        close(false);active=input;const [min,max]=bounds(), value=localDayIndex(input.value);
+        close(false);form=input.form;form.append(calendar);active=input;const [min,max]=bounds(), value=localDayIndex(input.value);
         focusDay=Math.max(min,Math.min(max,Number.isFinite(value)?value:max));month=monthStart(focusDay);
         calendar.hidden=false;button.setAttribute("aria-expanded","true");draw(true);
         move(calendar,{opacity:[.6,1]},{duration:.12},()=>calendar.style.removeProperty("opacity"));
       };
       button.onclick=open;
-      form.elements[button.dataset.dateField].onkeydown=event=>{if(event.key==='ArrowDown'){event.preventDefault();open();}};
+      button.closest('form').elements[button.dataset.dateField].onkeydown=event=>{if(event.key==='ArrowDown'){event.preventDefault();open();}};
     }
     panel.addEventListener("keydown",event=>{if(event.key==='Escape'&&!calendar.hidden){event.preventDefault();event.stopPropagation();close();}});
     panel.addEventListener("pointerdown",event=>{if(!calendar.hidden&&!calendar.contains(event.target)&&!event.target.closest('[data-date-field]'))close(false);});
     panel.addEventListener("focusout",event=>{if(event.relatedTarget&&!form.contains(event.relatedTarget))close(false);});
+  };
+  const installIntervalControls = panel => {
+    const form=panel.querySelector(".cq-interval-controls"), inputs=[form.elements.intervalStart,form.elements.intervalEnd], times=[form.elements.intervalStartTime,form.elements.intervalEndTime], sliders=[...form.querySelectorAll('[type="range"]')];
+    const format=date=>`${localDate(date)} ${String(date.getHours()).padStart(2,"0")}:${String(date.getMinutes()).padStart(2,"0")}:${String(date.getSeconds()).padStart(2,"0")}`;
+    const parse=text=>{
+      const match=/^(\d{4})-(\d\d)-(\d\d)[ T](\d\d):(\d\d)(?::(\d\d))?$/.exec(text.trim());
+      if(!match)return null;
+      const [,year,month,day,hour,minute,second="00"]=match, date=new Date(+year,+month-1,+day,+hour,+minute,+second);
+      return format(date)===`${year}-${month}-${day} ${hour}:${minute}:${second}` && +year>=2022 ? date : null;
+    };
+    const now=new Date(Math.floor(Date.now()/1000)*1000);
+    const set=(index,date)=>{inputs[index].value=localDate(date);times[index].value=format(date).slice(11);};
+    set(0,new Date(now.getTime()-3600000));set(1,now);
+    inputs.forEach((input,index)=>{
+      input.min="2022-01-01";input.max=localDate(now);input.title=words("本地日期", "Local date");
+      form.querySelector(`label[for="${input.id}"]`).textContent=index ? words("结束", "End") : words("开始", "Start");
+      times[index].setAttribute("aria-label",index ? words("结束时间", "End time") : words("开始时间", "Start time"));
+    });
+    form.querySelector('[type="submit"]').textContent=words("查询", "Apply");
+    form.setAttribute("aria-label",words("本地时间区间", "Interval in local time"));
+    sliders.forEach((slider,index)=>slider.setAttribute("aria-label",index ? words("区间结束", "Interval end") : words("区间开始", "Interval start")));
+    const presets=form.querySelector('.cq-interval-presets'), marker=document.createElement('span');
+    marker.className='cq-interval-preset-marker';marker.hidden=true;marker.setAttribute('aria-hidden','true');presets.append(marker);
+    presets.setAttribute('aria-label',words('快捷时长','Quick duration'));
+    let selectedPreset=-1, markerTarget='';
+    const positionPreset=(animated=false)=>{
+      const target=presets.querySelector('[aria-pressed="true"]');
+      if(!target || !presets.getClientRects().length){stopMotion(marker);marker.hidden=true;return;}
+      const area=presets.getBoundingClientRect(),box=target.getBoundingClientRect(),scale=area.width/presets.offsetWidth;
+      const width=box.width/scale+'px',transform=`translateX(${(box.left-area.left)/scale}px)`;
+      if(!marker.hidden && marker.style.width===width && markerTarget===transform)return;
+      const current=getComputedStyle(marker).transform, shown=!marker.hidden;stopMotion(marker);marker.hidden=false;marker.style.width=width;markerTarget=transform;
+      if(animated && shown)move(marker,{transform:[current,transform]},{duration:.2,ease:[.2,.8,.2,1]});else marker.style.transform=transform;
+    };
+    form.cqPositionPresets=()=>positionPreset();
+    const presetButtons=[5,10,30,60].map((minutes,index)=>{
+      const button=document.createElement('button');button.type='button';button.dataset.intervalMinutes=String(minutes);button.textContent=minutes===60?'1h':minutes+'min';
+      button.setAttribute('aria-pressed','false');button.setAttribute('aria-label',minutes===60?words('最近一小时','Last hour'):words(`最近 ${minutes} 分钟`,`Last ${minutes} minutes`));
+      button.onclick=()=>{panel.cqCloseCalendar?.(false);const end=new Date(Math.floor(Date.now()/1000)*1000);set(0,new Date(end.getTime()-minutes*60000));set(1,end);sync();};
+      button.onkeydown=event=>{let next=index;if(event.key==='ArrowLeft')next=Math.max(0,index-1);else if(event.key==='ArrowRight')next=Math.min(3,index+1);else if(event.key==='Home')next=0;else if(event.key==='End')next=3;else return;event.preventDefault();presetButtons[next].focus({preventScroll:true});presetButtons[next].click();};
+      presets.append(button);return button;
+    });
+    const read=(report=false)=>{
+      const dates=inputs.map((input,index)=>parse(`${input.value.trim()} ${times[index].value.trim()}`));
+      inputs.forEach((input,index)=>{
+        input.setCustomValidity(parse(`${input.value.trim()} 00:00:00`) ? "" : words("请输入有效日期", "Enter a valid date"));
+        times[index].setCustomValidity(dates[index] && dates[index].getTime()<=Date.now() ? "" : words("请输入有效时间，不得晚于现在", "Enter a valid time, no later than now"));
+      });
+      if(dates.every(Boolean) && dates[0]>=dates[1])inputs[1].setCustomValidity(words("结束时间必须晚于开始时间", "End must be later than start"));
+      if(![...inputs,...times].every(input=>input.validity.valid)){if(report)form.reportValidity();return null;}
+      return dates;
+    };
+    let lower,upper;
+    const paint=()=>{
+      const values=sliders.map(slider=>Number(slider.value));
+      sliders.forEach((slider,index)=>slider.setAttribute("aria-valuetext",format(new Date(values[index]*1000))));
+      const seconds=values[1]-values[0];
+      form.querySelector("output").textContent=new Intl.NumberFormat(navigator.language,{maximumFractionDigits:2}).format(seconds>=3600 ? seconds/3600 : seconds/60)+ (seconds>=3600 ? words(" 小时", " h") : words(" 分钟", " min"));
+      const next=[300,600,1800,3600].indexOf(seconds);
+      if(next!==selectedPreset){selectedPreset=next;presetButtons.forEach((button,index)=>button.setAttribute('aria-pressed',String(index===next)));positionPreset(true);}
+    };
+    const sync=(dates=read())=>{
+      if(!dates)return;
+      const first=new Date(dates[0]),last=new Date(dates[1]);first.setHours(0,0,0,0);last.setHours(23,59,59,0);
+      lower=first.getTime()/1000;upper=Math.min(Math.floor(Date.now()/1000),last.getTime()/1000);
+      sliders.forEach((slider,index)=>{slider.min=String(lower);slider.max=String(upper);slider.value=String(dates[index].getTime()/1000);});paint();
+    };
+    for(const input of [...inputs,...times]){input.oninput=()=>[...inputs,...times].forEach(field=>field.setCustomValidity(""));input.onchange=()=>sync();}
+    sliders.forEach((slider,index)=>{
+      slider.oninput=()=>{
+        slider.value=String(index ? Math.max(Number(slider.value),Number(sliders[0].value)+1) : Math.min(Number(slider.value),Number(sliders[1].value)-1));
+        set(index,new Date(Number(slider.value)*1000));[...inputs,...times].forEach(input=>input.setCustomValidity(""));paint();
+      };
+    });
+    panel.cqGetInterval=report=>{const dates=read(report);return dates ? {intervalStart:dates[0].toISOString(),intervalEnd:dates[1].toISOString()} : null;};
+    form.onsubmit=event=>{
+      event.preventDefault();const dates=read(true);if(!dates)return;sync(dates);
+      const range=globalThis.__codexQuotaLocalUsageRange;
+      if(form.querySelector('[type="submit"]').getAttribute('aria-busy')==='true' && dates[0].toISOString()===range?.intervalStart && dates[1].toISOString()===range?.intervalEnd)return;
+      panel.cqAppliedInterval={intervalStart:dates[0].toISOString(),intervalEnd:dates[1].toISOString()};
+      requestLocalUsage(panel);
+    };
+    sync();
   };
   const openLocalUsage = opener => {
     const popup = document.getElementById("codex-quota-popover"), host = opener?.closest(`.${compactClass}`);
@@ -1458,9 +1692,10 @@
       <div class="cq-local-periods" role="group"><button type="button" data-period="today"></button><button type="button" data-period="week"></button><button type="button" data-period="custom"></button></div>
       <form class="cq-local-dates" hidden><label><span></span><span class="cq-local-date-field"><input type="text" name="start" placeholder="YYYY-MM-DD" autocomplete="off" required><button type="button" data-date-field="start"></button></span></label><label><span></span><span class="cq-local-date-field"><input type="text" name="end" placeholder="YYYY-MM-DD" autocomplete="off" required><button type="button" data-date-field="end"></button></span></label><button type="submit"></button></form>
       <div class="cq-local-tabs" role="tablist"></div>
+      <form class="cq-interval-controls" hidden><div class="cq-interval-endpoints"><div class="cq-interval-endpoint"><div class="cq-interval-heading"><label for="cq-interval-start-date"></label><button type="button" data-date-field="intervalStart"></button></div><input id="cq-interval-start-date" name="intervalStart" type="text" placeholder="YYYY-MM-DD" autocomplete="off" inputmode="numeric" required><input name="intervalStartTime" type="text" placeholder="HH:mm:ss" autocomplete="off" inputmode="numeric" required><input type="range" name="fromSlider" step="1"></div><div class="cq-interval-endpoint"><div class="cq-interval-heading"><label for="cq-interval-end-date"></label><button type="button" data-date-field="intervalEnd"></button></div><input id="cq-interval-end-date" name="intervalEnd" type="text" placeholder="YYYY-MM-DD" autocomplete="off" inputmode="numeric" required><input name="intervalEndTime" type="text" placeholder="HH:mm:ss" autocomplete="off" inputmode="numeric" required><input type="range" name="toSlider" step="1"></div></div><div class="cq-interval-presets" role="group"></div><div class="cq-interval-actions"><output></output><button type="submit"></button></div></form>
       <div class="cq-local-result" role="region" aria-busy="false"></div><p class="cq-local-status" role="status"></p>
       <details class="cq-local-reference"><summary></summary><p></p></details>`;
-    panel.querySelector("h2").textContent = words("本机用量", "Local usage");
+    panel.querySelector("h2").textContent = words("用量统计", "Usage statistics");
     const tag = document.createElement("span");tag.className = "cq-local-estimate-tag";tag.textContent = words("估算", "Estimate");
     panel.querySelector("h2").after(tag);
     const close = panel.querySelector("header button");
@@ -1473,51 +1708,61 @@
       input.min = "2022-01-01"; input.max = localDate(new Date());
       input.oninput = () => {input.setCustomValidity("");form.elements.end.setCustomValidity("");};
     }
-    form.onsubmit = event => {event.preventDefault(); requestLocalUsage(panel);};
+    form.onsubmit = event => {event.preventDefault(); requestLocalUsage(panel,()=>{},true);};
     const tabs=panel.querySelector(".cq-local-tabs");tabs.setAttribute("aria-label",words("统计内容", "Statistics pages"));
-    ["overview","daily","details"].forEach((name,index)=>{
+    localPageNames.forEach((name,index)=>{
       const button=document.createElement("button");button.type="button";button.id=`cq-local-tab-${name}`;button.dataset.localPage=String(index);
       button.setAttribute("role","tab");button.setAttribute("aria-controls",`cq-local-page-${name}`);button.setAttribute("aria-selected",String(index===0));button.tabIndex=index===0?0:-1;
-      button.textContent=[words("用量", "Overview"),words("每日", "Daily"),words("详情", "Details")][index];
+      button.textContent=[words("用量", "Overview"),words("每日", "Daily"),words("详情", "Details"),words("区间", "Interval")][index];
       button.onclick=()=>selectLocalPage(panel,index);
-      button.onkeydown=event=>{let next=index;if(event.key==="ArrowRight")next=(index+1)%3;else if(event.key==="ArrowLeft")next=(index+2)%3;else if(event.key==="Home")next=0;else if(event.key==="End")next=2;else return;event.preventDefault();selectLocalPage(panel,next,true);};
+      button.onkeydown=event=>{let next=index;if(event.key==="ArrowRight")next=(index+1)%localPageNames.length;else if(event.key==="ArrowLeft")next=(index+localPageNames.length-1)%localPageNames.length;else if(event.key==="Home")next=0;else if(event.key==="End")next=localPageNames.length-1;else return;event.preventDefault();selectLocalPage(panel,next,true);};
       tabs.append(button);
     });
-    panel.querySelector(".cq-local-result").setAttribute("aria-label", words("本机用量统计结果", "Local usage results"));
+    panel.querySelector(".cq-local-result").setAttribute("aria-label", words("用量统计结果", "Usage statistics results"));
     panel.querySelector("summary").textContent = words("估算依据", "References");
     panel.querySelector("summary").append(toolIcon("back", "cq-local-detail-arrow"));
     panel.querySelector("details p").textContent = words(
-      "ModelDial 2026-10-05 Pro 200 新额度样本：Astra 4.38 亿、Sol 23.54 亿 token／周，已是新额度，不再减半。原研究按月归一为周，负载与缓存比例可能不同；非官方上限，未按当前账号校准。周估算仍按总 token 比例，不用 API 美元推导。API 等值按 2026-10-27 官方 Standard 短上下文单价，区分普通输入／缓存读取／写入／输出；写入时长未知时给出价格区间。不含长上下文、加速、地区、工具等附加费，不是实付账单。仅本机现存日志，可能含历史账户或导入记录。本周按本地周一至今，跨周期可超过 100%。",
-      "ModelDial's 2026-10-05 Pro 200 new-limit sample: Astra 438M, Sol 2.354B tokens/week, already reduced; not halved again. Monthly research values were normalized to weeks with a different workload. Not an official limit or calibrated to this account. Weekly fractions use total tokens, not API dollars. API equivalent uses OpenAI Standard short-context prices checked 2026-10-27, separating ordinary input, cache reads/writes and output. Unknown write retention produces a price range. Excludes long-context, speed, regional and tool fees; not a bill. Local files may include old accounts or imported histories. Weeks start Monday; ranges can exceed 100%.");
+      "Token 与 API 分别按各模型用量 ÷ 对应周参考相加，取两口径最小至最大值；不是置信区间。参考并非官方上限，未按本账号校准。Pro 档位需自行确认。",
+      "Token and API estimates each sum model usage ÷ matching weekly reference. The range spans both views, not a confidence interval. References are not official limits or account-calibrated. Confirm your Pro tier.");
     const reference=panel.querySelector(".cq-local-reference"), explanation=reference.querySelector("p");
     const referenceText=(tag,className,text,parent=reference)=>{const node=document.createElement(tag);node.className=className;node.textContent=text;parent.append(node);return node;};
-    const weeklyReference=referenceText("section","cq-local-reference-section","");
+    const weeklyReference=referenceText("section","cq-local-reference-section cq-local-weekly-reference","");
     const weeklyHeading=referenceText("div","cq-local-reference-heading","",weeklyReference);
-    referenceText("strong","",words("Pro 200 周参考", "Pro 200 weekly reference"),weeklyHeading);
+    referenceText("strong","",words("周额度参考", "Weekly reference"),weeklyHeading);
     referenceText("span","","token",weeklyHeading);
     const baselineTable=referenceText("dl","cq-local-baselines","",weeklyReference);
-    for(const [model,label] of [["gpt-6-astra","GPT-6 Astra"],["gpt-6.1-sol","GPT-6.1 Sol"]]) {
-      const row=referenceText("div","","",baselineTable), tokens=localUsageBaselines.get(model);
-      referenceText("dt","",label,row);
-      const value=referenceText("dd","",isChinese ? compactLocalTokens(tokens).text : `${numberText(tokens/1e6)}M`,row);
-      value.title=`${numberText(tokens)} token`;value.setAttribute("aria-label",value.title);
+    const planChoice=referenceText("select","cq-local-reference-plan","",weeklyReference);
+    planChoice.hidden=true;planChoice.setAttribute("aria-label",words("Pro 参考套餐", "Pro reference tier"));
+    for(const [value,label] of [["",words("选择 Pro 套餐", "Choose Pro tier")],["pro100","Pro $100"],["pro200","Pro $200 · 20x"],["pro500","Pro $500"]]) {
+      const option=document.createElement("option");option.value=value;option.textContent=label;planChoice.append(option);
     }
+    planChoice.value=localReferencePlan;
+    planChoice.onchange=()=>{
+      localReferencePlan=planChoice.value;
+      try {localStorage.setItem("codexQuotaReferencePlan",JSON.stringify({scope:localReferenceScope,plan:localReferencePlan}));} catch {}
+      requestLocalUsage(panel);
+    };
+    referenceText("p","cq-local-reference-status","",weeklyReference);
     const apiReference=referenceText("section","cq-local-reference-section","");
     const apiHeading=referenceText("div","cq-local-reference-heading","",apiReference);
     referenceText("strong","",words("API 等值", "API equivalent"),apiHeading);referenceText("span","","USD",apiHeading);
-    referenceText("p","cq-local-reference-formula",words("用量 × 对应单价", "Usage × category price"),apiReference);
-    for (const [parent,label,url] of [[weeklyReference,"ModelDial · 2026.10.05","https://modeldial.com/subscriptions"],[apiReference,words("OpenAI 价格 · 2026.10.27", "OpenAI pricing · 2026.10.27"),"https://developers.openai.com/api/docs/pricing"]]) {
+    for (const [parent,label,url] of [[weeklyReference,"ModelDial","https://modeldial.com/subscriptions?period=week&view=insights"],[apiReference,words("OpenAI 价格 · 2026.10.30", "OpenAI pricing · 2026.10.30"),"https://developers.openai.com/api/docs/pricing"]]) {
       const link=referenceText("a","",label,parent);link.href=url;link.target="_blank";link.rel="noopener noreferrer";
     }
     const caveats=referenceText("details","cq-local-caveats","");
     const caveatSummary=referenceText("summary","",words("口径与限制", "Scope and limitations"),caveats);
     caveatSummary.append(toolIcon("back","cq-local-detail-arrow"));caveats.append(explanation);
+    for(const text of [
+      words("账号实测为官方周额度采样差，含其他设备；历史只存本机，重启后恢复。缺失不补算，跨重置或校正不拼接。", "Account measurements are official weekly sample differences, including other devices. History stays local and survives restarts; gaps are not inferred and resets/corrections are not joined."),
+      words("API 等值不是实付账单；写缓存时长未知时显示价格区间，不含长上下文、加速、地区与工具附加费。", "API equivalent is not a bill. Unknown cache-write retention shows a price range; long-context, speed, regional and tool fees are excluded."),
+      words("日志仅限本机，可能含旧账号或导入记录。本周自本地周一开始；跨周期可超过 100%。", "Logs are local and may include old accounts or imports. Weeks start Monday locally; cross-cycle estimates may exceed 100%.")
+    ]) referenceText("p","",text,caveats);
     const choose = period => {
       const now = new Date(), start = new Date(now);
       if (period === "week") start.setDate(start.getDate()-(start.getDay()+6)%7);
       for (const button of panel.querySelectorAll("[data-period]")) button.setAttribute("aria-pressed",String(button.dataset.period === period));
       panel.cqCloseCalendar?.(false);
-      if (period !== "custom") {form.elements.start.value=localDate(start); form.elements.end.value=localDate(now); requestLocalUsage(panel,()=>{form.hidden=true;});}
+      if (period !== "custom") {form.elements.start.value=localDate(start); form.elements.end.value=localDate(now); requestLocalUsage(panel,()=>{form.hidden=true;},true);}
       else {animateLocalLayout(panel,()=>{form.hidden=false;});form.elements.start.focus({preventScroll:true});}
       if (!paneMotion) positionPopover();
     };
@@ -1536,6 +1781,7 @@
     arrangeLocalPages(panel);
     panel.hidden = true;
     popup.append(panel);
+    installIntervalControls(panel);
     installLocalCalendar(panel);
     choose("today");
     animatePane(host,panel,true);
@@ -1603,7 +1849,6 @@
       #codex-quota-footer { flex: none; box-sizing: border-box; padding: 0 8px; }
       #codex-quota-trigger { --cq-entry-border-width: 1px; display: flex; align-items: center; gap: 6px; width: 100%; height: 30px; margin: 0; padding: 0 8px; border: var(--cq-entry-border-width) solid var(--cq-border); border-radius: var(--radius-sm, 6px); background: var(--cq-solid); box-shadow: 0 1px 3px #00000006; text-align: left; cursor: pointer; transition: background 110ms, border-color 110ms; }
       #codex-quota-trigger:is(:hover,[aria-expanded="true"]) { background: color-mix(in srgb, var(--cq-solid) 94%, var(--cq-ink)); border-color: var(--color-border-strong, var(--cq-border)); }
-      @supports (backdrop-filter: blur(1px)) { #codex-quota-trigger { background: color-mix(in srgb, var(--cq-solid) 82%, transparent); backdrop-filter: blur(18px); } }
       #codex-quota-trigger .cq-trigger-icon { display: none; }
       :is(#codex-quota-trigger,#codex-quota-popover) .cq-plan-badge { display: inline-block; flex: none; box-sizing: border-box; height: 16px; padding: 3px 7px; border: 0; border-radius: 99px; color: color-mix(in srgb, var(--cq-ink) 72%, transparent); background: color-mix(in srgb, var(--cq-ink) 7%, transparent); font-size: 9.5px; line-height: 10px; font-weight: 600; letter-spacing: .02em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
       :is(#codex-quota-trigger,#codex-quota-popover) .cq-plan-badge[hidden] { display: none; }
@@ -1641,7 +1886,6 @@
       #codex-quota-trigger[data-cq-low]::after { content: ""; position: absolute; right: 3px; top: 3px; width: 4px; height: 4px; border-radius: 50%; background: currentColor; }
       #codex-quota-trigger[data-cq-collapsed][data-cq-low]::after { right: auto; top: auto; margin: 23px 0 0 22px; }
       #codex-quota-popover { position: fixed; inset: auto; margin: 0; padding: 8px 0 8px 8px; max-width: none; max-height: calc(100dvh - 24px); overflow: auto; overscroll-behavior: contain; scrollbar-width: none; border: .8px solid var(--cq-border); border-radius: var(--radius-sm, 6px); background: var(--cq-solid); box-shadow: 0 4px 12px #302c2212, 0 16px 32px #302c2207; opacity: 0; transition: display 700ms allow-discrete, overlay 700ms allow-discrete; }
-      @supports (backdrop-filter: blur(1px)) { #codex-quota-popover { background: color-mix(in srgb, var(--cq-solid) 90%, transparent); backdrop-filter: blur(8px); border: 0; } }
       #codex-quota-popover:not([data-cq-inplace]) { transition-duration: 180ms; }
       #codex-quota-popover[data-cq-rail-motion] { transition-duration: 700ms; }
       #codex-quota-popover:popover-open { opacity: 1; }
@@ -1739,14 +1983,14 @@
       #codex-quota-popover .cq-low { font-size: 11px; white-space: nowrap; }
       #codex-quota-popover .cq-status { position: absolute; top: 0; left: 0; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
       #codex-quota-popover .cq-empty { padding: 8px 16px 8px 8px; color: var(--cq-muted); }
-      #cq-local-usage { --cq-chart-input: #a46b40; --cq-chart-cache: #708771; --cq-chart-output: #6c8299; position: relative; width: 100%; margin: 0; padding: 0; border: 0; background: transparent; color: var(--cq-ink); box-shadow: none; user-select: text; }
+      #cq-local-usage { --cq-chart-input: #a46b40; --cq-chart-cache: #708771; --cq-chart-output: #6c8299; position: relative; width: 100%; margin: 0; padding: 0; border: 0; background: transparent; color: var(--cq-ink); box-shadow: none; user-select: text; font-variant-numeric: tabular-nums; }
       #codex-quota-popover[data-cq-dark] #cq-local-usage { --cq-chart-input: #d3a879; --cq-chart-cache: #a1b49a; --cq-chart-output: #9cb2c8; }
       #cq-local-usage * { box-sizing: border-box; }
       #cq-local-usage [hidden] { display: none !important; }
       #cq-local-usage header { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 24px; margin-bottom: 16px; padding: 0 var(--cq-control-right, 6px) 0 8px; }
       #cq-local-usage h2 { margin: 0; font-size: 14px; line-height: 20px; font-weight: 600; letter-spacing: -.01em; }
-      #cq-local-usage .cq-local-estimate-tag { margin-right: auto; color: var(--cq-muted); font-size: 10px; line-height: 16px; }
-      #cq-local-usage button { display: inline-flex; align-items: center; justify-content: center; border: 0; border-radius: 6px; padding: 4px 8px; min-height: 24px; font: inherit; font-size: 11px; color: var(--cq-ink); background: transparent; cursor: pointer; }
+      #cq-local-usage .cq-local-estimate-tag { margin-right: auto; color: var(--cq-ink); font-size: 13px; line-height: 16px; font-weight: 600; }
+      #cq-local-usage button { display: inline-flex; align-items: center; justify-content: center; border: 0; border-radius: 6px; padding: 4px 8px; min-height: 24px; font: inherit; font-size: 12px; color: var(--cq-ink); background: transparent; cursor: pointer; }
       #cq-local-usage button:hover { background: var(--cq-hover); }
       #cq-local-usage button:active { background: color-mix(in srgb,var(--cq-ink) 12%,transparent); }
       #cq-local-usage :is(button,input,summary):focus-visible { outline: 2px solid var(--cq-ink); outline-offset: 2px; }
@@ -1767,7 +2011,7 @@
       #cq-local-usage .cq-calendar-heading strong { font-size: 12px; line-height: 24px; font-weight: 600; }
       #cq-local-usage .cq-calendar-heading button { width: 24px; height: 24px; padding: 4px; }
       #cq-local-usage .cq-calendar-grid > div { display: grid; grid-template-columns: repeat(7,minmax(0,1fr)); gap: 2px; margin-bottom: 2px; }
-      #cq-local-usage .cq-calendar-grid [role=columnheader] { text-align: center; color: var(--cq-muted); font-size: 10px; line-height: 20px; }
+      #cq-local-usage .cq-calendar-grid [role=columnheader] { text-align: center; color: var(--cq-muted); font-size: 11px; line-height: 20px; }
       #cq-local-usage .cq-calendar-grid button { min-width: 0; width: 100%; height: 24px; padding: 0; font-size: 11px; font-variant-numeric: tabular-nums; border-radius: 4px; }
       #cq-local-usage .cq-calendar-grid button[data-other-month] { color: var(--cq-muted); }
       #cq-local-usage .cq-calendar-grid button[aria-current=date] { text-decoration: underline; text-underline-offset: 3px; }
@@ -1776,12 +2020,50 @@
       #cq-local-usage .cq-calendar-footer { display: flex; justify-content: space-between; gap: 8px; margin-top: 8px; padding-top: 4px; border-top: 1px solid var(--cq-border); }
       #cq-local-usage .cq-calendar-footer button { color: var(--cq-muted); padding: 2px 4px; }
       @media (forced-colors: active) { #cq-local-usage .cq-local-calendar { background: Canvas; color: CanvasText; border-color: CanvasText; } #cq-local-usage .cq-calendar-grid button[aria-selected=true] { forced-color-adjust: none; background: Highlight; color: HighlightText; } }
-      #cq-local-usage .cq-local-tabs { display: flex; gap: 16px; margin: 8px 16px 0 8px; border-bottom: 1px solid var(--cq-border); }
-      #cq-local-usage .cq-local-tabs button { position: relative; padding: 4px 0 8px; min-width: 32px; color: var(--cq-muted); border-radius: 0; }
+      #cq-local-usage .cq-local-tabs { display: flex; gap: 8px; margin: 8px 16px 0 8px; border-bottom: 1px solid var(--cq-border); }
+      #cq-local-usage .cq-local-tabs button { display: block; flex: 1; position: relative; padding: 4px 0 8px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--cq-muted); border-radius: 0; }
       #cq-local-usage .cq-local-tabs button[aria-selected=true] { color: var(--cq-ink); font-weight: 600; }
       #cq-local-usage .cq-local-tabs button[aria-selected=true]::after { content: ""; position: absolute; bottom: -1px; left: 0; right: 0; height: 2px; background: var(--cq-fill); }
+      #cq-local-usage[data-page="3"] :is(.cq-local-periods,.cq-local-dates) { display: none; }
+      #cq-local-usage[data-page="3"] .cq-local-estimate-tag { visibility: hidden; }
+      #cq-local-usage .cq-interval-controls { position: relative; margin: 8px 16px 0 8px; }
+      #cq-local-usage .cq-interval-endpoints { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr); gap: 8px; }
+      #cq-local-usage .cq-interval-endpoint { min-width: 0; }
+      #cq-local-usage .cq-interval-heading { display: flex; align-items: center; justify-content: space-between; min-height: 24px; color: var(--cq-muted); font-size: 11px; }
+      #cq-local-usage .cq-interval-heading button { width: 24px; height: 24px; padding: 4px; color: var(--cq-muted); }
+      #cq-local-usage .cq-interval-controls [type=text] { padding: 4px; margin-top: 4px; font-variant-numeric: tabular-nums; }
+      #cq-local-usage .cq-interval-controls [name$=Time] { font-size: 12px; font-weight: 500; }
+      #cq-local-usage .cq-interval-endpoint [type=range] { appearance: none; width: 100%; height: 24px; margin: 4px 0 0; padding: 0; border: 0; opacity: 1; background: transparent; cursor: ew-resize; }
+      #cq-local-usage .cq-interval-endpoint [type=range]::-webkit-slider-runnable-track { height: 2px; border-radius: 99px; background: var(--cq-track); }
+      #cq-local-usage .cq-interval-endpoint [type=range]::-webkit-slider-thumb { appearance: none; width: 16px; height: 16px; margin-top: -7px; border: 2px solid var(--cq-solid); border-radius: 99px; background: var(--cq-ink); box-shadow: 0 1px 3px #0003; }
+      #cq-local-usage .cq-interval-endpoint [type=range]:focus-visible { outline: 0; }
+      #cq-local-usage .cq-interval-endpoint [type=range]:focus-visible::-webkit-slider-thumb { outline: 2px solid var(--cq-ink); outline-offset: 2px; }
+      #cq-local-usage .cq-interval-actions { display: flex; gap: 8px; align-items: center; margin-top: 8px; font-size: 11px; line-height: 20px; color: var(--cq-muted); }
+      #cq-local-usage .cq-interval-presets { position: relative; display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); margin-top: 8px; padding: 3px; border-radius: 7px; background: color-mix(in srgb,var(--cq-ink) 4%,transparent); }
+      #cq-local-usage .cq-interval-presets button { position: relative; min-width: 0; padding: 4px 0; border-radius: 4px; font-size: 11px; line-height: 16px; white-space: nowrap; color: var(--cq-muted); }
+      #cq-local-usage .cq-interval-presets button[aria-pressed=true] { color: var(--cq-ink); font-weight: 600; background: transparent; }
+      #cq-local-usage .cq-interval-preset-marker { position: absolute; left: 0; top: 3px; bottom: 3px; border-radius: 4px; background: var(--cq-solid); box-shadow: 0 1px 3px #0001; pointer-events: none; }
+      #cq-local-usage .cq-interval-actions output { margin-right: auto; font-variant-numeric: tabular-nums; }
+      #cq-local-usage .cq-interval-actions button { min-width: 72px; background: var(--cq-ink); color: var(--cq-solid); }
+      #cq-local-usage .cq-interval-actions button:hover { background: color-mix(in srgb,var(--cq-ink) 88%,var(--cq-solid)); }
+      @media (forced-colors: active) { #cq-local-usage .cq-interval-endpoint [type=range]::-webkit-slider-runnable-track { background: GrayText; forced-color-adjust: none; } #cq-local-usage .cq-interval-endpoint [type=range]::-webkit-slider-thumb { background: Highlight; border-color: Canvas; box-shadow: none; forced-color-adjust: none; } #cq-local-usage .cq-interval-preset-marker { background: Highlight; box-shadow: none; forced-color-adjust: none; } #cq-local-usage .cq-interval-presets button[aria-pressed=true] { color: HighlightText; forced-color-adjust: none; } }
+      #cq-local-usage .cq-local-recent { padding-top: 16px; }
+      #cq-local-usage .cq-local-recent-plan { margin-bottom: 8px; background: var(--cq-hover); }
+      #cq-local-usage .cq-local-recent-row { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr); column-gap: 16px; align-items: baseline; padding: 8px 0; font-variant-numeric: tabular-nums; }
+      #cq-local-usage .cq-local-recent-row > div { min-width: 0; }
+      #cq-local-usage .cq-local-recent-row > :last-child { text-align: right; }
+      #cq-local-usage .cq-local-interval-range { font-size: 11px; color: var(--cq-muted); line-height: 16px; margin: 0 0 8px; font-variant-numeric: tabular-nums; }
+      #cq-local-usage .cq-interval-coverage { display: grid; gap: 4px; margin: 12px 0 0; color: var(--cq-muted); font-size: 10px; line-height: 16px; }
+      #cq-local-usage .cq-local-recent-row strong { display: block; font-size: 16px; font-weight: 600; line-height: 24px; }
+      #cq-local-usage .cq-local-recent-row strong { overflow-wrap: anywhere; }
+      #cq-local-usage .cq-local-recent-row strong[data-range] { font-size: 14px; }
+      #cq-local-usage .cq-local-recent-row small { display: block; margin-top: 4px; font-size: 10px; line-height: 16px; color: var(--cq-muted); overflow-wrap: anywhere; }
+      #cq-local-usage .cq-local-recent .cq-local-page-note { font-size: 11px; margin: 16px 0 8px; }
+      #cq-local-usage .cq-local-reference-plan { display: block; width: 100%; margin: 8px 0; min-height: 28px; border: 1px solid var(--cq-border); border-radius: 6px; padding: 4px 8px; background: var(--cq-solid); color: var(--cq-ink); font: inherit; font-size: 12px; }
+      #cq-local-usage select:focus-visible { outline: 2px solid var(--cq-ink); outline-offset: 2px; }
+      #cq-local-usage .cq-local-reference-status:empty { display: none; }
       #cq-local-usage .cq-local-result { container-type: inline-size; position: relative; overflow: clip; }
-      #cq-local-usage .cq-local-page { position: absolute; inset: 0; padding: 0 16px 0 8px; max-height: clamp(220px,calc(100dvh - 300px),256px); overflow-y: auto; overflow-x: hidden; scrollbar-width: none; overscroll-behavior: contain; overflow-anchor: none; }
+      #cq-local-usage .cq-local-page { position: absolute; inset: 0; padding: 0 16px 0 8px; max-height: var(--cq-local-page-limit,320px); overflow-y: auto; overflow-x: hidden; scrollbar-width: none; overscroll-behavior: contain; overflow-anchor: none; }
       #cq-local-usage .cq-local-page[aria-hidden=false] { position: relative; inset: auto; }
       #cq-local-usage .cq-local-page-note { color: var(--cq-muted); font-size: 11px; line-height: 20px; margin: 24px 0; }
       #cq-local-usage .cq-local-placeholder { padding-top: 24px; color: var(--cq-muted); font-size: 11px; line-height: 20px; }
@@ -1791,13 +2073,19 @@
       #cq-local-usage .cq-local-skeleton i { display: block; height: 32px; border-radius: 4px; background: color-mix(in srgb,var(--cq-ink) 7%,transparent); }
       #cq-local-usage .cq-local-skeleton i:nth-child(n+3) { height: 16px; }
       #cq-local-usage .cq-local-skeleton i:last-child { grid-column: 1/-1; width: 72%; }
-      #cq-local-usage .cq-local-range-label { margin: 16px 0; color: var(--cq-muted); font-size: 10px; line-height: 16px; }
+      #cq-local-usage .cq-local-range-label { margin: 16px 0; color: var(--cq-muted); font-size: 12px; line-height: 16px; }
       #cq-local-usage .cq-local-highlights { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr); gap: 16px; margin: 0 0 20px; }
-      #cq-local-usage .cq-local-metric-label { display: block; color: var(--cq-muted); font-size: 11px; line-height: 16px; margin-bottom: 6px; }
+      #cq-local-usage .cq-local-metric-label { display: block; color: var(--cq-muted); font-size: 12px; line-height: 16px; margin-bottom: 6px; }
       #cq-local-usage .cq-local-highlights strong { display: flex; flex-wrap: wrap; align-items: baseline; column-gap: 1px; font-weight: 650; line-height: 30px; letter-spacing: -.025em; }
-      #cq-local-usage .cq-local-value-number { font-size: clamp(16px,12cqi,23px); }
-      #cq-local-usage .cq-local-cost .cq-local-value-number { font-size: clamp(15px,11cqi,21px); }
+      #cq-local-usage .cq-local-value-number { font-size: clamp(16px, 12cqi, 18px); }
       #cq-local-usage .cq-local-value-unit { font-size: 11px; font-weight: 500; letter-spacing: 0; }
+      #cq-local-usage .cq-local-estimate-bound { display: inline-flex; align-items: baseline; white-space: nowrap; }
+      #cq-local-usage .cq-local-estimate-note { display: block; color: var(--cq-muted); font-size: 10px; line-height: 16px; }
+      #cq-local-usage .cq-local-method-scope { color: var(--cq-muted); font-size: 10px; line-height: 16px; }
+      #cq-local-usage .cq-local-method-values { margin: 8px 0 12px; }
+      #cq-local-usage .cq-local-method-values > div { display: grid; grid-template-columns: auto minmax(0,1fr); gap: 8px; align-items: baseline; padding: 4px 0; }
+      #cq-local-usage .cq-local-method-values dt { color: var(--cq-muted); font-size: 11px; }
+      #cq-local-usage .cq-local-method-values dd { margin: 0; text-align: right; font-size: 12px; font-weight: 600; overflow-wrap: anywhere; }
       #cq-local-usage .cq-local-price-part { display: inline-flex; align-items: baseline; white-space: nowrap; }
       #cq-local-usage .cq-local-price-part[data-long] .cq-local-value-number { font-size: 16px; }
       #cq-local-usage strong[data-range] .cq-local-value-number { font-size: 16px; }
@@ -1812,7 +2100,7 @@
       #cq-local-usage #cq-local-page-overview .cq-local-metrics { gap: 8px 12px; }
       #cq-local-usage #cq-local-page-overview .cq-local-cache { margin-top: 8px; padding-top: 8px; }
       #cq-local-usage #cq-local-page-daily .cq-local-daily { margin: 8px 0 0; }
-      #cq-local-usage #cq-local-page-daily .cq-local-day-detail { min-height: 64px; margin-bottom: 8px; }
+      #cq-local-usage #cq-local-page-daily .cq-local-day-detail { min-height: 0; margin: 8px 0 16px; }
       #cq-local-usage #cq-local-page-daily .cq-local-chart-plot, #cq-local-usage #cq-local-page-daily .cq-local-day { height: 96px; }
       #cq-local-usage #cq-local-page-daily .cq-local-chart-plot { background-size: 100% 76px; }
       #cq-local-usage #cq-local-page-daily .cq-local-day-rail, #cq-local-usage #cq-local-page-daily .cq-local-day-selection { height: 76px; }
@@ -1832,12 +2120,13 @@
       #cq-local-usage .cq-local-chart-nav svg { width: 14px; height: 14px; }
       #cq-local-usage .cq-local-chart-next { transform: rotate(180deg); }
       #cq-local-usage .cq-local-day-detail { min-height: 88px; margin: 8px 0 12px; }
-      #cq-local-usage .cq-local-day-date { font-size: 10px; line-height: 16px; color: var(--cq-muted); margin-bottom: 6px; }
+      #cq-local-usage .cq-local-day-date { font-size: 11px; line-height: 16px; font-weight: 500; color: var(--cq-muted); }
       #cq-local-usage .cq-local-day-values { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr); gap: 12px; }
       #cq-local-usage .cq-local-day-values strong { display: block; font-size: clamp(12px,8cqi,16px); line-height: 20px; font-weight: 600; overflow-wrap: anywhere; }
       #cq-local-usage .cq-local-day-values > div > span { display: block; font-size: 10px; line-height: 16px; color: var(--cq-muted); margin-top: 2px; }
       #cq-local-usage .cq-local-day-note { margin: 6px 0 0; color: var(--cq-muted); font-size: 10px; line-height: 16px; }
-      #cq-local-usage .cq-local-chart-scale { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 4px; font-size: 9px; line-height: 14px; color: var(--cq-muted); }
+      #cq-local-usage .cq-local-chart-scale { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 4px; font-size: 11px; line-height: 16px; color: var(--cq-muted); }
+      #cq-local-usage .cq-local-chart-scale[data-single] { justify-content: flex-end; }
       #cq-local-usage .cq-local-chart-plot { position: relative; isolation: isolate; display: grid; gap: 0; height: 110px; margin-top: 4px; background: repeating-linear-gradient(to top,transparent 0,transparent 29px,var(--cq-border) 29px,var(--cq-border) 30px); background-size: 100% 90px; background-repeat: no-repeat; }
       #cq-local-usage .cq-local-day-selection { position: absolute; top: 0; left: 0; height: 90px; border-radius: 4px; background: color-mix(in srgb,var(--cq-ink) 6%,transparent); pointer-events: none; z-index: -1; }
       #cq-local-usage .cq-local-day { position: relative; display: flex; flex-direction: column; justify-content: flex-end; min-width: 0; width: 100%; height: 110px; padding: 0 2px; border-radius: 4px; }
@@ -1863,9 +2152,7 @@
       #cq-local-usage .cq-local-model-value { font-size: 12px; font-weight: 600; text-align: right; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
       #cq-local-usage .cq-local-model-share { color: var(--cq-muted); font-size: 10px; text-align: right; font-variant-numeric: tabular-nums; }
       #cq-local-usage .cq-local-model-track { height: 3px; border-radius: 2px; background: var(--cq-track); overflow: hidden; }
-      #cq-local-usage .cq-local-model-track i { display: block; height: 100%; min-width: 2px; max-width: 100%; border-radius: inherit; background: var(--cq-chart-output); }
-      #cq-local-usage .cq-local-model-track [data-model-tone=warm] { background: var(--cq-chart-input); }
-      #cq-local-usage .cq-local-model-track [data-model-tone=sage] { background: var(--cq-chart-cache); }
+      #cq-local-usage .cq-local-model-track i { display: block; height: 100%; min-width: 2px; max-width: 100%; border-radius: inherit; background: var(--cq-muted); }
       #cq-local-usage .cq-local-models .cq-local-excluded { margin: 8px 0 12px; font-size: 10px; line-height: 16px; }
       #cq-local-usage .cq-local-api-note { color: var(--cq-muted); font-size: 10px; line-height: 16px; margin: 4px 0 0; }
       #cq-local-usage .cq-local-excluded, #cq-local-usage .cq-local-status, #cq-local-usage .cq-local-reference, #cq-local-usage .cq-local-issues { margin: 16px 0 0; color: var(--cq-muted); font-size: 11px; line-height: 16px; overflow-wrap: anywhere; }
@@ -1881,13 +2168,16 @@
       #cq-local-usage .cq-local-reference-heading > span { font-size: 10px; }
       #cq-local-usage .cq-local-baselines { display: grid; gap: 8px; margin: 0; padding: 8px; border-radius: var(--radius-sm,6px); background: color-mix(in srgb,var(--cq-ink) 3%,transparent); }
       #cq-local-usage .cq-local-baselines > div { display: grid; grid-template-columns: minmax(0,1fr) auto; align-items: baseline; gap: 8px; }
+      #cq-local-usage .cq-local-baselines > [data-dual] { grid-template-columns: minmax(0,1fr) minmax(0,1fr); }
+      #cq-local-usage .cq-local-baselines > [data-dual] dt { grid-column: 1/-1; }
+      #cq-local-usage .cq-local-baselines > [data-dual] dd:nth-child(2) { text-align: left; }
       #cq-local-usage .cq-local-baselines dt { color: var(--cq-muted); overflow-wrap: anywhere; }
       #cq-local-usage .cq-local-baselines dd { margin: 0; color: var(--cq-ink); font-size: 12px; font-weight: 600; white-space: nowrap; text-align: right; font-variant-numeric: tabular-nums; }
-      #cq-local-usage .cq-local-reference-formula { color: var(--cq-ink); }
       #cq-local-usage .cq-local-caveats { border-top: 1px solid var(--cq-border); }
       #cq-local-usage .cq-local-caveats > summary { font-size: 11px; color: var(--cq-muted); }
       #cq-local-usage .cq-local-caveats p { font-size: 10px; line-height: 16px; }
-      @media (forced-colors: active) { #cq-local-usage .cq-local-model-track { forced-color-adjust: none; background: GrayText; } #cq-local-usage .cq-local-model-track i[data-model-tone] { background: Highlight; } #cq-local-usage .cq-local-baselines { outline: 1px solid CanvasText; } }
+      #cq-local-usage .cq-local-status[data-cq-warning], #cq-local-usage .cq-local-reference-status[data-cq-warning], #cq-local-usage .cq-local-recent-account[data-cq-warning] > small:not(.cq-interval-sampled-range), #cq-local-usage .cq-local-day-values > div > .cq-local-partial, #cq-local-usage :is(.cq-local-partial,.cq-interval-api-coverage,.cq-local-api-note) { color: var(--cq-warning); }
+      @media (forced-colors: active) { #cq-local-usage .cq-local-model-track { forced-color-adjust: none; background: GrayText; } #cq-local-usage .cq-local-model-track i { background: Highlight; } #cq-local-usage .cq-local-baselines { outline: 1px solid CanvasText; } }
       #cq-local-usage summary { display: flex; align-items: center; gap: 8px; min-height: 36px; list-style: none; cursor: pointer; font-size: 12px; font-weight: 500; color: var(--cq-ink); }
       #cq-local-usage summary::-webkit-details-marker { display: none; }
       #cq-local-usage .cq-local-detail-meta { margin-left: auto; color: var(--cq-muted); font-size: 11px; font-weight: 400; }
@@ -2674,8 +2964,14 @@
     popup.querySelector('.cq-local-page[aria-hidden="false"] .cq-local-daily')?.cqResize?.();
     const bottom = column ? Math.min(rect.bottom, column.bottom, innerHeight) : innerHeight - 12;
     popup.style.maxHeight = Math.max(0, bottom - 12) + "px";
-    const left = column ? rect.right - width : rect.right + 8;
-    popup.style.left = Math.max(leftEdge, Math.min(rightEdge - width, left)) + "px";
+    const localPage=popup.querySelector('#cq-local-usage:not([hidden]) .cq-local-page[aria-hidden="false"]');
+    if(localPage) {
+      const scale=popup.getBoundingClientRect().width/popup.offsetWidth;
+      const chrome=popup.scrollHeight+popup.offsetHeight-popup.clientHeight-localPage.offsetHeight;
+      popup.style.setProperty("--cq-local-page-limit",Math.max(0,Math.min(320,(bottom-12)/scale-chrome))+"px");
+    }
+    const preferredLeft = column ? rect.right - width : rect.right + 8;
+    popup.style.left = Math.max(leftEdge, Math.min(rightEdge - width, preferredLeft)) + "px";
     const height = popup.getBoundingClientRect().height;
     const top = column ? bottom - height : rect.bottom - height;
     popup.style.top = Math.max(12, Math.min(bottom - height, top)) + "px";
@@ -2690,6 +2986,7 @@
       (heading.getBoundingClientRect().right - box.left - popup.clientLeft - controlLeft - 24) + "px");
     collapse.style.top = (column ? arrow.top + arrow.height / 2 - box.top - popup.clientTop + popup.scrollTop - 12 : popup.scrollTop + popup.clientHeight - 30) + "px";
     document.getElementById("cq-local-usage")?.cqPositionCalendar?.();
+    document.querySelector('.cq-interval-controls')?.cqPositionPresets?.();
     syncReleaseUI();
     syncInlineAlert();
   };
@@ -3429,7 +3726,6 @@
           const get = layer.get.bind(layer);
           return Object.assign({}, layer, { get(parameter, fallback) {
             if (parameter === "enabled") return true;
-            if (parameter === "remaining_threshold_percent") return 100;
             return get(parameter, fallback);
           }});
         };

@@ -56,6 +56,7 @@ public static class LauncherRegressions
         if (error != null) { Check(stage.EndsWith("-failed"), "Startup failure must be labelled"); FailureLogs++; }
     }
     private static Task MainAsync() { throw new Exception("Explicit launcher entered the background service"); }
+    private static class ModelDialReferences { public static Task RunAsync(string root) { throw new Exception("Explicit launcher started reference checks"); } }
     private sealed class OfficialShortcutMonitor : IDisposable
     {
         public OfficialShortcutMonitor() { throw new Exception("Explicit launcher started shortcut maintenance"); }
