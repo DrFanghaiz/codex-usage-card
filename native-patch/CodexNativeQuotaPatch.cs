@@ -21,7 +21,7 @@ internal static class CodexNativeQuotaPatch
     private static string NativeScript;
     private static int NextCommandId;
     private const int IoDeadlineMilliseconds = 15000;
-    private const string ProductVersion = "2.6.2";
+    private const string ProductVersion = "2.6.3";
     private static volatile string SessionScope = Guid.NewGuid().ToString("N");
     private static string LoginFingerprint;
     private static int SessionGeneration;
@@ -29,6 +29,8 @@ internal static class CodexNativeQuotaPatch
     private static readonly object PayloadGate = new object();
     private static string CachedPayloadScope;
     private static Dictionary<string, object> CachedPayload;
+    private static bool CachedServerCooldown;
+    private static int ConsecutivePayloadFailures;
     private static volatile Dictionary<string, string> LastPlan;
     private static DateTimeOffset CachedPayloadExpiresAt;
     private static readonly HashSet<string> ObservedCodexRoots = new HashSet<string>();
@@ -70,6 +72,7 @@ internal static class CodexNativeQuotaPatch
                 LogStartup("manual-launch-failed", 0, error);
                 MessageBox(IntPtr.Zero, "无法启动 Codex。请确认当前用户已安装 Codex，并可从原入口正常打开。", "Codex（额度卡）", 0x10);
             }
+            else LogStartup("helper-fatal " + error.GetType().Name + " HRESULT=0x" + error.HResult.ToString("X8"), 0);
             Environment.ExitCode = 1;
         }
     }
@@ -886,8 +889,11 @@ internal static class CodexNativeQuotaPatch
 
     private static void InstallForCurrentAndFuturePages(CdpSocket socket)
     {
+        // Renderer caches survive Helper upgrades; only the installed version changes here.
         var initialization = "globalThis.__codexQuotaSessionScope=" + Json.Serialize(SessionScope) +
-            ";globalThis.__codexQuotaMode=" + Json.Serialize("account") + ";";
+            ";globalThis.__codexQuotaMode=" + Json.Serialize("account") +
+            ";if(globalThis.__codexQuotaReleasePayload&&typeof globalThis.__codexQuotaReleasePayload==='object')" +
+            "globalThis.__codexQuotaReleasePayload.currentVersion=" + Json.Serialize(ProductVersion) + ";";
         SendCommand(socket, "Page.enable", new Dictionary<string, object>());
         SendCommand(socket, "Runtime.enable", new Dictionary<string, object>());
         SendCommand(socket, "Page.addScriptToEvaluateOnNewDocument", new Dictionary<string, object>
@@ -1260,7 +1266,7 @@ internal static class CodexNativeQuotaPatch
             { "errorCode", statusCode == 401 ? "AUTH_REQUIRED" : statusCode == 403 ? "ACCESS_DENIED" :
                 statusCode == 407 ? "PROXY_AUTH_REQUIRED" : statusCode == 429 ? "RATE_LIMITED" : "NETWORK_ERROR" }
         };
-        if (statusCode == 429)
+        if (statusCode == 429 || statusCode == 503)
         {
             int seconds;
             DateTimeOffset date;
@@ -1421,44 +1427,52 @@ internal static class CodexNativeQuotaPatch
         {
             if (scope != SessionScope || generation != Volatile.Read(ref SessionGeneration)) throw new IOException("Login session changed");
             var now = DateTimeOffset.UtcNow;
-            if (CachedPayload != null && CachedPayloadScope == scope && now < CachedPayloadExpiresAt &&
-                (CachedPayloadGeneration == generation || StringValue(CachedPayload, "errorCode") == "RATE_LIMITED"))
+            if (CachedPayloadScope != scope || CachedPayloadGeneration != generation) ConsecutivePayloadFailures = 0;
+            if (!(CachedPayload != null && CachedPayloadScope == scope && now < CachedPayloadExpiresAt &&
+                (CachedPayloadGeneration == generation || CachedServerCooldown)))
             {
-                var cached = new Dictionary<string, object>(CachedPayload);
-                if (StringValue(cached, "errorCode") == "RATE_LIMITED")
-                    cached["retryAfterSeconds"] = Math.Max(1, (int)Math.Ceiling((CachedPayloadExpiresAt - now).TotalSeconds));
-                return cached;
+                Dictionary<string, object> payload;
+                CurrentNetworkDiagnosis = SanitizeNetworkDiagnosis(new Dictionary<string, object>());
+                CurrentNetworkDiagnosis["NetworkCheckedAt"] = now.UtcDateTime.ToString("o", CultureInfo.InvariantCulture);
+                try
+                {
+                    var account = LoadOfficialConfiguration();
+                    // File watcher delivery may lag the credential write; never fetch a new account for an old scope.
+                    if (account != null && AccountFingerprint(account) != LoginFingerprint)
+                        throw new InvalidOperationException();
+                    payload = account == null
+                        ? new Dictionary<string, object> { { "errorCode", "AUTH_REQUIRED" } }
+                        : FetchOfficialPayload(account);
+                }
+                catch (WebException exception) { payload = WebErrorPayload(exception); }
+                catch (NetworkConfigurationException exception) { payload = new Dictionary<string, object> { { "errorCode", exception.Code } }; }
+                catch { payload = new Dictionary<string, object> { { "errorCode", "INVALID_RESPONSE" } }; }
+                var errorCode = StringValue(payload, "errorCode");
+                CurrentNetworkDiagnosis["LastRequestError"] = errorCode;
+                if (errorCode != "") RecentUsage.Break(scope);
+                payload["network"] = SanitizeNetworkDiagnosis(CurrentNetworkDiagnosis);
+                if (payload.ContainsKey("planName")) LastPlan = new Dictionary<string, string> { { "scope", scope }, { "plan", StringValue(payload, "planName").ToLowerInvariant() } };
+                var transient = errorCode == "NETWORK_ERROR" || errorCode == "REQUEST_TIMEOUT" || errorCode == "CONNECTION_FAILED" ||
+                    errorCode == "PROXY_CONNECTION_FAILED" || errorCode == "DNS_FAILED" || errorCode == "TLS_FAILED";
+                ConsecutivePayloadFailures = transient ? Math.Min(ConsecutivePayloadFailures + 1, 5) : 0;
+                var seconds = transient ? Math.Min(900, 60 * (1 << (ConsecutivePayloadFailures - 1))) : errorCode == "" ? 5 : 60;
+                CachedServerCooldown = errorCode == "RATE_LIMITED" || payload.ContainsKey("retryAfterSeconds");
+                if (payload.ContainsKey("retryAfterSeconds")) seconds = Math.Max(seconds, (int)payload["retryAfterSeconds"]);
+                CachedPayload = payload;
+                CachedPayloadScope = scope;
+                CachedPayloadGeneration = generation;
+                CachedPayloadExpiresAt = DateTimeOffset.UtcNow.AddSeconds(seconds);
             }
-            Dictionary<string, object> payload;
-            CurrentNetworkDiagnosis = SanitizeNetworkDiagnosis(new Dictionary<string, object>());
-            CurrentNetworkDiagnosis["NetworkCheckedAt"] = now.UtcDateTime.ToString("o", CultureInfo.InvariantCulture);
-            try
-            {
-                var account = LoadOfficialConfiguration();
-                // File watcher delivery may lag the credential write; never fetch a new account for an old scope.
-                if (account != null && AccountFingerprint(account) != LoginFingerprint)
-                    throw new InvalidOperationException();
-                payload = account == null
-                    ? new Dictionary<string, object> { { "errorCode", "AUTH_REQUIRED" } }
-                    : FetchOfficialPayload(account);
-            }
-            catch (WebException exception) { payload = WebErrorPayload(exception); }
-            catch (NetworkConfigurationException exception) { payload = new Dictionary<string, object> { { "errorCode", exception.Code } }; }
-            catch { payload = new Dictionary<string, object> { { "errorCode", "INVALID_RESPONSE" } }; }
-            CurrentNetworkDiagnosis["LastRequestError"] = StringValue(payload, "errorCode");
-            if (StringValue(payload, "errorCode") != "") RecentUsage.Break(scope);
-            payload["network"] = SanitizeNetworkDiagnosis(CurrentNetworkDiagnosis);
-            if (payload.ContainsKey("planName")) LastPlan = new Dictionary<string, string> { { "scope", scope }, { "plan", StringValue(payload, "planName").ToLowerInvariant() } };
-            var seconds = StringValue(payload, "errorCode") == "RATE_LIMITED"
-                ? (payload.ContainsKey("retryAfterSeconds") ? (int)payload["retryAfterSeconds"] : 30) : 5;
-            CachedPayload = payload;
-            CachedPayloadScope = scope;
-            CachedPayloadGeneration = generation;
-            CachedPayloadExpiresAt = DateTimeOffset.UtcNow.AddSeconds(seconds);
             // Keep same-account Retry-After across a token rewrite, but never reply to the stale page session.
             if (scope != SessionScope || generation != Volatile.Read(ref SessionGeneration))
                 throw new IOException("Login session changed");
-            return new Dictionary<string, object>(payload);
+            var reply = new Dictionary<string, object>(CachedPayload);
+            if (StringValue(reply, "errorCode") != "")
+            {
+                reply["retryAt"] = CachedPayloadExpiresAt.UtcDateTime.ToString("o", CultureInfo.InvariantCulture);
+                reply["retryAfterSeconds"] = Math.Max(1, (int)Math.Min(Int32.MaxValue, Math.Ceiling((CachedPayloadExpiresAt - DateTimeOffset.UtcNow).TotalSeconds)));
+            }
+            return reply;
         }
     }
 
@@ -2437,12 +2451,14 @@ internal static class CodexNativeQuotaPatch
     {
         private const string SourceUrl = "https://modeldial.com/subscriptions?period=week&view=insights";
         private const int MaximumResponse = 524288;
+        private const int MaximumScriptResponse = 1048576;
+        private static readonly int[] CheckIntervalsHours = { 24, 1, 3, 6 };
         private static readonly object Gate = new object();
         private static volatile Dictionary<string, object> Current = Empty();
 
         private static Dictionary<string, object> Empty()
         {
-            return new Dictionary<string, object> { { "plans", null }, { "apiPlans", null }, { "legacy", null }, { "legacyErrorCode", null }, { "lastAttemptAt", null }, { "lastSuccessAt", null }, { "errorCode", null } };
+            return new Dictionary<string, object> { { "plans", null }, { "apiPlans", null }, { "legacy", null }, { "legacyErrorCode", null }, { "lastAttemptAt", null }, { "lastSuccessAt", null }, { "errorCode", null }, { "failureCount", 0 } };
         }
 
         private static DateTimeOffset? Stamp(object raw, DateTimeOffset now)
@@ -2454,7 +2470,7 @@ internal static class CodexNativeQuotaPatch
 
         public static Dictionary<string, object> Parse(string html, bool api = false)
         {
-            if (html == null || html.Length > MaximumResponse || !Regex.IsMatch(html, @"Token\s*单位\s*[：:]\s*亿"))
+            if (html == null || html.Length > MaximumResponse || !Regex.IsMatch(html, @"Token\s*(?:单位\s*)?[：:]\s*亿"))
                 throw new InvalidDataException("ModelDial token unit missing");
             var plans = new Dictionary<string, object>();
             foreach (var tier in new[] { "plus", "100", "200", "500" }) plans[tier] = new Dictionary<string, object>();
@@ -2465,7 +2481,7 @@ internal static class CodexNativeQuotaPatch
                 var attrs = WebUtility.HtmlDecode(anchor.Groups["attrs"].Value);
                 if (!Regex.IsMatch(attrs, @"(?:[?&])period=week(?:&|""|\s)")) continue;
                 var id = Regex.Match(attrs, @"(?:[?&])calc_row=(?<id>[^&""\s]+)").Groups["id"].Value;
-                var row = Regex.Match(id, @"\Aopenai-(?<tier>plus|pro-5x|pro-200|pro-500)-(?<model>gpt-[0-9]+(?:\.[0-9]+)?-(?:astra|sol))(?:-[0-9]{8})?\z");
+                var row = Regex.Match(id, @"\Aopenai-(?<tier>plus|pro-5x|pro-100|pro-200|pro-500)-(?<model>gpt-[0-9]+(?:\.[0-9]+)?-(?:astra|sol))(?:-[0-9]{8})?\z");
                 if (!row.Success) continue;
                 var tier = row.Groups["tier"].Value;
                 tier = tier == "plus" ? "plus" : tier == "pro-5x" ? "100" : tier.Substring(4);
@@ -2487,28 +2503,54 @@ internal static class CodexNativeQuotaPatch
         private static Dictionary<string, object> ParseLegacy(string script)
         {
             // Read literal row objects only; downloaded JavaScript is never executed.
-            if (script == null || script.Length > MaximumResponse) throw new InvalidDataException("ModelDial script too large");
+            if (script == null || script.Length > MaximumScriptResponse) throw new InvalidDataException("ModelDial script too large");
             var models = new Dictionary<string, object>(); var apiModels = new Dictionary<string, object>();
+            var migrated = script.Contains("replace(/^openai-pro-20x-(gpt-(?:6(?:\\.1-sol|-astra|-sol)|5\\.6-sol))$/,\"openai-pro-200-$1\")") &&
+                Regex.IsMatch(script, @"""OpenAI:Pro 20x""\s*===\s*\w+\s*\?\s*""OpenAI:Pro 200""");
             foreach (var model in new[] { "gpt-6-astra", "gpt-6.1-sol" })
             {
                 var matches = Regex.Matches(script, "\\{\\s*\"id\"\\s*:\\s*\"openai-pro-20x-" + Regex.Escape(model) + "\"");
-                if (matches.Count != 1) throw new InvalidDataException("Missing or ambiguous legacy reference");
-                var start = matches[0].Index; int depth = 0, end = -1; bool quoted = false, escaped = false;
-                for (var index = start; index < script.Length; index++)
+                var canonical = matches.Count == 0;
+                if (canonical && migrated) matches = Regex.Matches(script, "\\{\\s*\"id\"\\s*:\\s*\"openai-pro-200-" + Regex.Escape(model) + "\"");
+                if (matches.Count == 0 || !canonical && matches.Count != 1) throw new InvalidDataException("Missing or ambiguous legacy reference");
+                string literal = null;
+                foreach (Match match in matches)
                 {
-                    var value = script[index];
-                    if (quoted) { if (escaped) escaped = false; else if (value == '\\') escaped = true; else if (value == '"') quoted = false; }
-                    else if (value == '"') quoted = true;
-                    else if (value == '{') depth++;
-                    else if (value == '}' && --depth == 0) { end = index + 1; break; }
+                    var start = match.Index; int depth = 0, end = -1; bool quoted = false, escaped = false;
+                    for (var index = start; index < script.Length; index++)
+                    {
+                        var value = script[index];
+                        if (quoted) { if (escaped) escaped = false; else if (value == '\\') escaped = true; else if (value == '"') quoted = false; }
+                        else if (value == '"') quoted = true;
+                        else if (value == '{') depth++;
+                        else if (value == '}' && --depth == 0) { end = index + 1; break; }
+                    }
+                    if (end < 0) throw new InvalidDataException("Incomplete legacy object");
+                    var candidate = script.Substring(start, end - start);
+                    if (literal != null && candidate != literal) throw new InvalidDataException("Conflicting canonical reference");
+                    literal = candidate;
                 }
-                if (end < 0) throw new InvalidDataException("Incomplete legacy object");
-                var row = Json.DeserializeObject(script.Substring(start, end - start)) as Dictionary<string, object>;
+                var row = Json.DeserializeObject(literal) as Dictionary<string, object>;
                 double tokens, usd, price;
-                if (row == null || StringValue(row, "provider") != "openai" || StringValue(row, "plan") != "Pro 20x" || StringValue(row, "currency") != "USD" || StringValue(row, "record_status") != "historical" ||
+                if (row == null || StringValue(row, "provider") != "openai" || StringValue(row, "currency") != "USD" ||
+                    StringValue(row, "plan") != (canonical ? "Pro 200" : "Pro 20x") || StringValue(row, "record_status") != (canonical ? "current" : "historical") ||
                     !NumberValue(row, "monthly_price", out price) || price != 200 || !NumberValue(row, "weekly_tokens", out tokens) || tokens <= 0 || tokens > 10000000000000 ||
                     !NumberValue(row, "weekly_api_equivalent_usd", out usd) || usd <= 0 || usd > 10000000)
                     throw new InvalidDataException("Invalid legacy weekly reference");
+                if (canonical)
+                {
+                    object raw; var calculation = row.TryGetValue("calculation", out raw) ? raw as Dictionary<string, object> : null;
+                    double multiplier, previousTokens, previousUsd;
+                    if (!row.ContainsKey("archive") || !(row["archive"] is bool) || (bool)row["archive"] ||
+                        !row.ContainsKey("conflict") || !(row["conflict"] is bool) || (bool)row["conflict"] || calculation == null ||
+                        StringValue(calculation, "previous_record_id") != "openai-pro-200-" + model + "-20261005" ||
+                        !NumberValue(calculation, "allowance_multiplier", out multiplier) || multiplier != 2 ||
+                        !NumberValue(calculation, "previous_weekly_tokens", out previousTokens) || previousTokens <= 0 ||
+                        !NumberValue(calculation, "previous_weekly_api_equivalent_usd", out previousUsd) || previousUsd <= 0 ||
+                        // Source JSON rounds the explicit weekly fields independently of the previous-record fields.
+                        Math.Abs(tokens - previousTokens * multiplier) > tokens * 1e-14 || Math.Abs(usd - previousUsd * multiplier) > usd * 1e-14)
+                        throw new InvalidDataException("Unproven legacy allowance migration");
+                }
                 models[model] = tokens; apiModels[model] = usd;
             }
             return new Dictionary<string, object> { { "models", models }, { "apiModels", apiModels } };
@@ -2516,6 +2558,7 @@ internal static class CodexNativeQuotaPatch
 
         public static Dictionary<string, object> ReadLegacy(string html, Func<string, string> fetchAsset)
         {
+            if (html == null || html.Length > MaximumResponse) throw new InvalidDataException("ModelDial HTML too large");
             var references = Regex.Matches(html.Replace("\\\"", "\""), @"\[(?<assets>[^\[\]]{1,4096})\],""SubscriptionPage""");
             if (references.Count != 1 || fetchAsset == null) throw new InvalidDataException("Legacy source asset unavailable");
             var paths = new List<string>();
@@ -2526,8 +2569,9 @@ internal static class CodexNativeQuotaPatch
             {
                 var url = "https://modeldial.com" + paths[index];
                 var script = fetchAsset(url);
-                if (script == null || script.Length > MaximumResponse) throw new InvalidDataException("ModelDial script too large");
-                if (!script.Contains("openai-pro-20x-gpt-6-astra")) continue;
+                if (script == null || script.Length > MaximumScriptResponse) throw new InvalidDataException("ModelDial script too large");
+                if (!script.Contains("openai-pro-20x-gpt-6-astra") && !(script.Contains("openai-pro-200-gpt-6-astra") &&
+                    Regex.IsMatch(script, @"""weekly_tokens""\s*:") && Regex.IsMatch(script, @"""weekly_api_equivalent_usd""\s*:"))) continue;
                 var legacy = ParseLegacy(script); legacy["sourceUrl"] = url; return legacy;
             }
             throw new InvalidDataException("Legacy weekly reference not found");
@@ -2616,6 +2660,9 @@ internal static class CodexNativeQuotaPatch
             }
             if (StringValue(saved, "legacyErrorCode") == "REFERENCE_CHECK_FAILED") state["legacyErrorCode"] = "REFERENCE_CHECK_FAILED";
             if (StringValue(saved, "errorCode") == "REFERENCE_CHECK_FAILED") state["errorCode"] = "REFERENCE_CHECK_FAILED";
+            object failures;
+            state["failureCount"] = saved.TryGetValue("failureCount", out failures) && failures is int && (int)failures >= 0 && (int)failures <= 3
+                ? (int)failures : state["errorCode"] != null || state["legacyErrorCode"] != null ? 1 : 0;
             return state;
         }
 
@@ -2640,25 +2687,35 @@ internal static class CodexNativeQuotaPatch
                 {
                     state = Load(path, now);
                     var attempt = Stamp(state["lastAttemptAt"], now);
-                    if (!attempt.HasValue || now >= attempt.Value.AddDays(1))
+                    if (!attempt.HasValue || now >= attempt.Value.AddHours(CheckIntervalsHours[(int)state["failureCount"]]))
                     {
                         state["lastAttemptAt"] = now.ToString("o", CultureInfo.InvariantCulture);
                         state["errorCode"] = "REFERENCE_CHECK_FAILED";
                         state["legacyErrorCode"] = "REFERENCE_CHECK_FAILED";
+                        state["failureCount"] = Math.Min(3, (int)state["failureCount"] + 1);
                         Save(path, state);
-                        var html = fetch(); var plans = Parse(html); var apiPlans = Parse(html, true);
-                        var successful = new Dictionary<string, object>(state);
-                        successful["plans"] = plans; successful["apiPlans"] = apiPlans; successful["lastSuccessAt"] = now.ToString("o", CultureInfo.InvariantCulture); successful["errorCode"] = null;
+                        var html = fetch();
                         try
                         {
-                            var legacy = ReadLegacy(html, fetchAsset); legacy["checkedAt"] = now.ToString("o", CultureInfo.InvariantCulture);
-                            successful["legacy"] = legacy; successful["legacyErrorCode"] = null;
+                            var plans = Parse(html); var apiPlans = Parse(html, true);
+                            state["plans"] = plans; state["apiPlans"] = apiPlans; state["lastSuccessAt"] = now.ToString("o", CultureInfo.InvariantCulture); state["errorCode"] = null;
                         }
                         catch (Exception error)
                         {
-                            if (!(error is WebException || error is IOException || error is InvalidDataException || error is ArgumentException || error is InvalidOperationException)) throw;
+                            if (!(error is InvalidDataException || error is ArgumentException || error is FormatException || error is InvalidOperationException)) throw;
                         }
-                        Save(path, successful); state = successful;
+                        try
+                        {
+                            var legacy = ReadLegacy(html, fetchAsset); legacy["checkedAt"] = now.ToString("o", CultureInfo.InvariantCulture);
+                            state["legacy"] = legacy; state["legacyErrorCode"] = null;
+                        }
+                        catch (Exception error)
+                        {
+                            if (!(error is WebException || error is IOException || error is InvalidDataException || error is ArgumentException || error is FormatException || error is InvalidOperationException ||
+                                error is CryptographicException || error is System.Security.SecurityException || error is NetworkConfigurationException)) throw;
+                        }
+                        if (state["errorCode"] == null && state["legacyErrorCode"] == null) state["failureCount"] = 0;
+                        Save(path, state);
                     }
                 }
                 catch (Exception error)
@@ -2667,9 +2724,11 @@ internal static class CodexNativeQuotaPatch
                         error is FormatException || error is InvalidOperationException || error is CryptographicException ||
                         error is System.Security.SecurityException || error is NetworkConfigurationException)) throw;
                     state["errorCode"] = "REFERENCE_CHECK_FAILED";
+                    state["legacyErrorCode"] = "REFERENCE_CHECK_FAILED";
+                    if ((int)state["failureCount"] == 0) state["failureCount"] = 1;
                     if (state["lastAttemptAt"] == null) state["lastAttemptAt"] = now.ToString("o", CultureInfo.InvariantCulture);
                 }
-                state["nextCheckAt"] = (Stamp(state["lastAttemptAt"], now) ?? now).AddDays(1).ToString("o", CultureInfo.InvariantCulture);
+                state["nextCheckAt"] = (Stamp(state["lastAttemptAt"], now) ?? now).AddHours(CheckIntervalsHours[(int)state["failureCount"]]).ToString("o", CultureInfo.InvariantCulture);
                 Current = state;
                 return new Dictionary<string, object>(state);
             }
@@ -2721,10 +2780,11 @@ internal static class CodexNativeQuotaPatch
             using (var reader = new StreamReader(response.GetResponseStream(), Encoding.UTF8))
             {
                 if (response.StatusCode != HttpStatusCode.OK) throw new InvalidDataException("ModelDial request failed");
+                var maximum = url == SourceUrl ? MaximumResponse : MaximumScriptResponse;
                 var buffer = new char[4096]; var text = new StringBuilder(); int count;
                 while ((count = reader.Read(buffer, 0, buffer.Length)) > 0)
                 {
-                    if (text.Length + count > MaximumResponse) throw new InvalidDataException("ModelDial response too large");
+                    if (text.Length + count > maximum) throw new InvalidDataException("ModelDial response too large");
                     text.Append(buffer, 0, count);
                 }
                 return text.ToString();

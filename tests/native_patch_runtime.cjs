@@ -799,7 +799,7 @@ test('hidden quota updates and settings preserve safe motion lifecycle and Back 
 test('request deadlines, cooldown, late responses and reinjection keep existing request isolation',async()=>{
   const page=await pageFor();try{
     await open(page);const now=Date.now();await page.clock.install({time:new Date(now)});await page.clock.pauseAt(new Date(now+1000));
-    await page.evaluate(()=>{requests=[];console.info=(marker,id)=>requests.push({marker,id})});
+    await page.evaluate(()=>{requests=[];console.info=(marker,id)=>{if(marker==='__codexQuotaOfficialRequest__')requests.push({marker,id});};});
     const prior=await page.locator('#codex-quota-trigger').innerText();
     const readyHeight=(await geometry(page)).popup.height;
     await page.locator('.cq-refresh').evaluate(el=>el.click());
@@ -808,13 +808,14 @@ test('request deadlines, cooldown, late responses and reinjection keep existing 
     await page.clock.fastForward(10000);await page.evaluate(source);
     assert.equal(await page.evaluate(()=>__codexQuotaOfficialRequestDeadline),first.deadline);assert.equal(await page.evaluate(()=>requests.length),1);
     await page.clock.fastForward(15000);assert.equal(await page.locator('.cq-refresh').isDisabled(),false);assert.match(await page.locator('.cq-status').innerText(),/更新失败.*超时/);assert.equal(await page.locator('#codex-quota-trigger').innerText(),prior);
-    await page.locator('.cq-refresh').evaluate(el=>el.click());
+    await page.locator('.cq-refresh').evaluate(el=>el.click());assert.equal(await page.evaluate(()=>requests.length),1,'manual refresh cannot bypass a request-timeout cooldown');
+    await page.clock.fastForward(60000);
     const second=await page.evaluate(()=>__codexQuotaOfficialRequestId);assert.notEqual(second,first.id);
     await page.evaluate(id=>__codexQuotaUpdateOfficial({errorCode:'AUTH_REQUIRED'},id),first.id);assert.equal(await page.locator('.cq-refresh').isDisabled(),true);
     await update(page,officialPayload());assert.equal(await page.locator('.cq-refresh').isDisabled(),false);
-    assert.equal(await page.locator('.cq-status').count(),0);assert.equal(await page.locator('.cq-refresh').getAttribute('data-cq-refreshed'),'unchanged');
+    assert.equal(await page.locator('.cq-status').count(),0);assert.equal(await page.locator('.cq-refresh').getAttribute('data-cq-refreshed'),null,'automatic retry does not show manual refresh feedback');
     const successfulRequests=await page.evaluate(()=>requests.length);
-    await page.clock.fastForward(1999);assert.equal(await page.locator('.cq-status').count(),0);assert.equal(await page.locator('.cq-refresh').getAttribute('data-cq-refreshed'),'unchanged');
+    await page.clock.fastForward(1999);assert.equal(await page.locator('.cq-status').count(),0);assert.equal(await page.locator('.cq-refresh').getAttribute('data-cq-refreshed'),null);
     await page.clock.fastForward(1);assert.equal(await page.locator('.cq-status').count(),0);assert.equal(await page.locator('.cq-refresh').getAttribute('data-cq-refreshed'),null);
     assert.equal(await page.evaluate(()=>requests.length),successfulRequests,'feedback expiry must not request data');
     await update(page,{errorCode:'RATE_LIMITED',retryAfterSeconds:120});const count=await page.evaluate(()=>requests.length);
@@ -886,6 +887,29 @@ test('specific network errors keep successful quota and the existing fixed-heigh
       assert.deepEqual((await page.locator('.cq-value-digits').allTextContents()).sort(),['28','63']);
       assert.equal((await geometry(page)).popup.height,height,'error details do not add a visible status row');
     }
+  }finally{await close(page);}
+});
+
+test('all failed refreshes share a deadline without manual bypass or cached-reply extension',async()=>{
+  const page=await pageFor();try{
+    await open(page);const now=Date.now();await page.clock.install({time:new Date(now)});await page.clock.pauseAt(new Date(now+1000));
+    await page.evaluate(()=>{requests=[];console.info=(marker,id)=>{if(marker==='__codexQuotaOfficialRequest__')requests.push(id);};});
+    const before=await page.locator('#codex-quota-trigger').innerText();
+    await page.locator('.cq-refresh').evaluate(el=>el.click());await update(page,{errorCode:'CONNECTION_FAILED'});
+    const deadline=await page.evaluate(()=>__codexQuotaOfficialCooldownUntil);assert.equal(deadline,now+61000);
+    await page.locator('.cq-refresh').evaluate(el=>el.click());assert.equal(await page.evaluate(()=>requests.length),1);
+    assert.match(await page.locator('.cq-refresh').getAttribute('aria-label'),/更新失败.*上次成功.*重试时间/);assert.equal(await page.locator('#codex-quota-trigger').innerText(),before);
+    await page.clock.fastForward(10000);
+    await update(page,{errorCode:'CONNECTION_FAILED',retryAt:new Date(deadline).toISOString(),retryAfterSeconds:50});
+    assert.equal(await page.evaluate(()=>__codexQuotaOfficialCooldownUntil),deadline,'cached remaining time must not restart the minimum minute');
+    await page.evaluate(source);assert.equal(await page.evaluate(()=>__codexQuotaOfficialCooldownUntil),deadline);
+    await page.clock.fastForward(49999);await page.locator('.cq-refresh').evaluate(el=>el.click());assert.equal(await page.evaluate(()=>requests.length),1);
+    await page.clock.fastForward(1001);assert.equal(await page.evaluate(()=>requests.length),2);
+    await update(page,officialPayload());assert.equal(await page.evaluate(()=>__codexQuotaOfficialCooldownUntil),0);
+    await page.locator('.cq-refresh').evaluate(el=>el.click());assert.equal(await page.evaluate(()=>requests.length),3,'successful recovery restores manual refresh');
+    await update(page,{errorCode:'NETWORK_ERROR',retryAt:'invalid',retryAfterSeconds:120});
+    assert.equal(await page.evaluate(()=>__codexQuotaOfficialCooldownUntil-Date.now()),120000,'invalid absolute deadline falls back to the legacy duration');
+    await page.evaluate(()=>__codexQuotaResetSession());assert.equal(await page.evaluate(()=>globalThis.__codexQuotaOfficialCooldownUntil),undefined);
   }finally{await close(page);}
 });
 
@@ -1829,7 +1853,11 @@ test('reference tiers require an explicit Pro selection and stale daily checks r
     await select.selectOption('pro100');({range,id}=await localUsageRequest(page));assert.equal(range.referencePlan,'pro100');
     await updateLocalUsage(page,localUsagePayload(range,{reference:{...reference,selectedPlan:'pro100',status:'stale',models:{'gpt-6-astra':438000000,'gpt-6.1-sol':2354000000}}}),id);
     assert.match(await page.locator('.cq-local-reference-status').innerText(),/更新失败.*保留上次/);
+    const sourceLink=page.locator('.cq-local-weekly-reference a');
+    assert.equal(await sourceLink.innerText(),'ModelDial · 更新失败');assert.match(await sourceLink.getAttribute('title'),/上次成功.*上次尝试.*下次检查/);assert.match(await sourceLink.getAttribute('class'),/cq-local-partial/);
     assert.match(await page.locator('.cq-local-weekly-reference strong').innerText(),/Pro \$100/);
+    await updateLocalUsage(page,localUsagePayload(range,{reference:{...reference,selectedPlan:'pro100',status:'ok',models:{'gpt-6-astra':438000000,'gpt-6.1-sol':2354000000}}}),id);
+    assert.match(await sourceLink.innerText(),/ModelDial · 已核对/);assert.doesNotMatch(await sourceLink.getAttribute('class')||'',/cq-local-partial/);
     await page.locator('#cq-local-tab-overview').click();assert.equal(await page.locator('.cq-local-estimate strong').textContent(),'≈ 2%');
     assert.deepEqual(await page.evaluate(()=>JSON.parse(localStorage.getItem('codexQuotaReferencePlan'))),{scope:'synthetic-session',plan:'pro100'});
     const bad={...reference,selectedPlan:'pro100',status:'ok',models:{'gpt-6-astra':0}};
