@@ -1304,15 +1304,17 @@
       }
       const select=weekly.querySelector("select");select.hidden=source.planName!=="pro";select.value=localReferencePlan;
       const note=weekly.querySelector(".cq-local-reference-status");
-      note.textContent=!validReference || source.status==="unavailable" ? words("参考数据暂不可用，次日自动重试。", "References unavailable; retries tomorrow.")
+      note.textContent=!validReference || source.status==="unavailable" ? words("参考数据暂不可用，将自动重试。", "References unavailable; retry scheduled.")
         :source.status==="needs_plan" ? ""
         :source.status==="snapshot" ? source.referenceCheckFailed ? words("旧档检查失败；使用参考快照", "Legacy check failed; using snapshot") : words("旧 20x 参考快照", "Legacy 20x reference snapshot")
         :source.status==="stale" ? words("更新失败；保留上次成功基准。", "Update failed; previous references retained.") : "";
-      note.toggleAttribute('data-cq-warning',source.status==='stale' || Boolean(source.referenceCheckFailed));
+      const referenceFailed=source.status==='stale' || Boolean(source.referenceCheckFailed);
+      note.toggleAttribute('data-cq-warning',referenceFailed);
       const link=weekly.querySelector("a");link.href="https://modeldial.com/subscriptions?period=week&view=insights";
-      link.textContent=releaseDate(source.lastSuccessAt) ? `ModelDial · ${words("已核对", "Checked")} ${new Date(source.lastSuccessAt).toLocaleDateString()}`
+      link.classList.toggle('cq-local-partial',referenceFailed);
+      link.textContent=referenceFailed ? `ModelDial · ${words("更新失败", "Update failed")}` : releaseDate(source.lastSuccessAt) ? `ModelDial · ${words("已核对", "Checked")} ${new Date(source.lastSuccessAt).toLocaleDateString()}`
         : /^\d{4}-\d\d-\d\d$/.test(source.referenceSnapshotAt || '') ? `ModelDial · ${source.referenceSnapshotAt}` : "ModelDial";
-      link.title=[releaseDate(source.lastSuccessAt) ? words(`上次成功 ${new Date(source.lastSuccessAt).toLocaleString()}`, `Last success ${new Date(source.lastSuccessAt).toLocaleString()}`) : "",releaseDate(source.nextCheckAt) ? words(`下次检查 ${new Date(source.nextCheckAt).toLocaleString()}`, `Next check ${new Date(source.nextCheckAt).toLocaleString()}`) : ""].filter(Boolean).join(" · ");
+      link.title=[releaseDate(source.lastSuccessAt) ? words(`上次成功 ${new Date(source.lastSuccessAt).toLocaleString()}`, `Last success ${new Date(source.lastSuccessAt).toLocaleString()}`) : "",referenceFailed && releaseDate(source.lastAttemptAt) ? words(`上次尝试 ${new Date(source.lastAttemptAt).toLocaleString()}`, `Last attempt ${new Date(source.lastAttemptAt).toLocaleString()}`) : "",releaseDate(source.nextCheckAt) ? words(`下次检查 ${new Date(source.nextCheckAt).toLocaleString()}`, `Next check ${new Date(source.nextCheckAt).toLocaleString()}`) : ""].filter(Boolean).join(" · ");
     }
     panel.append(reference);
     result.replaceChildren();
@@ -2871,10 +2873,10 @@
       const retryMs = Number.isFinite(retrySeconds) && retrySeconds > 0
         ? Math.max(failureRetryMs, retrySeconds * 1000)
         : failureRetryMs;
-      globalThis.__codexQuotaOfficialNextAutoAttemptAt = now + retryMs;
-      if (Number.isFinite(retrySeconds) && retrySeconds > 0) {
-        globalThis.__codexQuotaOfficialCooldownUntil = now + retryMs;
-      }
+      const retryAt = typeof data?.retryAt === "string" && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,7})?Z$/.test(data.retryAt) ? Date.parse(data.retryAt) : NaN;
+      const deadline = Number.isFinite(retryAt) ? Math.max(now,retryAt) : now + retryMs;
+      globalThis.__codexQuotaOfficialNextAutoAttemptAt = deadline;
+      globalThis.__codexQuotaOfficialCooldownUntil = deadline;
     }
     const card = document.getElementById(officialHostId);
     if (card) renderOfficial(card, globalThis.__codexQuotaOfficialPayload || nativeSnapshot, quotaErrorCode("official"));

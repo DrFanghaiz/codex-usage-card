@@ -93,10 +93,15 @@ public static class NativeHelperRegressions
     private static readonly object PayloadGate = new object();
     private static string CachedPayloadScope;
     private static Dictionary<string, object> CachedPayload;
+    private static bool CachedServerCooldown;
+    private static int ConsecutivePayloadFailures;
     private static volatile Dictionary<string, string> LastPlan;
     private static DateTimeOffset CachedPayloadExpiresAt;
     private static int FetchCount;
     private static bool FetchLimited;
+    private static string FetchError;
+    private static int FetchStatus;
+    private static string FetchRetryAfter;
     private static bool LoginMissing;
     private static string CurrentAccountId = "account-a";
     private static Action DuringFetch;
@@ -106,6 +111,8 @@ public static class NativeHelperRegressions
         Interlocked.Increment(ref FetchCount);
         if (DuringFetch != null) DuringFetch();
         Thread.Sleep(50);
+        if (FetchStatus != 0) return HttpErrorPayload(FetchStatus, FetchRetryAfter, DateTimeOffset.UtcNow);
+        if (FetchError != null) return new Dictionary<string, object> { { "errorCode", FetchError } };
         return FetchLimited
             ? new Dictionary<string, object> { { "errorCode", "RATE_LIMITED" }, { "retryAfterSeconds", 60 } }
             : new Dictionary<string, object> { { "value", 42 }, { "planName", "pro" } };
@@ -473,6 +480,9 @@ __HTTP_METHODS__
         Check((string)WebErrorPayload(new WebException("synthetic", WebExceptionStatus.TrustFailure))["errorCode"] == "TLS_FAILED", "Certificate validation failure");
         Check((string)WebErrorPayload(new WebException("synthetic", WebExceptionStatus.SecureChannelFailure))["errorCode"] == "TLS_FAILED", "TLS negotiation failure");
         Check((int)HttpErrorPayload(429, "30", now)["retryAfterSeconds"] == 30, "Retry-After seconds");
+        Check((int)HttpErrorPayload(503, "90", now)["retryAfterSeconds"] == 90, "503 Retry-After seconds");
+        Check((int)HttpErrorPayload(503, now.AddSeconds(180).ToString("r"), now)["retryAfterSeconds"] == 180, "503 Retry-After date");
+        Check(!HttpErrorPayload(503, "-1", now).ContainsKey("retryAfterSeconds"), "503 invalid Retry-After rejected");
         Check((int)HttpErrorPayload(429, now.AddSeconds(45).ToString("r"), now)["retryAfterSeconds"] == 45, "Retry-After date");
         Check((int)HttpErrorPayload(429, "0", now)["retryAfterSeconds"] == 1, "Retry-After zero must not spin");
         Check(!HttpErrorPayload(429, "-9", now).ContainsKey("retryAfterSeconds"), "Negative retry rejected");
@@ -620,6 +630,7 @@ __HTTP_METHODS__
         Check((string)cachedNetwork["NetworkCheckedAt"] == (string)network["NetworkCheckedAt"], "Cached responses preserve original network attempt time");
         LoginMissing = false;
         CachedPayload = null;
+        CheckFailureCooldowns();
         using (var pages = new PageSessions())
         {
             pages.Start(new CdpTarget { WebSocketDebuggerUrl = "ws://127.0.0.1:123/devtools/page/first" });
@@ -685,6 +696,91 @@ __HTTP_METHODS__
         CheckDiscovery("body");
         CheckDiscovery("drip");
     }
+    private static DateTimeOffset CheckRetry(Dictionary<string, object> reply, int seconds, string label)
+    {
+        var text = (string)reply["retryAt"];
+        var at = DateTimeOffset.Parse(text, CultureInfo.InvariantCulture);
+        var remaining = (int)reply["retryAfterSeconds"];
+        Check(text.EndsWith("Z") && at == CachedPayloadExpiresAt, label + ": absolute UTC cutoff");
+        Check(remaining >= seconds - 1 && remaining <= seconds, label + ": rounded remaining seconds");
+        return at;
+    }
+    private static void CheckFailureCooldowns()
+    {
+        SessionScope = "failure-backoff"; CurrentAccountId = "account-a";
+        LoginFingerprint = AccountFingerprint(LoadOfficialConfiguration());
+        FetchError = "DNS_FAILED"; FetchLimited = false; FetchStatus = 0; CachedPayload = null;
+        var before = FetchCount;
+        var shared = new List<Task>();
+        for (int i = 0; i < 8; i++) shared.Add(Task.Run(() => CheckRetry(SharedPayload(SessionScope, SessionGeneration), 60, "Concurrent failure")));
+        Task.WaitAll(shared.ToArray());
+        Check(FetchCount == before + 1, "Concurrent failed windows share one HTTP request");
+        foreach (var seconds in new[] { 120, 240, 480, 900, 900 })
+        {
+            CachedPayloadExpiresAt = DateTimeOffset.UtcNow.AddSeconds(-1);
+            CheckRetry(SharedPayload(SessionScope, SessionGeneration), seconds, "Consecutive transient failure");
+        }
+        var cutoff = DateTimeOffset.UtcNow.AddSeconds(23.4); CachedPayloadExpiresAt = cutoff;
+        before = FetchCount;
+        var replay = SharedPayload(SessionScope, SessionGeneration);
+        Check(CheckRetry(replay, 24, "Remaining cooldown") == cutoff && FetchCount == before,
+            "Cached failure neither fetches nor extends its deadline");
+        Console.WriteLine("PASS shared failed requests, bounded 60/120/240/480/900 backoff and unchanged replay deadline");
+
+        CachedPayloadExpiresAt = DateTimeOffset.UtcNow.AddSeconds(-1); FetchError = null;
+        var success = SharedPayload(SessionScope, SessionGeneration);
+        Check(!success.ContainsKey("retryAt") && !success.ContainsKey("retryAfterSeconds") && ConsecutivePayloadFailures == 0,
+            "Success clears failed-request state");
+        Check((CachedPayloadExpiresAt - DateTimeOffset.UtcNow).TotalSeconds <= 5 &&
+            (CachedPayloadExpiresAt - DateTimeOffset.UtcNow).TotalSeconds > 4, "Success keeps five-second shared cache");
+        before = FetchCount; SharedPayload(SessionScope, SessionGeneration);
+        Check(FetchCount == before, "Warm success still shares HTTP");
+        CachedPayloadExpiresAt = DateTimeOffset.UtcNow.AddSeconds(-1); FetchError = "REQUEST_TIMEOUT";
+        CheckRetry(SharedPayload(SessionScope, SessionGeneration), 60, "First failure after success");
+        Console.WriteLine("PASS success resets backoff and preserves five-second successful cache");
+
+        CachedPayloadExpiresAt = DateTimeOffset.UtcNow.AddSeconds(-1);
+        CheckRetry(SharedPayload(SessionScope, SessionGeneration), 120, "Failure before credential repair");
+        SessionGeneration++; before = FetchCount;
+        CheckRetry(SharedPayload(SessionScope, SessionGeneration), 60, "Same-account credential generation repair");
+        Check(FetchCount == before + 1, "Credential repair releases ordinary failure cache");
+        SessionScope = "failure-other-account"; CurrentAccountId = "account-b";
+        LoginFingerprint = AccountFingerprint(LoadOfficialConfiguration()); before = FetchCount;
+        CheckRetry(SharedPayload(SessionScope, SessionGeneration), 60, "Another account");
+        Check(FetchCount == before + 1, "Another account cannot inherit a failed request or backoff");
+        Console.WriteLine("PASS ordinary failure recovery after credential generation and account isolation");
+
+        foreach (var code in new[] { "AUTH_REQUIRED", "ACCESS_DENIED", "PROXY_AUTH_REQUIRED", "NETWORK_CONFIG_INVALID", "INVALID_RESPONSE" })
+        {
+            FetchError = code; CachedPayloadExpiresAt = DateTimeOffset.UtcNow.AddSeconds(-1);
+            CheckRetry(SharedPayload(SessionScope, SessionGeneration), 60, "Nontransient failure " + code);
+        }
+        Console.WriteLine("PASS all nontransient failures also enforce the minimum shared cooldown");
+
+        FetchError = null; FetchStatus = 429; FetchRetryAfter = "1"; SessionScope = "short-429";
+        CheckRetry(SharedPayload(SessionScope, SessionGeneration), 60, "Short server cooldown");
+        cutoff = CachedPayloadExpiresAt; before = FetchCount; SessionGeneration++;
+        Check(CheckRetry(SharedPayload(SessionScope, SessionGeneration), 60, "Server cooldown after token rewrite") == cutoff && FetchCount == before,
+            "Token repair cannot bypass or extend confirmed server cooldown");
+        SessionScope = "default-429"; FetchRetryAfter = null;
+        CheckRetry(SharedPayload(SessionScope, SessionGeneration), 60, "429 without Retry-After");
+        Console.WriteLine("PASS short/default 429 cooldowns and token rewrites retain the absolute cutoff");
+
+        SessionScope = "seconds-503"; FetchStatus = 503; FetchRetryAfter = "180";
+        CheckRetry(SharedPayload(SessionScope, SessionGeneration), 180, "503 seconds");
+        cutoff = CachedPayloadExpiresAt; before = FetchCount; SessionGeneration++;
+        Check(CheckRetry(SharedPayload(SessionScope, SessionGeneration), 180, "503 token rewrite") == cutoff && FetchCount == before,
+            "503 confirmed server cutoff survives token rewrites");
+        SessionScope = "date-503"; FetchRetryAfter = DateTimeOffset.UtcNow.AddMinutes(4).ToString("r");
+        var date = DateTimeOffset.Parse(FetchRetryAfter, CultureInfo.InvariantCulture);
+        var dated = SharedPayload(SessionScope, SessionGeneration);
+        Check(Math.Abs((CheckRetry(dated, 240, "503 HTTP date") - date).TotalSeconds) < 1,
+            "503 HTTP-date cutoff stays within rounding precision");
+        SessionScope = "short-503"; FetchRetryAfter = "1";
+        CheckRetry(SharedPayload(SessionScope, SessionGeneration), 60, "503 short server header");
+        Console.WriteLine("PASS 503 seconds/date Retry-After, minimum delay and generation-preserved server cutoff");
+        FetchStatus = 0; FetchRetryAfter = null; CachedPayload = null;
+    }
 __DISCOVERY__
 __WATCHER__
 __LOGIN_WAIT__
@@ -700,4 +796,4 @@ __PAGE_SESSIONS__
 $harness = $harness.Replace('__BACKOFF__', $backoff).Replace('__DISCOVERY__', $discovery).Replace('__WATCHER__', $watcher).Replace('__LOGIN_WAIT__', $loginWait).Replace('__CONFIG_ROOT__', $configRoot).Replace('__CONFIG_LOADERS__', $configLoaders).Replace('__LOGIN_SELECTOR__', $loginSelector).Replace('__PAYLOAD_METHODS__', $payloadMethods).Replace('__TARGET_EVENTS__', $targetEvents).Replace('__SHARED_PAYLOAD__', $sharedPayload).Replace('__PAGE_SESSIONS__', $pageSessions).Replace('__SEND_COMMAND__', $sendCommand).Replace('__PUBLISH_METHODS__', $publishMethods).Replace('__HTTP_METHODS__', $httpMethods).Replace('__NETWORK_METHODS__', $networkMethods)
 Add-Type -TypeDefinition $harness -ReferencedAssemblies System.dll, System.Core.dll, System.Security.dll, System.Web.Extensions.dll
 [NativeHelperRegressions]::Run()
-'Native helper regressions: 24 groups passed, 0 failed (backoff, watcher cleanup, login rename boundaries, CODEX_HOME isolation and directory events, official-only login and obsolete API markers, 5 discovery cases, HTTP errors, console requests, diagnosis sanitization, invalid diagnosis, new window events, shared fetch/cache/cooldown, account change race and in-flight invalidation, strict quota number/window types, page session scheduling, console history replay, request IDs, bootstrap and reply correlation, CDP deadline, HTTP whole-body deadlines)'
+'Native helper regressions: 30 groups passed, 0 failed (bounded shared failure backoff, absolute deadlines, credential recovery, 429/503 server cooldown, watcher cleanup, login rename boundaries, CODEX_HOME isolation and directory events, official-only login and obsolete API markers, 5 discovery cases, HTTP errors, console requests, diagnosis sanitization, invalid diagnosis, new window events, shared fetch/cache/cooldown, account change race and in-flight invalidation, strict quota number/window types, page session scheduling, console history replay, request IDs, bootstrap and reply correlation, CDP deadline, HTTP whole-body deadlines)'
