@@ -1,0 +1,661 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-11-04T21:50:46.967541+08:00",
+  "title": "Design System: Codex-bar",
+  "extensions": {
+    "colorMeta": {
+      "sand-light-1": {
+        "role": "neutral",
+        "displayName": "sand light 1",
+        "tonalRamp": [
+          "#21201c",
+          "#63635e",
+          "#82827c",
+          "#bcbbb5",
+          "#dad9d6",
+          "#e9e8e6",
+          "#f9f9f8",
+          "#fdfdfc"
+        ]
+      },
+      "sand-light-2": {
+        "role": "neutral",
+        "displayName": "sand light 2",
+        "tonalRamp": [
+          "#21201c",
+          "#63635e",
+          "#82827c",
+          "#bcbbb5",
+          "#dad9d6",
+          "#e9e8e6",
+          "#f9f9f8",
+          "#fdfdfc"
+        ]
+      },
+      "sand-light-3": {
+        "role": "neutral",
+        "displayName": "sand light 3",
+        "tonalRamp": [
+          "#21201c",
+          "#63635e",
+          "#82827c",
+          "#bcbbb5",
+          "#dad9d6",
+          "#e9e8e6",
+          "#f9f9f8",
+          "#fdfdfc"
+        ]
+      },
+      "sand-light-4": {
+        "role": "neutral",
+        "displayName": "sand light 4",
+        "tonalRamp": [
+          "#21201c",
+          "#63635e",
+          "#82827c",
+          "#bcbbb5",
+          "#dad9d6",
+          "#e9e8e6",
+          "#f9f9f8",
+          "#fdfdfc"
+        ]
+      },
+      "sand-light-5": {
+        "role": "neutral",
+        "displayName": "sand light 5",
+        "tonalRamp": [
+          "#21201c",
+          "#63635e",
+          "#82827c",
+          "#bcbbb5",
+          "#dad9d6",
+          "#e9e8e6",
+          "#f9f9f8",
+          "#fdfdfc"
+        ]
+      },
+      "sand-light-6": {
+        "role": "neutral",
+        "displayName": "sand light 6",
+        "tonalRamp": [
+          "#21201c",
+          "#63635e",
+          "#82827c",
+          "#bcbbb5",
+          "#dad9d6",
+          "#e9e8e6",
+          "#f9f9f8",
+          "#fdfdfc"
+        ]
+      },
+      "sand-light-7": {
+        "role": "neutral",
+        "displayName": "sand light 7",
+        "tonalRamp": [
+          "#21201c",
+          "#63635e",
+          "#82827c",
+          "#bcbbb5",
+          "#dad9d6",
+          "#e9e8e6",
+          "#f9f9f8",
+          "#fdfdfc"
+        ]
+      },
+      "sand-light-8": {
+        "role": "neutral",
+        "displayName": "sand light 8",
+        "tonalRamp": [
+          "#21201c",
+          "#63635e",
+          "#82827c",
+          "#bcbbb5",
+          "#dad9d6",
+          "#e9e8e6",
+          "#f9f9f8",
+          "#fdfdfc"
+        ]
+      },
+      "sand-light-9": {
+        "role": "neutral",
+        "displayName": "sand light 9",
+        "tonalRamp": [
+          "#21201c",
+          "#63635e",
+          "#82827c",
+          "#bcbbb5",
+          "#dad9d6",
+          "#e9e8e6",
+          "#f9f9f8",
+          "#fdfdfc"
+        ]
+      },
+      "sand-light-10": {
+        "role": "neutral",
+        "displayName": "sand light 10",
+        "tonalRamp": [
+          "#21201c",
+          "#63635e",
+          "#82827c",
+          "#bcbbb5",
+          "#dad9d6",
+          "#e9e8e6",
+          "#f9f9f8",
+          "#fdfdfc"
+        ]
+      },
+      "sand-light-11": {
+        "role": "neutral",
+        "displayName": "sand light 11",
+        "tonalRamp": [
+          "#21201c",
+          "#63635e",
+          "#82827c",
+          "#bcbbb5",
+          "#dad9d6",
+          "#e9e8e6",
+          "#f9f9f8",
+          "#fdfdfc"
+        ]
+      },
+      "sand-light-12": {
+        "role": "neutral",
+        "displayName": "sand light 12",
+        "tonalRamp": [
+          "#21201c",
+          "#63635e",
+          "#82827c",
+          "#bcbbb5",
+          "#dad9d6",
+          "#e9e8e6",
+          "#f9f9f8",
+          "#fdfdfc"
+        ]
+      },
+      "sand-dark-1": {
+        "role": "neutral",
+        "displayName": "sand dark 1",
+        "tonalRamp": [
+          "#111110",
+          "#222221",
+          "#31312e",
+          "#494844",
+          "#62605b",
+          "#7c7b74",
+          "#b5b3ad",
+          "#eeeeec"
+        ]
+      },
+      "sand-dark-2": {
+        "role": "neutral",
+        "displayName": "sand dark 2",
+        "tonalRamp": [
+          "#111110",
+          "#222221",
+          "#31312e",
+          "#494844",
+          "#62605b",
+          "#7c7b74",
+          "#b5b3ad",
+          "#eeeeec"
+        ]
+      },
+      "sand-dark-3": {
+        "role": "neutral",
+        "displayName": "sand dark 3",
+        "tonalRamp": [
+          "#111110",
+          "#222221",
+          "#31312e",
+          "#494844",
+          "#62605b",
+          "#7c7b74",
+          "#b5b3ad",
+          "#eeeeec"
+        ]
+      },
+      "sand-dark-4": {
+        "role": "neutral",
+        "displayName": "sand dark 4",
+        "tonalRamp": [
+          "#111110",
+          "#222221",
+          "#31312e",
+          "#494844",
+          "#62605b",
+          "#7c7b74",
+          "#b5b3ad",
+          "#eeeeec"
+        ]
+      },
+      "sand-dark-5": {
+        "role": "neutral",
+        "displayName": "sand dark 5",
+        "tonalRamp": [
+          "#111110",
+          "#222221",
+          "#31312e",
+          "#494844",
+          "#62605b",
+          "#7c7b74",
+          "#b5b3ad",
+          "#eeeeec"
+        ]
+      },
+      "sand-dark-6": {
+        "role": "neutral",
+        "displayName": "sand dark 6",
+        "tonalRamp": [
+          "#111110",
+          "#222221",
+          "#31312e",
+          "#494844",
+          "#62605b",
+          "#7c7b74",
+          "#b5b3ad",
+          "#eeeeec"
+        ]
+      },
+      "sand-dark-7": {
+        "role": "neutral",
+        "displayName": "sand dark 7",
+        "tonalRamp": [
+          "#111110",
+          "#222221",
+          "#31312e",
+          "#494844",
+          "#62605b",
+          "#7c7b74",
+          "#b5b3ad",
+          "#eeeeec"
+        ]
+      },
+      "sand-dark-8": {
+        "role": "neutral",
+        "displayName": "sand dark 8",
+        "tonalRamp": [
+          "#111110",
+          "#222221",
+          "#31312e",
+          "#494844",
+          "#62605b",
+          "#7c7b74",
+          "#b5b3ad",
+          "#eeeeec"
+        ]
+      },
+      "sand-dark-9": {
+        "role": "neutral",
+        "displayName": "sand dark 9",
+        "tonalRamp": [
+          "#111110",
+          "#222221",
+          "#31312e",
+          "#494844",
+          "#62605b",
+          "#7c7b74",
+          "#b5b3ad",
+          "#eeeeec"
+        ]
+      },
+      "sand-dark-10": {
+        "role": "neutral",
+        "displayName": "sand dark 10",
+        "tonalRamp": [
+          "#111110",
+          "#222221",
+          "#31312e",
+          "#494844",
+          "#62605b",
+          "#7c7b74",
+          "#b5b3ad",
+          "#eeeeec"
+        ]
+      },
+      "sand-dark-11": {
+        "role": "neutral",
+        "displayName": "sand dark 11",
+        "tonalRamp": [
+          "#111110",
+          "#222221",
+          "#31312e",
+          "#494844",
+          "#62605b",
+          "#7c7b74",
+          "#b5b3ad",
+          "#eeeeec"
+        ]
+      },
+      "sand-dark-12": {
+        "role": "neutral",
+        "displayName": "sand dark 12",
+        "tonalRamp": [
+          "#111110",
+          "#222221",
+          "#31312e",
+          "#494844",
+          "#62605b",
+          "#7c7b74",
+          "#b5b3ad",
+          "#eeeeec"
+        ]
+      },
+      "chart-input-light": {
+        "role": "secondary",
+        "displayName": "chart input light",
+        "tonalRamp": [
+          "oklch(15% 0.0070 247.90)",
+          "oklch(27% 0.0070 247.90)",
+          "oklch(38% 0.0070 247.90)",
+          "oklch(49% 0.0070 247.90)",
+          "oklch(61% 0.0070 247.90)",
+          "oklch(72% 0.0070 247.90)",
+          "oklch(84% 0.0070 247.90)",
+          "oklch(95% 0.0070 247.90)"
+        ]
+      },
+      "chart-input-dark": {
+        "role": "secondary",
+        "displayName": "chart input dark",
+        "tonalRamp": [
+          "oklch(15% 0.0153 255.59)",
+          "oklch(27% 0.0153 255.59)",
+          "oklch(38% 0.0153 255.59)",
+          "oklch(49% 0.0153 255.59)",
+          "oklch(61% 0.0153 255.59)",
+          "oklch(72% 0.0153 255.59)",
+          "oklch(84% 0.0153 255.59)",
+          "oklch(95% 0.0153 255.59)"
+        ]
+      },
+      "chart-cache": {
+        "role": "secondary",
+        "displayName": "chart cache",
+        "tonalRamp": [
+          "oklch(15% 0.1329 157.68)",
+          "oklch(27% 0.1329 157.68)",
+          "oklch(38% 0.1329 157.68)",
+          "oklch(49% 0.1329 157.68)",
+          "oklch(61% 0.1329 157.68)",
+          "oklch(72% 0.1329 157.68)",
+          "oklch(84% 0.1329 157.68)",
+          "oklch(95% 0.1329 157.68)"
+        ]
+      },
+      "chart-output-light": {
+        "role": "secondary",
+        "displayName": "chart output light",
+        "tonalRamp": [
+          "oklch(15% 0.1622 252.19)",
+          "oklch(27% 0.1622 252.19)",
+          "oklch(38% 0.1622 252.19)",
+          "oklch(49% 0.1622 252.19)",
+          "oklch(61% 0.1622 252.19)",
+          "oklch(72% 0.1622 252.19)",
+          "oklch(84% 0.1622 252.19)",
+          "oklch(95% 0.1622 252.19)"
+        ]
+      },
+      "chart-output-dark": {
+        "role": "secondary",
+        "displayName": "chart output dark",
+        "tonalRamp": [
+          "oklch(15% 0.1257 249.46)",
+          "oklch(27% 0.1257 249.46)",
+          "oklch(38% 0.1257 249.46)",
+          "oklch(49% 0.1257 249.46)",
+          "oklch(61% 0.1257 249.46)",
+          "oklch(72% 0.1257 249.46)",
+          "oklch(84% 0.1257 249.46)",
+          "oklch(95% 0.1257 249.46)"
+        ]
+      },
+      "warning-light": {
+        "role": "secondary",
+        "displayName": "warning light",
+        "tonalRamp": [
+          "oklch(15% 0.1974 25.17)",
+          "oklch(27% 0.1974 25.17)",
+          "oklch(38% 0.1974 25.17)",
+          "oklch(49% 0.1974 25.17)",
+          "oklch(61% 0.1974 25.17)",
+          "oklch(72% 0.1974 25.17)",
+          "oklch(84% 0.1974 25.17)",
+          "oklch(95% 0.1974 25.17)"
+        ]
+      },
+      "warning-dark": {
+        "role": "secondary",
+        "displayName": "warning dark",
+        "tonalRamp": [
+          "oklch(15% 0.1281 22.14)",
+          "oklch(27% 0.1281 22.14)",
+          "oklch(38% 0.1281 22.14)",
+          "oklch(49% 0.1281 22.14)",
+          "oklch(61% 0.1281 22.14)",
+          "oklch(72% 0.1281 22.14)",
+          "oklch(84% 0.1281 22.14)",
+          "oklch(95% 0.1281 22.14)"
+        ]
+      },
+      "warning-bg-light": {
+        "role": "secondary",
+        "displayName": "warning bg light",
+        "tonalRamp": [
+          "oklch(15% 0.0207 13.86)",
+          "oklch(27% 0.0207 13.86)",
+          "oklch(38% 0.0207 13.86)",
+          "oklch(49% 0.0207 13.86)",
+          "oklch(61% 0.0207 13.86)",
+          "oklch(72% 0.0207 13.86)",
+          "oklch(84% 0.0207 13.86)",
+          "oklch(95% 0.0207 13.86)"
+        ]
+      },
+      "warning-bg-dark": {
+        "role": "secondary",
+        "displayName": "warning bg dark",
+        "tonalRamp": [
+          "oklch(15% 0.0649 12.69)",
+          "oklch(27% 0.0649 12.69)",
+          "oklch(38% 0.0649 12.69)",
+          "oklch(49% 0.0649 12.69)",
+          "oklch(61% 0.0649 12.69)",
+          "oklch(72% 0.0649 12.69)",
+          "oklch(84% 0.0649 12.69)",
+          "oklch(95% 0.0649 12.69)"
+        ]
+      },
+      "warning-border-light": {
+        "role": "secondary",
+        "displayName": "warning border light",
+        "tonalRamp": [
+          "oklch(15% 0.0888 18.32)",
+          "oklch(27% 0.0888 18.32)",
+          "oklch(38% 0.0888 18.32)",
+          "oklch(49% 0.0888 18.32)",
+          "oklch(61% 0.0888 18.32)",
+          "oklch(72% 0.0888 18.32)",
+          "oklch(84% 0.0888 18.32)",
+          "oklch(95% 0.0888 18.32)"
+        ]
+      },
+      "warning-border-dark": {
+        "role": "secondary",
+        "displayName": "warning border dark",
+        "tonalRamp": [
+          "oklch(15% 0.1211 18.77)",
+          "oklch(27% 0.1211 18.77)",
+          "oklch(38% 0.1211 18.77)",
+          "oklch(49% 0.1211 18.77)",
+          "oklch(61% 0.1211 18.77)",
+          "oklch(72% 0.1211 18.77)",
+          "oklch(84% 0.1211 18.77)",
+          "oklch(95% 0.1211 18.77)"
+        ]
+      }
+    },
+    "typographyMeta": {
+      "primary-reading": {
+        "displayName": "primary reading",
+        "purpose": "本机估算与账号变化主值。"
+      },
+      "secondary-reading": {
+        "displayName": "secondary reading",
+        "purpose": "总 token 与 API 等值。"
+      },
+      "title": {
+        "displayName": "title",
+        "purpose": "浮层标题。"
+      },
+      "period": {
+        "displayName": "period",
+        "purpose": "今日、本周、自选选项。"
+      },
+      "body": {
+        "displayName": "body",
+        "purpose": "标签、覆盖说明、详情与设置。"
+      },
+      "legend": {
+        "displayName": "legend",
+        "purpose": "图例与次级单位。"
+      },
+      "day-label": {
+        "displayName": "day label",
+        "purpose": "日图日期。"
+      }
+    },
+    "shadows": [
+      {
+        "name": "popover",
+        "value": "var(--shadow-dropdown-overlay, 0 8px 16px -4px #0000001f)",
+        "purpose": "浮层沿用宿主阴影；表面自身为 Sand 实底。"
+      },
+      {
+        "name": "period-marker",
+        "value": "0 1px 2px #0000001f",
+        "purpose": "中性时间滑块。"
+      }
+    ],
+    "motion": [
+      {
+        "name": "settings-enter-return",
+        "value": "260ms",
+        "purpose": "设置进入与返回高度过渡，可中断并清理。"
+      },
+      {
+        "name": "period-marker",
+        "value": "240ms cubic-bezier(.2,.8,.2,1)",
+        "purpose": "持久时间滑块的 left 插值。"
+      },
+      {
+        "name": "daily-detail",
+        "value": "140ms cubic-bezier(.2,.8,.2,1)",
+        "purpose": "当日明细连续切换。"
+      },
+      {
+        "name": "disclosure-layout",
+        "value": "220ms cubic-bezier(.2,.8,.2,1)",
+        "purpose": "详情开合及布局连续变化。"
+      }
+    ]
+  },
+  "components": [
+    {
+      "name": "Apply",
+      "kind": "button",
+      "refersTo": "button-apply",
+      "description": "提交自选时间草稿。",
+      "html": "<button class=\"ds-apply\">应用</button>",
+      "css": ".ds-apply{font-family:var(--default-font-family,\"Segoe UI Variable\",\"Segoe UI\",\"Microsoft YaHei UI\",sans-serif);color:var(--cq-ink,#21201c);font-variant-numeric:tabular-nums;font-size:10.5px;min-width:72px;min-height:23px;padding:4px 8px;border:0;border-radius:6px;background:var(--cq-ink,#21201c);color:var(--cq-solid,#f9f9f8);cursor:pointer;} .ds-apply:hover{background:color-mix(in srgb,var(--cq-ink,#21201c) 88%,var(--cq-solid,#f9f9f8));} .ds-apply:active{opacity:.8;} .ds-apply:focus-visible{outline:2px solid var(--cq-ink,#21201c);outline-offset:2px;}"
+    },
+    {
+      "name": "Settings button",
+      "kind": "button",
+      "refersTo": "button-ghost",
+      "description": "标题行中的低频操作入口。",
+      "html": "<button class=\"ds-settings\" aria-label=\"设置\"><svg viewBox=\"0 0 24 24\" width=\"14\" height=\"14\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.5\" aria-hidden=\"true\"><path d=\"M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Z\"/><path d=\"m9 3-1 3-3 1-2 5 2 5 3 1 1 3h6l1-3 3-1 2-5-2-5-3-1-1-3Z\"/></svg></button>",
+      "css": ".ds-settings{font-family:var(--default-font-family,\"Segoe UI Variable\",\"Segoe UI\",\"Microsoft YaHei UI\",sans-serif);color:var(--cq-ink,#21201c);font-variant-numeric:tabular-nums;display:grid;place-items:center;width:22px;height:22px;padding:4px;border:0;border-radius:6px;background:transparent;color:var(--cq-muted,#63635e);cursor:pointer;} .ds-settings:hover{background:var(--cq-s4,#e9e8e6);} .ds-settings:active{background:var(--cq-s5,#e2e1de);} .ds-settings:focus-visible{outline:2px solid var(--cq-ink,#21201c);outline-offset:2px;}"
+    },
+    {
+      "name": "Time periods",
+      "kind": "nav",
+      "refersTo": "period-track",
+      "description": "三格时间选项与持久中性滑块。",
+      "html": "<nav class=\"ds-periods\" aria-label=\"时间范围\"><i class=\"ds-period-marker\" aria-hidden=\"true\"></i><button aria-pressed=\"true\">今日</button><button aria-pressed=\"false\">本周</button><button aria-pressed=\"false\">自选</button></nav>",
+      "css": ".ds-periods{font-family:var(--default-font-family,\"Segoe UI Variable\",\"Segoe UI\",\"Microsoft YaHei UI\",sans-serif);color:var(--cq-ink,#21201c);font-variant-numeric:tabular-nums;position:relative;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));width:236px;padding:2px;border-radius:8px;background:var(--cq-s3,#f1f0ef);} .ds-period-marker{position:absolute;top:2px;bottom:2px;left:2px;width:calc((100% - 4px)/3);border-radius:6px;background:var(--cq-solid,#f9f9f8);box-shadow:0 1px 2px #0000001f;pointer-events:none;} .ds-periods button{position:relative;border:0;border-radius:6px;height:24px;background:transparent;color:var(--cq-muted,#63635e);font:inherit;font-size:11.5px;cursor:pointer;} .ds-periods button[aria-pressed=true]{color:var(--cq-ink,#21201c);font-weight:600;} .ds-periods button:hover{background:var(--cq-s4,#e9e8e6);} .ds-periods button:active{background:var(--cq-s5,#e2e1de);} .ds-periods button:focus-visible{outline:2px solid var(--cq-ink,#21201c);outline-offset:2px;}"
+    },
+    {
+      "name": "Endpoint input",
+      "kind": "input",
+      "refersTo": "endpoint-input",
+      "description": "自选编辑器中的秒级时间输入。",
+      "html": "<label class=\"ds-endpoint\">开始 <input aria-label=\"开始时间\" type=\"text\" value=\"09:30:00\"></label>",
+      "css": ".ds-endpoint{font-family:var(--default-font-family,\"Segoe UI Variable\",\"Segoe UI\",\"Microsoft YaHei UI\",sans-serif);color:var(--cq-ink,#21201c);font-variant-numeric:tabular-nums;display:flex;align-items:center;gap:6px;font-size:10.5px;} .ds-endpoint input{font-family:var(--default-font-family,\"Segoe UI Variable\",\"Segoe UI\",\"Microsoft YaHei UI\",sans-serif);color:var(--cq-ink,#21201c);font-variant-numeric:tabular-nums;width:68px;height:25px;border:1px solid var(--cq-border,#cfceca);border-radius:6px;background:var(--cq-solid,#f9f9f8);padding:0 6px;font-size:10.5px;} .ds-endpoint input:hover{border-color:var(--cq-s8,#bcbbb5);} .ds-endpoint input:focus-visible{outline:2px solid var(--cq-ink,#21201c);outline-offset:2px;}"
+    },
+    {
+      "name": "Primary reading",
+      "kind": "card",
+      "refersTo": "primary-reading",
+      "description": "标签在左、数值在右，两个指标共用右边界；数值仅为预览示例。",
+      "html": "<section class=\"ds-reading\"><span>本机额度估算</span><strong>≈ 1.80–<wbr>2.20%</strong></section>",
+      "css": ".ds-reading{font-family:var(--default-font-family,\"Segoe UI Variable\",\"Segoe UI\",\"Microsoft YaHei UI\",sans-serif);color:var(--cq-ink,#21201c);font-variant-numeric:tabular-nums;display:grid;grid-template-columns:minmax(64px,1fr) minmax(0,2.5fr);column-gap:8px;align-items:baseline;width:236px;padding:6px 0 8px;background:var(--cq-solid,#f9f9f8);font-size:10.5px;line-height:15px;} .ds-reading>span{color:var(--cq-muted,#63635e);} .ds-reading strong{grid-column:2;text-align:right;font-size:21px;font-weight:600;line-height:25.2px;letter-spacing:-.024em;margin-left:0;}"
+    },
+    {
+      "name": "Daily column",
+      "kind": "custom",
+      "refersTo": "daily-bar",
+      "description": "可选择日柱，段顺序为从上到下蓝、灰、绿；数值为预览示例。",
+      "html": "<button class=\"ds-day\" aria-label=\"周一，示例用量\" aria-pressed=\"true\"><span class=\"ds-day-rail\"><span class=\"ds-day-bar\"><i class=\"ds-output\"></i><i class=\"ds-input\"></i><i class=\"ds-cache\"></i></span></span><span>一</span></button>",
+      "css": ".ds-day{font-family:var(--default-font-family,\"Segoe UI Variable\",\"Segoe UI\",\"Microsoft YaHei UI\",sans-serif);color:var(--cq-ink,#21201c);font-variant-numeric:tabular-nums;width:30px;display:flex;flex-direction:column;align-items:center;gap:0;border:0;border-radius:4px;padding:0 4px;background:transparent;font-size:9px;line-height:18px;cursor:pointer;} .ds-day-rail{width:100%;height:46px;display:flex;align-items:flex-end;border-bottom:1px solid var(--cq-s6,#dad9d6);} .ds-day-bar{display:flex;flex-direction:column;width:100%;height:40px;border-radius:4px;overflow:hidden;outline:1px solid color-mix(in srgb,var(--cq-ink,#21201c) 58%,transparent);outline-offset:1px;} .ds-day-bar i{display:block;} .ds-output{height:10%;background:var(--cq-chart-output,#0d74ce);} .ds-input{height:20%;background:var(--cq-chart-input,#d8dce0);} .ds-cache{height:70%;background:var(--cq-chart-cache,#30a46c);} .ds-day:hover .ds-day-bar{opacity:.7;} .ds-day:active{background:var(--cq-s5,#e2e1de);} .ds-day:focus-visible{outline:2px solid var(--cq-ink,#21201c);outline-offset:2px;}"
+    },
+    {
+      "name": "Composition disclosure",
+      "kind": "custom",
+      "description": "默认折叠的内容行，以细分隔建立层级。",
+      "html": "<details class=\"ds-fold\"><summary>消耗构成 <span aria-hidden=\"true\">›</span></summary><div class=\"ds-fold-body\">非缓存输入 ／ 缓存输入 ／ 输出</div></details>",
+      "css": ".ds-fold{font-family:var(--default-font-family,\"Segoe UI Variable\",\"Segoe UI\",\"Microsoft YaHei UI\",sans-serif);color:var(--cq-ink,#21201c);font-variant-numeric:tabular-nums;width:260px;border-top:1px solid var(--cq-s6,#dad9d6);background:var(--cq-solid,#f9f9f8);} .ds-fold summary{display:flex;align-items:center;gap:6px;list-style:none;padding:8px 12px;font-size:11.5px;line-height:17.25px;cursor:pointer;} .ds-fold summary span{margin-left:auto;transition:transform 220ms;} .ds-fold[open] summary span{transform:rotate(90deg);} .ds-fold summary:hover{background:var(--cq-s4,#e9e8e6);} .ds-fold summary:active{background:var(--cq-s5,#e2e1de);} .ds-fold summary:focus-visible{outline:2px solid var(--cq-ink,#21201c);outline-offset:2px;} .ds-fold-body{padding:1px 12px 9px;font-size:10.5px;line-height:15px;} @media(prefers-reduced-motion:reduce){.ds-fold summary span{transition:none;}}"
+    }
+  ],
+  "narrative": {
+    "northStar": "本机用量 · 双刻度",
+    "overview": "以用户实机反馈后的双刻度方案为视觉依据：两个主要指标上下分行，标签在左、数值在右且共用右边界，取消静态语义记号。紧凑的 Sand 浅深表面承接侧栏中的短时观察，详细口径按需披露。\n\n本文记录 2026-11-04 候选渲染层已经采用的令牌与组件。令牌以前置表为准；主题选择沿用宿主，面板颜色由局部 Sand 令牌控制，不把旧版半透明宿主材质继续作为本轮要求。",
+    "keyCharacteristics": [
+      "上下分行的双主读数，每行标签左对齐、数值右对齐。",
+      "同心圆角、对称内边距与低噪声分隔。",
+      "数据色语义稳定，缺失与错误明确可见。",
+      "开合可打断，文字不缩放，完成后清理临时样式。"
+    ],
+    "rules": [
+      {
+        "name": "Stable Data Color",
+        "body": "灰只表达非缓存输入，绿只表达缓存输入，蓝只表达输出；数据色用于图形，读数文字使用中性 ink。",
+        "section": "colors"
+      },
+      {
+        "name": "Concentric Corners",
+        "body": "同心圆角按外层圆角减去内缩量递减，保持面板、轨道、控件与数据格之间的几何关系。",
+        "section": "layout"
+      },
+      {
+        "name": "Material With Content",
+        "body": "材质与内容共同进入和退出；中断或反向从当前可见状态继续，结束清理临时样式与动画。",
+        "section": "elevation"
+      }
+    ],
+    "dos": [
+      "Do 保持主读数上下堆叠；长范围按上下界分组换行。",
+      "Do 使用 Sand 11／12 作为正文层级，保留标签和文字图例。",
+      "Do 在草稿提交前保留原结果及其真实时间。",
+      "Do 将来源、参考档位、价格与诊断集中在设置中。",
+      "Do 遵守减少动态效果、键盘焦点与强制颜色模式。"
+    ],
+    "donts": [
+      "Don't 把本机估算、账号百分点变化或 API 等值改称真实本机扣量或实付费用。",
+      "Don't 用数据色给读数文字着色，或把无记录与采样不足填成零。",
+      "Don't 让浅灰段无边界地贴住面板底色；无缓存底座时保留描边。",
+      "Don't 把未来日期生成为可聚焦或可点击的按钮。",
+      "Don't 恢复四个内容页签、旧 footer 额度卡、独立窗口或居中大 Modal。"
+    ]
+  }
+}

@@ -392,6 +392,39 @@ public static class LocalUsageRegressions
         result=LocalUsage.Read(empty,"2026-09-01","2026-09-01",recentNow,intervalStart,intervalEnd);
         interval=(Dictionary<string,object>)result["interval"];
         Check(!(bool)((Dictionary<string,object>)interval["local"])["hasLogs"],"No local logs remains explicitly unavailable for a selected interval");
+        var preciseRoot=Dir(root,"precise-days");var preciseSessions=Dir(preciseRoot,"sessions");
+        var preciseFile=Path.Combine(preciseSessions,"events.jsonl");
+        var midnight=new DateTimeOffset(2026,9,2,0,0,0,TimeZoneInfo.Local.GetUtcOffset(new DateTime(2026,9,2)));
+        Func<int,long,long,string> preciseEvent=(seconds,cumulativeCount,deltaCount)=>E(2,48,CW(cumulativeCount,0,0,0),CW(deltaCount,0,0,0),"pro")
+            .Replace(Stamp(2,48),midnight.AddSeconds(seconds).ToString("o"));
+        var preciseText=Meta("openai")+Model("gpt-6-astra")+preciseEvent(-120,10,10)+preciseEvent(-60,30,20)+
+            Model("gpt-6.1-sol")+preciseEvent(0,60,30)+preciseEvent(60,100,40)+preciseEvent(120,150,50);
+        File.WriteAllText(preciseFile,preciseText,new UTF8Encoding(false));
+        result=LocalUsage.Read(preciseRoot,"2026-09-02","2026-09-02",midnight.AddHours(1),midnight.AddSeconds(-90).ToString("o"),midnight.AddSeconds(30).ToString("o"));
+        var exact=(Dictionary<string,object>)((Dictionary<string,object>)result["interval"])["local"];
+        Check(Total(exact)==50 && Total(Day(exact,"2026-09-01"))==20 && Total(Day(exact,"2026-09-02"))==30,
+            "Cross-midnight partial days include only precise interval events, independent of whole-day summary");DailyMatches(exact);
+        Check((string)exact["start"]=="2026-09-01" && (string)exact["end"]=="2026-09-02" && Daily(exact).Count==2,
+            "Precise local day labels and sparse buckets cover exactly the selected local dates");
+        result=LocalUsage.Read(preciseRoot,"2026-09-02","2026-09-02",midnight.AddHours(1),midnight.AddSeconds(-60).ToString("o"),midnight.AddSeconds(60).ToString("o"));
+        exact=(Dictionary<string,object>)((Dictionary<string,object>)result["interval"])["local"];
+        Check(Total(exact)==70 && Daily(exact).Count==1 && (int)exact["eventCount"]==2 && Total(Day(exact,"2026-09-02"))==70,
+            "Exact second boundaries exclude the left event, include the right event and never borrow earlier/later day totals");DailyMatches(exact);
+        File.AppendAllText(preciseFile,"{\"timestamp\":\""+midnight.AddSeconds(15).ToString("o")+"\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",broken}\n",new UTF8Encoding(false));
+        result=LocalUsage.Read(preciseRoot,"2026-09-02","2026-09-02",midnight.AddHours(1),midnight.AddSeconds(-90).ToString("o"),midnight.AddSeconds(30).ToString("o"));
+        exact=(Dictionary<string,object>)((Dictionary<string,object>)result["interval"])["local"];
+        Check((bool)exact["partial"] && !(bool)Day(exact,"2026-09-01")["partial"] && (bool)Day(exact,"2026-09-02")["partial"] &&
+            IssueCount(exact,"INVALID_TOKEN_EVENT")==1 && IssueCount(Day(exact,"2026-09-02"),"INVALID_TOKEN_EVENT")==1,
+            "Dated malformed interval events mark only their precise daily bucket while retaining counts");DailyMatches(exact);
+        File.AppendAllText(preciseFile,"{\"timestamp\":\"invalid\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",broken}\n",new UTF8Encoding(false));
+        result=LocalUsage.Read(preciseRoot,"2026-09-02","2026-09-02",midnight.AddHours(1),midnight.AddSeconds(-90).ToString("o"),midnight.AddSeconds(30).ToString("o"));
+        exact=(Dictionary<string,object>)((Dictionary<string,object>)result["interval"])["local"];
+        Check((bool)Day(exact,"2026-09-01")["partial"] && (bool)Day(exact,"2026-09-02")["partial"] && Total(exact)==50,
+            "Undated interval issues remain unknown on every possibly covered selected day, without inventing consumption");DailyMatches(exact);
+        result=LocalUsage.Read(empty,"2026-09-02","2026-09-02",midnight.AddHours(1),midnight.AddSeconds(-90).ToString("o"),midnight.AddSeconds(30).ToString("o"));
+        exact=(Dictionary<string,object>)((Dictionary<string,object>)result["interval"])["local"];
+        Check(Daily(exact).Count==0 && Total(exact)==0 && !(bool)exact["hasLogs"],
+            "No interval records keep sparse daily data empty rather than adding confirmed zero-use days");DailyMatches(exact);
         foreach(var pair in new[]{new[]{intervalStart,(string)null},new[]{intervalEnd,intervalStart},new[]{intervalStart,intervalStart},
             new[]{"2026-09-01T12:00:00",intervalEnd},new[]{"2026-02-30T00:00:00Z",intervalEnd},new[]{intervalStart,recentNow.AddSeconds(1).ToString("o")}})
         {
@@ -408,7 +441,7 @@ Add-Type -TypeDefinition $harness -ReferencedAssemblies System.dll,System.Core.d
 $root=Join-Path ([IO.Path]::GetTempPath()) ('codex-local-usage-test-'+[Guid]::NewGuid().ToString('N'))
 try {
     [LocalUsageRegressions]::Run($root)
-    'Local usage regressions: 91 groups passed (cumulative, date range, identified copies, independent threads, nested fork history, missing/restored ancestors, cyclic ancestry, warm EOF, append, subsets, truncation, unknown model/provider, inherited baseline, API exclusion, malformed/oversized tails, arbitrary precise intervals, unchanged day buckets, interval validation, response privacy).'
+    'Local usage regressions: 97 groups passed (cumulative, date range, identified copies, independent threads, nested fork history, missing/restored ancestors, cyclic ancestry, warm EOF, append, subsets, truncation, unknown model/provider, inherited baseline, API exclusion, malformed/oversized tails, arbitrary precise intervals, exact partial-day buckets and metadata, unchanged day buckets, interval validation, response privacy).'
 } finally {
     $resolved=[IO.Path]::GetFullPath($root)
     if ($resolved.StartsWith([IO.Path]::GetFullPath([IO.Path]::GetTempPath()),[StringComparison]::OrdinalIgnoreCase) -and [IO.Path]::GetFileName($resolved).StartsWith('codex-local-usage-test-')) {

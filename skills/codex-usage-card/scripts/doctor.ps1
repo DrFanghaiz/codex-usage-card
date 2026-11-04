@@ -316,10 +316,10 @@ if (-not $codexInspectionFailed -and -not $codexRunning) {
   };
   if (trigger && trigger instanceof HTMLButtonElement &&
       trigger.getAttribute('aria-controls') === 'codex-quota-popover' &&
-      trigger.getAttribute('data-cq-kind') === 'official' && triggerVisible(trigger)) {
+      ['local', 'official'].includes(trigger.getAttribute('data-cq-kind')) && triggerVisible(trigger)) {
     const popover = document.getElementById('codex-quota-popover');
     if (popover instanceof HTMLElement && popover.isConnected) {
-      return result(true, 'Official');
+      return result(true, trigger.getAttribute('data-cq-kind') === 'local' ? 'Local' : 'Official');
     }
   }
   if (trigger) return result(false, null);

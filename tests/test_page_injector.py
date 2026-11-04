@@ -1,9 +1,13 @@
 import hashlib
+import json
+import shutil
+import subprocess
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from codex_quota.page_injector import (
+    NATIVE_PATCH_READY_SCRIPT,
     NATIVE_QUOTA_SCRIPT as BUNDLED_NATIVE_QUOTA_SCRIPT,
     _is_codex_main_page,
     card_present,
@@ -80,7 +84,7 @@ class PageInjectorTests(unittest.TestCase):
         self.assertIn("更新失败，显示上次数据", NATIVE_QUOTA_SCRIPT)
         self.assertIn("刷新中…", NATIVE_QUOTA_SCRIPT)
 
-    def test_card_present_accepts_only_official_entry_or_legacy_official_card(self):
+    def test_card_present_accepts_local_and_official_entries_or_legacy_official_card(self):
         connection = MagicMock()
         with patch("codex_quota.page_injector._connect", return_value=connection), \
              patch("codex_quota.page_injector._evaluate", return_value=True) as evaluate:
@@ -95,6 +99,42 @@ class PageInjectorTests(unittest.TestCase):
         self.assertIn("progress[max='100']", expression)
         self.assertNotIn("__codexNativeQuotaPatched", expression)
         connection.close.assert_called_once_with()
+
+    @unittest.skipUnless(shutil.which('node'), 'Node.js required')
+    def test_readiness_accepts_local_and_legacy_official_plugin_entries_only(self):
+        result = subprocess.run(['node', '-e', r"""
+const assert = require('node:assert/strict');
+const expression = JSON.parse(require('node:fs').readFileSync(0, 'utf8'));
+global.HTMLElement = class { constructor() { this.isConnected = true; this.hidden = true; } };
+global.HTMLButtonElement = class extends HTMLElement {
+  constructor() { super(); this.attributes = {'aria-controls': 'codex-quota-popover'}; }
+  getAttribute(name) { return this.attributes[name] ?? null; }
+};
+const trigger = new HTMLButtonElement(), popover = new HTMLElement();
+const state = {trigger, popover, duplicates: false};
+global.document = {
+  getElementById: id => ({'codex-quota-trigger': state.trigger, 'codex-quota-popover': state.popover})[id] ?? null,
+  querySelectorAll: selector => state.duplicates ? [trigger, trigger] : selector === '#codex-quota-trigger' ? [trigger] : [popover],
+};
+for (const kind of ['local', 'official', 'api', 'other', null]) {
+  trigger.attributes['data-cq-kind'] = kind;
+  assert.equal(eval(expression), ['local', 'official'].includes(kind), `kind: ${kind}`);
+}
+trigger.attributes['data-cq-kind'] = 'local';
+state.trigger = null; // A native quota button without our exact ID is not this plugin.
+assert.equal(eval(expression), false);
+state.trigger = trigger;
+state.duplicates = true;
+assert.equal(eval(expression), false);
+state.duplicates = false;
+popover.isConnected = false;
+assert.equal(eval(expression), false);
+popover.isConnected = true;
+trigger.attributes['aria-controls'] = 'native-quota-menu';
+assert.equal(eval(expression), false);
+"""], input=json.dumps(NATIVE_PATCH_READY_SCRIPT), text=True, capture_output=True,
+                                check=False, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_sidebar_v3_uses_host_anchors_and_native_popover(self):
         # Geometry, interactions, data semantics and scheduler behavior run in
