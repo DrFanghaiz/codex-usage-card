@@ -372,6 +372,9 @@ global.innerWidth = 800;
 global.innerHeight = 600;
 const cases = [
   ['collapsed, no quota data or global patch flags', () => {}, true],
+  ['local statistics closed without official data', ({trigger}) => { trigger.attributes['data-cq-kind'] = 'local'; }, true],
+  ['hidden local entry', ({trigger}) => { trigger.attributes['data-cq-kind'] = 'local'; trigger.hidden = true; }, false],
+  ['native official button only', (state) => { state.trigger = null; state.native = new HTMLButtonElement(); state.native.offsetParent = {}; state.native.classList = {contains: () => false}; state.native.attributes = {'aria-controls': 'native-quota-menu'}; }, false],
   ['removed API entry', ({trigger}) => { trigger.attributes['data-cq-kind'] = 'api'; }, false],
   ['missing trigger', (state) => { state.trigger = null; }, false],
   ['legacy only', (state) => { state.trigger = null; state.legacy.offsetParent = {}; }, true],
@@ -442,12 +445,12 @@ for (const [name, expression] of Object.entries(probes)) {
     modify(state);
     global.document = {
       getElementById: (id) => ({'codex-quota-trigger': state.trigger, 'codex-quota-popover': state.popover, 'codex-official-usage-host': state.legacy})[id] ?? null,
-      querySelectorAll: () => [],
+      querySelectorAll: (selector) => selector.includes('status') && state.native ? [state.native] : [],
     };
     const actual = eval(expression);
     assert.equal(name === 'doctor' ? actual.visible : actual, expected, `${name}: ${label}`);
     if (name === 'doctor' && expected) {
-      assert.equal(actual.kind, 'Official', label);
+      assert.equal(actual.kind, state.trigger?.attributes['data-cq-kind'] === 'local' ? 'Local' : 'Official', label);
     }
   }
 }
@@ -481,7 +484,7 @@ const {chromium} = require('playwright');
       }
     };
     for (const overflow of ['hidden', 'clip', 'auto', 'scroll']) for (const zoom of [1, 1.25]) {
-      await page.setContent(`<style>body{margin:0}#clip{display:flex;width:52px;height:150px;overflow:${overflow};zoom:${zoom};border:4px solid}#rail{width:52px;flex:none}#column{width:238px;flex:none}button{width:32px;height:32px;margin:8px}</style><div id="clip"><div id="rail"></div><div id="column"><button id="codex-quota-trigger" data-cq-kind="official" aria-controls="codex-quota-popover">Quota</button></div></div><div id="codex-quota-popover" hidden></div>`);
+      await page.setContent(`<style>body{margin:0}#clip{display:flex;width:52px;height:150px;overflow:${overflow};zoom:${zoom};border:4px solid}#rail{width:52px;flex:none}#column{width:238px;flex:none}button{width:32px;height:32px;margin:8px}</style><div id="clip"><div id="rail"></div><div id="column"><button id="codex-quota-trigger" data-cq-kind="local" aria-controls="codex-quota-popover">Local usage</button></div></div><div id="codex-quota-popover" hidden></div>`);
       await check(false); // Fixed-width column is entirely clipped by its collapsed parent.
       await page.locator('#clip').evaluate(el => el.style.width = '290px');
       await check(true);
@@ -497,7 +500,7 @@ const {chromium} = require('playwright');
       const boundaryPage = await browser.newPage({deviceScaleFactor: dpr, viewport: {width: 800, height: 600}});
       try {
         for (const zoom of [1, 1.25, 2]) for (const clipping of ['viewport', 'ancestor']) {
-          await boundaryPage.setContent(`<style>body{margin:0;overflow:hidden}#clip{position:absolute;inset:0 auto auto 0;width:64px;height:64px;overflow:${clipping === 'ancestor' ? 'hidden' : 'visible'}}#position{position:absolute;left:0;top:0}#zoom{zoom:${zoom}}button{display:block;box-sizing:border-box;width:32px;height:32px;margin:0;padding:0;border:0}</style><div id="clip"><div id="position"><div id="zoom"><button id="codex-quota-trigger" data-cq-kind="official" aria-controls="codex-quota-popover">Quota</button></div></div></div><div id="codex-quota-popover" hidden></div>`);
+          await boundaryPage.setContent(`<style>body{margin:0;overflow:hidden}#clip{position:absolute;inset:0 auto auto 0;width:64px;height:64px;overflow:${clipping === 'ancestor' ? 'hidden' : 'visible'}}#position{position:absolute;left:0;top:0}#zoom{zoom:${zoom}}button{display:block;box-sizing:border-box;width:32px;height:32px;margin:0;padding:0;border:0}</style><div id="clip"><div id="position"><div id="zoom"><button id="codex-quota-trigger" data-cq-kind="local" aria-controls="codex-quota-popover">Local usage</button></div></div></div><div id="codex-quota-popover" hidden></div>`);
           for (const axis of ['x', 'y']) for (const extent of [0, .009, .5, .999, 1, 1.25]) {
             const actualExtent = await boundaryPage.evaluate(({axis, extent, clipping}) => {
               const position = document.getElementById('position');

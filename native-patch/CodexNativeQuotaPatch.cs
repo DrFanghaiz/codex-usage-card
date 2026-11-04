@@ -21,7 +21,7 @@ internal static class CodexNativeQuotaPatch
     private static string NativeScript;
     private static int NextCommandId;
     private const int IoDeadlineMilliseconds = 15000;
-    private const string ProductVersion = "2.6.3";
+    private const string ProductVersion = "2.7.0";
     private static volatile string SessionScope = Guid.NewGuid().ToString("N");
     private static string LoginFingerprint;
     private static int SessionGeneration;
@@ -552,11 +552,12 @@ internal static class CodexNativeQuotaPatch
                 }
                 var overall = new Bucket();
                 var intervalBucket = hasInterval ? new Bucket() : null;
+                var intervalDays = hasInterval ? new SortedDictionary<DateTime, Bucket>() : null;
                 var days = new SortedDictionary<DateTime, Bucket>();
                 foreach (var entry in selected.Values)
                 {
                     var inInterval = hasInterval && entry.At > selectedStart && entry.At <= selectedEnd;
-                    if (inInterval) intervalBucket.Add(entry);
+                    if (inInterval) { intervalBucket.Add(entry); DayBucket(intervalDays, entry.Day).Add(entry); }
                     if (!entry.Usage.WriteKnown && (inInterval || (entry.Day >= first && entry.Day <= last)))
                         queryIssues.Add(new Issue { Code = "CACHE_WRITE_UNRECORDED", Key = entry.Key,
                         Day = entry.Day, At = entry.At, Missing = 0, AffectsTotals = false });
@@ -579,7 +580,15 @@ internal static class CodexNativeQuotaPatch
                     if (issue.Code == "SOURCE_UNCONFIRMED" && selected.ContainsKey(key)) continue;
                     if (!issueKeys.Add(issue.Code + "/" + key)) continue;
                     if (hasInterval && (!issue.Day.HasValue || (issue.Before ? issue.At >= selectedStart :
-                        issue.At > selectedStart && issue.At <= selectedEnd))) intervalBucket.Add(issue);
+                        issue.At > selectedStart && issue.At <= selectedEnd)))
+                    {
+                        intervalBucket.Add(issue);
+                        var intervalFirst = selectedStart.LocalDateTime.Date;
+                        var intervalLast = selectedEnd.LocalDateTime.Date;
+                        var affectedFirst = issue.Day.HasValue && !issue.Before ? issue.Day.Value : intervalFirst;
+                        var affectedLast = issue.Day.HasValue && issue.Day.Value < intervalLast ? issue.Day.Value : intervalLast;
+                        for (var day = affectedFirst; day <= affectedLast; day = day.AddDays(1)) DayBucket(intervalDays, day).Add(issue);
+                    }
                     if (issue.Day.HasValue && (issue.Day.Value < first || (!issue.Before && issue.Day.Value > last))) continue;
                     overall.Add(issue);
                     var issueFirst = issue.Day.HasValue && !issue.Before ? issue.Day.Value : first;
@@ -603,6 +612,16 @@ internal static class CodexNativeQuotaPatch
                 if (hasInterval)
                 {
                     var local = intervalBucket.Payload();
+                    local["start"] = selectedStart.LocalDateTime.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+                    local["end"] = selectedEnd.LocalDateTime.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+                    var intervalDaily = new List<Dictionary<string, object>>();
+                    foreach (var day in intervalDays)
+                    {
+                        var bucket = day.Value.Payload();
+                        bucket["date"] = day.Key.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+                        intervalDaily.Add(bucket);
+                    }
+                    local["daily"] = intervalDaily;
                     local["hasLogs"] = present.Count > 0;
                     payload["interval"] = new Dictionary<string, object> { { "start", intervalStart }, { "end", intervalEnd }, { "local", local } };
                 }
@@ -1332,7 +1351,7 @@ internal static class CodexNativeQuotaPatch
                 "HelperNotRunning", "HelperMultipleProcesses", "HelperWindowVisible", "InstalledWaitingForCodex",
                 "InstalledWaitingForDebugPort", "InstalledWaitingForMainPage", "AwaitingStartupDecision", "Active", "InstalledCardMissing" },
             new[] { "TaskState", "Unknown", "Disabled", "Queued", "Ready", "Running" },
-            new[] { "CardKind", "Api", "Official", "Mixed" }
+            new[] { "CardKind", "Api", "Official", "Local", "Mixed" }
         })
         {
             var value = StringValue(raw, entry[0]);

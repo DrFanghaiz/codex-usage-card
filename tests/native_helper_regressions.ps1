@@ -531,6 +531,8 @@ __HTTP_METHODS__
         var safe = SanitizeDiagnosis(diagnosis);
         Check((string)safe["ActivationState"] == "Active" && (int)safe["HelperProcessCount"] == 1, "Doctor valid values preserved");
         Check(!Json.Serialize(safe).Contains("secret"), "Doctor must not expose arbitrary values");
+        diagnosis["CardKind"] = "Local";
+        Check((string)SanitizeDiagnosis(diagnosis)["CardKind"] == "Local", "Local statistics entry remains a healthy installed component");
         diagnosis["NetworkMode"] = "proxy";
         diagnosis["ProxySource"] = "explicit";
         diagnosis["ProxyEndpoint"] = "http://127.0.0.1:7890";

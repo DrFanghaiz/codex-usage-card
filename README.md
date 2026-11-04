@@ -1,6 +1,8 @@
 # Codex Usage Card
 
-Codex Usage Card 在 Codex 桌面端列表侧栏底部提供一行额度入口，默认收起，点击向上展开详情。现在仅支持官方 ChatGPT 账户额度，已移除 API 余额版本。它不修改 Codex 安装目录，不改变主题和模型列表，也不会记录或输出 API Key。
+Codex Usage Card 的 v2.7.0收敛为本机用量分析：在官方额度图标上方提供统计符号，点击向右打开统一用量主页面，按今日／本周／自选查看本机额度估算、账号额度变化、token 和 API 等值。构成与模型按需展开。取消旧额度主卡，不隐藏或接管官方组件；数据请求、限流及历史保留。设计与验收见[本机用量入口](docs/native-analysis-20261104.md)。
+
+以下安装命令对应 v2.7.0。
 
 ## 一键安装
 
@@ -9,7 +11,7 @@ Codex Usage Card 在 Codex 桌面端列表侧栏底部提供一行额度入口�
 在 PowerShell 7 中运行：
 
 ```powershell
-$installer = Join-Path $env:TEMP 'install-codex-usage-card.ps1'; Invoke-WebRequest 'https://raw.githubusercontent.com/DrFanghaiz/codex-usage-card/v2.6.3/install.ps1' -OutFile $installer; Unblock-File -LiteralPath $installer; & $installer
+$installer = Join-Path $env:TEMP 'install-codex-usage-card.ps1'; Invoke-WebRequest 'https://raw.githubusercontent.com/DrFanghaiz/codex-usage-card/v2.7.0/install.ps1' -OutFile $installer; Unblock-File -LiteralPath $installer; & $installer
 ```
 
 安装器会校验发布包的 SHA-256，把 Skill 安装到 `$CODEX_HOME\skills`（未设置时为 `$env:USERPROFILE\.codex\skills`），把无窗口修复器部署到 `$env:LOCALAPPDATA\CodexUsageCard`，并注册当前用户的计划任务 `Codex Usage Card`。从旧版升级时，只迁移路径与动作完全匹配的旧任务。安装完成后会输出 `ActivationState`、`StageCodes` 和 `CardVisible` 等只读验收结果；Codex 未运行时显示等待状态，不把已完成安装误报为失败。

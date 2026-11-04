@@ -164,7 +164,7 @@ NATIVE_PATCH_READY_SCRIPT = """(() => {
   const trigger = document.getElementById('codex-quota-trigger');
   const popover = document.getElementById('codex-quota-popover');
   return trigger instanceof HTMLButtonElement && trigger.isConnected &&
-    trigger.getAttribute('data-cq-kind') === 'official' &&
+    ['local', 'official'].includes(trigger.getAttribute('data-cq-kind')) &&
     trigger.getAttribute('aria-controls') === 'codex-quota-popover' &&
     popover instanceof HTMLElement && popover.isConnected &&
     document.querySelectorAll('#codex-quota-trigger').length === 1 &&
@@ -225,7 +225,7 @@ def inject(port: int) -> None:
 
 
 def card_present(port: int, target: dict[str, Any] | None = None) -> bool:
-    """Return whether a quota entry or a supported legacy card is visible."""
+    """Return whether a local/official plugin entry or supported legacy card is visible."""
     connection = _connect(target or target_info(port))
     try:
         value = _evaluate(
@@ -269,7 +269,7 @@ def card_present(port: int, target: dict[str, Any] | None = None) -> bool:
               };
               if (trigger && trigger instanceof HTMLButtonElement &&
                   trigger.getAttribute('aria-controls') === 'codex-quota-popover' &&
-                  trigger.getAttribute('data-cq-kind') === 'official' && triggerVisible(trigger)) {
+                  ['local', 'official'].includes(trigger.getAttribute('data-cq-kind')) && triggerVisible(trigger)) {
                 const popover = document.getElementById('codex-quota-popover');
                 if (popover instanceof HTMLElement && popover.isConnected) {
                   return true;
