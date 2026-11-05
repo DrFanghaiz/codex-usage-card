@@ -4,6 +4,7 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
 using System.Globalization;
+using System.Linq;
 using System.Management;
 using System.Net;
 using System.Net.Sockets;
@@ -21,7 +22,7 @@ internal static class CodexNativeQuotaPatch
     private static string NativeScript;
     private static int NextCommandId;
     private const int IoDeadlineMilliseconds = 15000;
-    private const string ProductVersion = "2.7.0";
+    private const string ProductVersion = "3.0.0";
     private static volatile string SessionScope = Guid.NewGuid().ToString("N");
     private static string LoginFingerprint;
     private static int SessionGeneration;
@@ -255,6 +256,18 @@ internal static class CodexNativeQuotaPatch
         var scope = socket.Scope;
         var generation = socket.Generation;
         var accountKey = LoginFingerprint;
+        object saveFlag;
+        var savePlan = range != null && range.TryGetValue("saveReferencePlan", out saveFlag) && saveFlag is bool && (bool)saveFlag;
+        var saveFailed = false;
+        if (savePlan)
+        {
+            try
+            {
+                if (scope != SessionScope || generation != Volatile.Read(ref SessionGeneration) || accountKey == null) throw new IOException("Login session changed");
+                ReferencePlans.Write(AppDomain.CurrentDomain.BaseDirectory, accountKey, referencePlan);
+            }
+            catch { saveFailed = true; }
+        }
         Task.Run(() => {
             Dictionary<string, object> payload;
             try
@@ -271,6 +284,8 @@ internal static class CodexNativeQuotaPatch
             }
             catch (ArgumentException) { payload = new Dictionary<string, object> { { "errorCode", "INVALID_RANGE" } }; }
             catch { payload = new Dictionary<string, object> { { "errorCode", "LOCAL_USAGE_UNAVAILABLE" } }; }
+            if (savePlan) payload["referencePlanSaved"] = !saveFailed;
+            if (saveFailed) payload["referencePlanSaveError"] = true;
             if (scope != SessionScope || generation != Volatile.Read(ref SessionGeneration)) return;
             try
             {
@@ -284,6 +299,45 @@ internal static class CodexNativeQuotaPatch
                 }
             }
             catch { /* The requesting page may have closed; no disk data or error detail leaves the helper. */ }
+        });
+    }
+
+    private static void PublishTurnUsage(CdpSocket socket, string requestId)
+    {
+        if (!ValidRequestId(requestId)) return;
+        var response = Evaluate(socket, "globalThis.__codexQuotaTurnUsageQuery ?? null");
+        var remote = response.ContainsKey("result") ? response["result"] as Dictionary<string, object> : null;
+        var query = remote != null && remote.ContainsKey("value") ? remote["value"] as Dictionary<string, object> : null;
+        object raw;
+        var values = query != null && query.TryGetValue("turnIds", out raw) ? raw as object[] : null;
+        var ids = values == null ? null : values.Select(value => value as string).ToArray();
+        var plan = query == null ? "" : StringValue(query, "referencePlan");
+        var tier = plan == "pro100" || plan == "pro200" || plan == "pro500" ? plan.Substring(3) : "";
+        var target = socket.Endpoint; var scope = socket.Scope; var generation = socket.Generation;
+        Task.Run(() => {
+            Dictionary<string, object> payload;
+            try
+            {
+                if (ids == null) throw new ArgumentException("Missing turn identifiers");
+                payload = LocalUsage.Read(ConfigurationRoot(), "2022-01-01", DateTime.Today.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture), DateTimeOffset.UtcNow, null, null, ids);
+                var official = LastPlan;
+                var planName = official != null && official["scope"] == scope ? official["plan"] : "";
+                payload["reference"] = ModelDialReferences.Snapshot(planName, tier);
+            }
+            catch (ArgumentException) { payload = new Dictionary<string, object> { { "errorCode", "INVALID_RANGE" } }; }
+            catch { payload = new Dictionary<string, object> { { "errorCode", "LOCAL_USAGE_UNAVAILABLE" } }; }
+            if (scope != SessionScope || generation != Volatile.Read(ref SessionGeneration)) return;
+            try
+            {
+                using (var reply = new CdpSocket(target))
+                {
+                    reply.Connect();
+                    Evaluate(reply, "if(globalThis.__codexQuotaSessionScope===" + Json.Serialize(scope) +
+                        " && typeof globalThis.__codexQuotaUpdateTurnUsage==='function') globalThis.__codexQuotaUpdateTurnUsage(" +
+                        Json.Serialize(payload) + "," + Json.Serialize(requestId) + ")");
+                }
+            }
+            catch { /* The requesting page may have closed. */ }
         });
     }
 
@@ -337,7 +391,7 @@ internal static class CodexNativeQuotaPatch
         {
             public DateTime Day;
             public DateTimeOffset At;
-            public string Model, Key;
+            public string Model, Key, RootTurn, Thread, LastKey;
             public Counts Usage;
             public bool HasBaseline;
         }
@@ -350,7 +404,7 @@ internal static class CodexNativeQuotaPatch
         private sealed class Issue
         {
             public DateTime? Day;
-            public string Code, Key, Session, BaselineKey;
+            public string Code, Key, Session, BaselineKey, RootTurn;
             public DateTimeOffset At;
             public long? Missing;
             public bool Before, AffectsTotals = true, NeedsBaseline;
@@ -361,7 +415,7 @@ internal static class CodexNativeQuotaPatch
             public long Offset;
             public byte[] Anchor;
             public DateTime Written, Created;
-            public string Model = "unknown", Provider, Session, Thread, Parent, FileKey;
+            public string Model = "unknown", Provider, Session, Thread, Parent, FileKey, RootTurn;
             public int HistoryStart;
             public bool Subagent, SeenCounts, NewRequestSeen;
             public DateTimeOffset? MetadataAt;
@@ -371,7 +425,13 @@ internal static class CodexNativeQuotaPatch
             public readonly List<Entry> Entries = new List<Entry>();
             public readonly List<Issue> Issues = new List<Issue>();
             public readonly List<Snapshot> Snapshots = new List<Snapshot>();
+            public readonly List<TurnRecord> TurnRecords = new List<TurnRecord>();
+            public readonly List<Issue> TurnIssues = new List<Issue>();
+            public readonly HashSet<string> StartedTurns = new HashSet<string>();
+            public readonly HashSet<string> CompletedTurns = new HashSet<string>();
+            public readonly HashSet<string> ActiveTurns = new HashSet<string>();
         }
+        private sealed class TurnRecord { public string Root, Thread, Response, Key; }
         private sealed class Bucket
         {
             private readonly SortedDictionary<string, Counts> models = new SortedDictionary<string, Counts>(StringComparer.Ordinal);
@@ -452,8 +512,10 @@ internal static class CodexNativeQuotaPatch
         {
             return Read(root, start, end, DateTimeOffset.UtcNow);
         }
-        public static Dictionary<string, object> Read(string root, string start, string end, DateTimeOffset now, string intervalStart = null, string intervalEnd = null)
+        public static Dictionary<string, object> Read(string root, string start, string end, DateTimeOffset now, string intervalStart = null, string intervalEnd = null, string[] turnIds = null)
         {
+            if (turnIds != null && (turnIds.Length == 0 || turnIds.Length > 50 || turnIds.Any(id => !ValidTurnId(id)) || turnIds.Distinct().Count() != turnIds.Length))
+                throw new ArgumentException("Invalid turn identifiers");
             var first = Date(start);
             var last = Date(end);
             if (last < first || last > DateTime.Today || first.Year < 2022) throw new ArgumentException("Invalid usage range");
@@ -550,6 +612,7 @@ internal static class CodexNativeQuotaPatch
                         (existing.HasBaseline == entry.HasBaseline && !existing.Usage.WriteKnown && entry.Usage.WriteKnown && existing.Usage.Key == entry.Usage.Key))
                         selected[key] = entry;
                 }
+                if (turnIds != null) return TurnPayload(turnIds, selected, present, queryIssues, history, inherited, snapshots);
                 var overall = new Bucket();
                 var intervalBucket = hasInterval ? new Bucket() : null;
                 var intervalDays = hasInterval ? new SortedDictionary<DateTime, Bucket>() : null;
@@ -628,13 +691,87 @@ internal static class CodexNativeQuotaPatch
                 return payload;
             }
         }
+        private static bool ValidTurnId(string id)
+        {
+            return !String.IsNullOrEmpty(id) && Regex.IsMatch(id, @"\A[A-Za-z0-9-]{1,80}\z");
+        }
+        private static Dictionary<string, object> TurnPayload(string[] ids, Dictionary<string, Entry> selected, HashSet<string> present, List<Issue> issues, Dictionary<string, string> history, HashSet<string> inherited, Dictionary<string, DateTimeOffset> snapshots)
+        {
+            var wanted = new HashSet<string>(ids);
+            var buckets = ids.ToDictionary(id => id, id => new Bucket());
+            var started = new HashSet<string>();
+            var completed = new HashSet<string>();
+            var partial = new HashSet<string>();
+            var active = new HashSet<string>();
+            var records = new Dictionary<string, int>();
+            var responses = new Dictionary<string, string>();
+            foreach (var file in present)
+            {
+                Log log;
+                if (!Logs.TryGetValue(file, out log)) continue;
+                started.UnionWith(log.StartedTurns.Where(wanted.Contains));
+                completed.UnionWith(log.CompletedTurns.Where(wanted.Contains));
+                active.UnionWith(log.ActiveTurns.Select(op => op.Split('/')[0]).Where(wanted.Contains));
+                if (log.Entries.Any(entry => entry.RootTurn == null)) partial.UnionWith(log.StartedTurns.Where(wanted.Contains));
+                foreach (var record in log.TurnRecords)
+                {
+                    if (!wanted.Contains(record.Root)) continue;
+                    var key = record.Root + "/" + record.Thread + "/" + record.Key;
+                    string existing;
+                    if (responses.TryGetValue(record.Response, out existing))
+                    {
+                        if (existing != key) { partial.Add(record.Root); partial.Add(existing.Split('/')[0]); }
+                        continue;
+                    }
+                    responses.Add(record.Response, key);
+                    int count; records.TryGetValue(key, out count); records[key] = count + 1;
+                }
+            }
+            var issueKeys = new HashSet<string>();
+            foreach (var issue in issues.Concat(present.SelectMany(file => Logs[file].TurnIssues)))
+            {
+                var issueKey = OriginalEventKey(history, issue.Key);
+                if (inherited.Contains(issue.Key) || inherited.Contains(issueKey)) continue;
+                Entry resolved; DateTimeOffset predecessor;
+                if (issue.NeedsBaseline && !String.IsNullOrEmpty(issue.Session) && issue.BaselineKey != null &&
+                    snapshots.TryGetValue(issue.Session + "/" + issue.BaselineKey, out predecessor) && predecessor < issue.At) continue;
+                if (issue.NeedsBaseline && selected.TryGetValue(issueKey, out resolved) && resolved.HasBaseline) continue;
+                if (issue.Code == "SOURCE_UNCONFIRMED" && selected.ContainsKey(issueKey)) continue;
+                if (!issueKeys.Add(issue.Code + "/" + issueKey)) continue;
+                if (issue.Code == "FILE_UNREADABLE") { partial.UnionWith(ids); continue; }
+                if (issue.RootTurn != null && wanted.Contains(issue.RootTurn) && issue.AffectsTotals)
+                { buckets[issue.RootTurn].Add(issue); partial.Add(issue.RootTurn); }
+            }
+            foreach (var entry in selected.Values)
+            {
+                if (entry.RootTurn == null || !wanted.Contains(entry.RootTurn)) continue;
+                buckets[entry.RootTurn].Add(entry);
+                var key = entry.RootTurn + "/" + entry.Thread + "/" + entry.LastKey;
+                int count;
+                if (entry.LastKey == null || entry.Usage.Key != entry.LastKey || entry.Thread == null || !records.TryGetValue(key, out count) || count == 0)
+                    partial.Add(entry.RootTurn);
+                else records[key] = count - 1;
+            }
+            foreach (var pair in records) if (pair.Value > 0) partial.Add(pair.Key.Split('/')[0]);
+            var turns = new List<Dictionary<string, object>>();
+            foreach (var id in ids)
+            {
+                var row = buckets[id].Payload();
+                row["turnId"] = id;
+                row["partial"] = (bool)row["partial"] || partial.Contains(id);
+                row["status"] = (int)row["eventCount"] == 0 ? "unavailable" : completed.Contains(id) && !active.Contains(id) ? "complete" : "running";
+                if ((started.Contains(id) && !completed.Contains(id)) || active.Contains(id)) row["partial"] = true;
+                turns.Add(row);
+            }
+            return new Dictionary<string, object> { { "turns", turns } };
+        }
         private static void Update(string path, Log log)
         {
             var file = new FileInfo(path);
             if (file.Length < log.Offset || !AnchorMatches(path, log) || (log.Offset == file.Length && log.Written != file.LastWriteTimeUtc) ||
                 (log.Created != default(DateTime) && log.Created != file.CreationTimeUtc))
             {
-                log.Offset = 0; log.Anchor = null; log.Entries.Clear(); log.Issues.Clear(); log.Snapshots.Clear(); log.Previous = null;
+                log.Offset = 0; log.Anchor = null; log.Entries.Clear(); log.Issues.Clear(); log.Snapshots.Clear(); log.TurnRecords.Clear(); log.TurnIssues.Clear(); log.StartedTurns.Clear(); log.CompletedTurns.Clear(); log.ActiveTurns.Clear(); log.Previous = null; log.RootTurn = null;
                 log.Model = "unknown"; log.Provider = null; log.Session = null; log.Thread = null; log.Parent = null; log.HistoryStart = 0; log.Subagent = false; log.SeenCounts = false; log.NewRequestSeen = false; log.MetadataAt = null; log.Line = 0;
             }
             log.Tail = null;
@@ -725,7 +862,7 @@ internal static class CodexNativeQuotaPatch
             DateTimeOffset at;
             DateTimeOffset.TryParse(match.Success ? match.Groups[1].Value : null, CultureInfo.InvariantCulture, DateTimeStyles.None, out at);
             return new Issue { Code = code, Key = (log.Thread ?? log.FileKey) + "/" + log.Line.ToString(CultureInfo.InvariantCulture) + "/" + (match.Success ? match.Groups[1].Value : "unknown"),
-                Day = day, At = at, Line = log.Line };
+                Day = day, At = at, Line = log.Line, RootTurn = log.RootTurn };
         }
         private static bool OfficialWindow(object raw)
         {
@@ -764,7 +901,12 @@ internal static class CodexNativeQuotaPatch
             if (line.IndexOf("\"session_meta\"", StringComparison.Ordinal) < 0 &&
                 line.IndexOf("\"turn_context\"", StringComparison.Ordinal) < 0 &&
                 line.IndexOf("\"token_count\"", StringComparison.Ordinal) < 0 &&
-                (log.SeenCounts || (line.IndexOf("\"task_started\"", StringComparison.Ordinal) < 0 && line.IndexOf("\"turn_started\"", StringComparison.Ordinal) < 0))) return;
+                line.IndexOf("\"token_usage_record\"", StringComparison.Ordinal) < 0 &&
+                line.IndexOf("\"task_started\"", StringComparison.Ordinal) < 0 &&
+                line.IndexOf("\"turn_started\"", StringComparison.Ordinal) < 0 &&
+                line.IndexOf("\"task_complete\"", StringComparison.Ordinal) < 0 &&
+                line.IndexOf("\"turn_complete\"", StringComparison.Ordinal) < 0 &&
+                line.IndexOf("\"turn_aborted\"", StringComparison.Ordinal) < 0) return;
             try
             {
                 var root = new JavaScriptSerializer { MaxJsonLength = 16777216 }.DeserializeObject(line) as Dictionary<string, object>;
@@ -795,13 +937,41 @@ internal static class CodexNativeQuotaPatch
                 {
                     var model = StringValue(data, "model");
                     log.Model = Regex.IsMatch(model, @"\A[A-Za-z0-9._:-]{1,100}\z") ? model : "unknown";
+                    var rootTurn = StringValue(data, "root_turn_id");
+                    if (ValidTurnId(rootTurn)) { log.RootTurn = rootTurn; log.StartedTurns.Add(rootTurn); }
                     return;
                 }
                 if (type == "event_msg" && (StringValue(data, "type") == "task_started" || StringValue(data, "type") == "turn_started"))
                 {
+                    var rootTurn = StringValue(data, "root_turn_id");
+                    log.RootTurn = ValidTurnId(rootTurn) ? rootTurn : null;
+                    if (log.RootTurn != null) {
+                        log.StartedTurns.Add(log.RootTurn);
+                        var operation = StringValue(data, "turn_id");
+                        if (ValidTurnId(operation)) log.ActiveTurns.Add(log.RootTurn + "/" + operation);
+                    }
                     DateTimeOffset started;
                     if (log.MetadataAt.HasValue && DateTimeOffset.TryParse(StringValue(root, "timestamp"), CultureInfo.InvariantCulture, DateTimeStyles.None, out started) && started >= log.MetadataAt.Value)
                         log.NewRequestSeen = true;
+                    return;
+                }
+                if (type == "event_msg" && (StringValue(data, "type") == "task_complete" || StringValue(data, "type") == "turn_complete" || StringValue(data, "type") == "turn_aborted"))
+                {
+                    var rootTurn = StringValue(data, "root_turn_id");
+                    var operation = StringValue(data, "turn_id");
+                    if (ValidTurnId(rootTurn) && ValidTurnId(operation)) log.ActiveTurns.Remove(rootTurn + "/" + operation);
+                    if (ValidTurnId(rootTurn) && rootTurn == operation && StringValue(data, "type") != "turn_aborted") log.CompletedTurns.Add(rootTurn);
+                    return;
+                }
+                if (type == "token_usage_record")
+                {
+                    var rootTurn = StringValue(data, "root_turn_id");
+                    var thread = StringValue(data, "thread_id");
+                    var response = StringValue(data, "response_id");
+                    var usage = Counts.Parse(data.TryGetValue("usage", out raw) ? raw : null);
+                    if (ValidTurnId(rootTurn) && ValidTurnId(thread) && !String.IsNullOrEmpty(response) && response.Length <= 200 && usage != null)
+                        log.TurnRecords.Add(new TurnRecord { Root = rootTurn, Thread = thread, Response = response, Key = usage.Key });
+                    else if (ValidTurnId(rootTurn)) log.TurnIssues.Add(new Issue { Code = "INVALID_TOKEN_EVENT", Key = log.FileKey + "/turn/" + log.Line, RootTurn = rootTurn });
                     return;
                 }
                 if (type != "event_msg" || StringValue(data, "type") != "token_count") return;
@@ -845,17 +1015,17 @@ internal static class CodexNativeQuotaPatch
                 bool excluded;
                 if (!OfficialEvent(log, data, out excluded))
                 {
-                    if (!excluded) log.Issues.Add(new Issue { Code = "SOURCE_UNCONFIRMED", Key = key, Day = day, At = stamp, Missing = delta.Total, Line = log.Line });
+                    if (!excluded) log.Issues.Add(new Issue { Code = "SOURCE_UNCONFIRMED", Key = key, Day = day, At = stamp, Missing = delta.Total, Line = log.Line, RootTurn = log.RootTurn });
                     return;
                 }
                 if (!day.HasValue) { log.Issues.Add(ParseIssue(line, log, "INVALID_TIMESTAMP")); return; }
                 if (!hasBaseline && (current == null || total.Key != current.Key))
                     log.Issues.Add(new Issue { Code = "BASELINE_MISSING", Key = key, Day = day, Before = true, NeedsBaseline = true, Line = log.Line,
-                        Missing = current == null ? (long?)null : Math.Max(0, total.Total - current.Total), Session = log.Session, At = stamp,
+                        Missing = current == null ? (long?)null : Math.Max(0, total.Total - current.Total), Session = log.Session, At = stamp, RootTurn = log.RootTurn,
                         BaselineKey = current != null && total.Input >= current.Input && total.Cached >= current.Cached && total.Output >= current.Output ?
                             new Counts { Input = total.Input - current.Input, Cached = total.Cached - current.Cached, Output = total.Output - current.Output }.Key : null });
                 snapshot.ConfirmedConsumption = true;
-                log.Entries.Add(new Entry { Day = day.Value, At = stamp, Model = log.Model, Usage = delta, Key = key, HasBaseline = hasBaseline || (current != null && total.Key == current.Key) });
+                log.Entries.Add(new Entry { Day = day.Value, At = stamp, Model = log.Model, Usage = delta, Key = key, HasBaseline = hasBaseline || (current != null && total.Key == current.Key), RootTurn = log.RootTurn, Thread = log.Thread, LastKey = current == null ? null : current.Key });
             }
             catch (ArgumentException) { if (IsTokenLine(line)) log.Issues.Add(ParseIssue(line, log, "INVALID_TOKEN_EVENT")); }
             catch (InvalidOperationException) { if (IsTokenLine(line)) log.Issues.Add(ParseIssue(line, log, "INVALID_TOKEN_EVENT")); }
@@ -910,6 +1080,7 @@ internal static class CodexNativeQuotaPatch
     {
         // Renderer caches survive Helper upgrades; only the installed version changes here.
         var initialization = "globalThis.__codexQuotaSessionScope=" + Json.Serialize(SessionScope) +
+            ";globalThis.__codexQuotaReferencePlan=" + Json.Serialize(ReferencePlans.Read(AppDomain.CurrentDomain.BaseDirectory, LoginFingerprint)) +
             ";globalThis.__codexQuotaMode=" + Json.Serialize("account") +
             ";if(globalThis.__codexQuotaReleasePayload&&typeof globalThis.__codexQuotaReleasePayload==='object')" +
             "globalThis.__codexQuotaReleasePayload.currentVersion=" + Json.Serialize(ProductVersion) + ";";
@@ -1245,6 +1416,8 @@ internal static class CodexNativeQuotaPatch
                 PublishOfficialPayload(socket, requestId);
             else if (TryConsoleRequest(message, "__codexQuotaLocalUsageRequest__", out requestId))
                 PublishLocalUsage(socket, requestId);
+            else if (TryConsoleRequest(message, "__codexQuotaTurnUsageRequest__", out requestId))
+                PublishTurnUsage(socket, requestId);
             else if (TryConsoleRequest(message, "__codexQuotaReleaseRequest__", out requestId))
                 PublishRelease(socket, requestId);
         }
@@ -1264,7 +1437,7 @@ internal static class CodexNativeQuotaPatch
     private static bool TryConsoleRequest(string message, string name, out string requestId)
     {
         requestId = null;
-        if (name != "__codexQuotaOfficialRequest__" && name != "__codexQuotaDoctorRequest__" && name != "__codexQuotaLocalUsageRequest__" && name != "__codexQuotaReleaseRequest__") return false;
+        if (name != "__codexQuotaOfficialRequest__" && name != "__codexQuotaDoctorRequest__" && name != "__codexQuotaLocalUsageRequest__" && name != "__codexQuotaTurnUsageRequest__" && name != "__codexQuotaReleaseRequest__") return false;
         var root = Json.DeserializeObject(message) as Dictionary<string, object>;
         if (root == null || StringValue(root, "method") != "Runtime.consoleAPICalled") return false;
         var parameters = root.ContainsKey("params") ? root["params"] as Dictionary<string, object> : null;
@@ -1272,7 +1445,7 @@ internal static class CodexNativeQuotaPatch
         var argument = args != null && (args.Length == 1 || args.Length == 2) ? args[0] as Dictionary<string, object> : null;
         if (argument == null || StringValue(argument, "type") != "string" || StringValue(argument, "value") != name) return false;
         if (args.Length == 1) return name == "__codexQuotaOfficialRequest__" || name == "__codexQuotaDoctorRequest__"; // Previous helpers/pages used a single marker.
-        if (name != "__codexQuotaOfficialRequest__" && name != "__codexQuotaLocalUsageRequest__" && name != "__codexQuotaReleaseRequest__") return false;
+        if (name != "__codexQuotaOfficialRequest__" && name != "__codexQuotaLocalUsageRequest__" && name != "__codexQuotaTurnUsageRequest__" && name != "__codexQuotaReleaseRequest__") return false;
         var id = args[1] as Dictionary<string, object>;
         if (id == null || StringValue(id, "type") != "string" || !ValidRequestId(StringValue(id, "value"))) return false;
         requestId = StringValue(id, "value");
@@ -1548,6 +1721,43 @@ internal static class CodexNativeQuotaPatch
         var payload = new Dictionary<string, object> { { "planName", planName }, { "windows", windows } };
         if (scope == SessionScope) RecentUsage.Record(AppDomain.CurrentDomain.BaseDirectory, AccountFingerprint(official), scope, payload, DateTimeOffset.UtcNow);
         return payload;
+    }
+
+    private static class ReferencePlans
+    {
+        private static readonly object Gate = new object();
+        private static string PathFor(string root, string accountKey)
+        {
+            if (accountKey == null || !Regex.IsMatch(accountKey, @"\A[A-Za-z0-9+/]{43}=\z")) throw new ArgumentException("Invalid account key");
+            return Path.Combine(root, "account-reference-plans", accountKey.Replace('+', '-').Replace('/', '_').TrimEnd('=') + ".txt");
+        }
+        private static bool Valid(string plan) { return plan == "" || plan == "pro100" || plan == "pro200" || plan == "pro500"; }
+        public static string Read(string root, string accountKey)
+        {
+            if (accountKey == null) return "";
+            lock (Gate)
+            {
+                try { var plan = File.ReadAllText(PathFor(root, accountKey), Encoding.UTF8); return Valid(plan) ? plan : ""; }
+                catch (IOException) { return ""; }
+                catch (UnauthorizedAccessException) { return ""; }
+            }
+        }
+        public static void Write(string root, string accountKey, string plan)
+        {
+            if (!Valid(plan)) throw new ArgumentException("Invalid reference plan");
+            lock (Gate)
+            {
+                var path = PathFor(root, accountKey);
+                Directory.CreateDirectory(Path.GetDirectoryName(path));
+                var temporary = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+                try
+                {
+                    File.WriteAllText(temporary, plan, new UTF8Encoding(false));
+                    if (File.Exists(path)) File.Replace(temporary, path, null); else File.Move(temporary, path);
+                }
+                finally { if (File.Exists(temporary)) File.Delete(temporary); }
+            }
+        }
     }
 
     private static class RecentUsage
@@ -2435,7 +2645,7 @@ internal static class CodexNativeQuotaPatch
                     if (socket.OnEvent != null) socket.OnEvent(message);
                     // Runtime.enable replays console history; only queue requests from the live session.
                     if (method != "Runtime.enable" && (IsConsoleRequest(message, "__codexQuotaDoctorRequest__") ||
-                        IsConsoleRequest(message, "__codexQuotaOfficialRequest__") || IsConsoleRequest(message, "__codexQuotaLocalUsageRequest__") ||
+                        IsConsoleRequest(message, "__codexQuotaOfficialRequest__") || IsConsoleRequest(message, "__codexQuotaLocalUsageRequest__") || IsConsoleRequest(message, "__codexQuotaTurnUsageRequest__") ||
                         IsConsoleRequest(message, "__codexQuotaReleaseRequest__")))
                         socket.PendingEvents.Enqueue(message);
                     continue;

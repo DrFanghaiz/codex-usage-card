@@ -158,10 +158,28 @@ test('dual Token and API reference estimates preserve same-model envelopes, part
   const set=async(models,ref=reference)=>updateLocalUsage(page,localUsagePayload(range,{models,eventCount:1,reference:ref}),id);
   await set([astra]);assert.match(await page.locator('.cq-local-recent-local strong').textContent(),/0.08.*0.12/);
   await set([{...astra,cachedInputTokens:0}]);assert.match(await page.locator('.cq-local-recent-local strong').textContent(),/0.12.*0.76/);
-  await set([astra,{...astra,model:'unknown-model'}]);assert.match(await page.locator('.cq-local-recent-local strong').textContent(),/0.08.*0.12/);assert.match(await page.locator('.cq-local-recent-local').innerText(),/1 \/ 2 个模型可比/);assert.equal(await page.locator('.cq-local-recent-local .cq-local-partial').allTextContents().then(a=>a.some(x=>x.includes('部分统计'))),false);
+  await set([astra,{...astra,model:'unknown-model'}]);assert.match(await page.locator('.cq-local-recent-local strong').textContent(),/0.08.*0.12/);assert.match(await page.locator('.cq-local-recent-local').innerText(),/1 \/ 2 个模型可估算/);assert.equal(await page.locator('.cq-local-recent-local .cq-local-partial').allTextContents().then(a=>a.some(x=>x.includes('部分统计'))),false);
   await set([{...astra,inputTokens:0,cachedInputTokens:0,totalTokens:0}]);assert.match(await page.locator('.cq-local-recent-local strong').textContent(),/0/);
   await set([{...astra,model:'unknown-model'}]);assert.doesNotMatch(await page.locator('.cq-local-recent-local strong').textContent(),/0%/);
  }finally{await close(page);}
+});
+
+test('other priced models use both API reference anchors without counting unknown models',async()=>{
+ const page=await pageFor();try{
+  await showLocalUsage(page);const {range,id}=await localUsageRequest(page);
+  const reference={planName:'pro',selectedPlan:'pro200',referenceKind:'legacy20x',status:'snapshot',models:{'gpt-6-astra':10000000,'gpt-6.1-sol':20000000},apiModels:{'gpt-6-astra':100,'gpt-6.1-sol':200}};
+  const terra={model:'gpt-6.1-terra',inputTokens:1000000,cachedInputTokens:0,cacheWriteInputTokens:0,cacheWriteKnown:true,outputTokens:0,totalTokens:1000000};
+  const astra={...terra,model:'gpt-6-astra',cachedInputTokens:1000000};
+  const set=async(models,ref=reference)=>updateLocalUsage(page,localUsagePayload(range,{models,eventCount:1,reference:ref}),id);
+  await set([terra]);assert.match(await page.locator('.cq-local-recent-local strong').textContent(),/0.5.*1%/);assert.match(await page.locator('.cq-local-recent-local').innerText(),/间接估算/);
+  await set([astra,terra]);assert.match(await page.locator('.cq-local-recent-local strong').textContent(),/1.5.*11%/);
+  const review={...terra,model:'codex-auto-review'};
+  await set([terra,review]);assert.match(await page.locator('.cq-local-recent-local strong').textContent(),/0.5.*1%/);assert.doesNotMatch(await page.locator('.cq-local-recent-local').innerText(),/个模型可估算/);
+  assert.equal(await page.locator('.cq-local-total strong').getAttribute('title'),'2,000,000 token');
+  await set([review]);assert.match(await page.locator('.cq-local-recent-local strong').textContent(),/0%/);assert.match(await page.locator('.cq-local-recent-local').innerText(),/审核不占周额度/);assert.match(await page.locator('.cq-local-cost').innerText(),/未计价/);
+  await set([review,{...terra,model:'unknown-model'}]);assert.doesNotMatch(await page.locator('.cq-local-recent-local strong').textContent(),/0%/);
+  await set([terra],{...reference,apiModels:{'gpt-6-astra':100}});assert.doesNotMatch(await page.locator('.cq-local-recent-local strong').textContent(),/0%/);
+ }finally{await close(page)}
 });
 
 test('long dual-estimate ranges and account values stay aligned inside a narrow 260px popup',async()=>{
@@ -767,4 +785,76 @@ test('popup adopts the associated native menu measured width across host zoom an
    const popup=(await geometry(page)).popup;assert.ok(Math.abs(popup.width-nativeWidth)<1,JSON.stringify({zoom,width,nativeWidth,popup}));assert.ok(popup.left>=11&&popup.right<=709);
   }
  }finally{await close(page);}}
+});
+
+test('account tier survives helper reinjection and stays isolated between accounts',async()=>{
+ const page=await pageFor();try{
+  await page.evaluate(()=>{__codexQuotaSessionScope='account-a-first';__codexQuotaReferencePlan='pro200'});
+  await page.evaluate(source);await settle(page);await showLocalUsage(page);
+  let {range,id}=await localUsageRequest(page);assert.equal(range.referencePlan,'pro200');
+  await updateLocalUsage(page,localUsagePayload(range),id);
+  await page.locator('.cq-settings-button').click();await page.locator('.cq-local-reference > summary').click();
+  assert.equal(await page.locator('.cq-local-reference-plan').inputValue(),'pro200');
+  await page.locator('.cq-local-reference-plan').selectOption('pro100');
+  ({range,id}=await localUsageRequest(page));assert.equal(range.referencePlan,'pro100');assert.equal(range.saveReferencePlan,true);
+  await updateLocalUsage(page,{...localUsagePayload(range),referencePlanSaveError:true},id);
+  assert.match(await page.locator('.cq-local-reference-status').textContent(),/保存失败/);
+  await page.evaluate(()=>{__codexQuotaSessionScope='account-a-restarted';__codexQuotaReferencePlan='pro100'});
+  await page.evaluate(source);await settle(page);await showLocalUsage(page);
+  ({range}=await localUsageRequest(page));assert.equal(range.referencePlan,'pro100');
+  await page.evaluate(()=>{__codexQuotaSessionScope='account-b';__codexQuotaReferencePlan=''});
+  await page.evaluate(source);await settle(page);await showLocalUsage(page);
+  ({range}=await localUsageRequest(page));assert.equal(range.referencePlan,'');
+ }finally{await close(page)}
+});
+
+test('turn estimates follow native duration controls and reject stale or incomplete replies',async()=>{
+ const page=await pageFor();try{
+  await page.evaluate(()=>{
+   const info=console.info;globalThis.turnRequests=[];
+   console.info=(...args)=>{if(args[0]==='__codexQuotaTurnUsageRequest__')turnRequests.push({id:args[1],query:structuredClone(__codexQuotaTurnUsageQuery)});info.apply(console,args);};
+   const chat=document.querySelector('#chat');chat.innerHTML=`<div data-content-search-turn-key="turn-1"><div class="text-size-chat text-secondary"><button style="font:430 14px/21px sans-serif;color:rgba(42,39,35,.494)"><span class="text-inherit">用时 8m 56s</span></button></div></div><div data-content-search-turn-key="turn-2"><div class="text-size-chat text-secondary"><button style="font:430 14px/21px sans-serif;color:rgba(42,39,35,.494)">用时 2m</button></div></div>`;
+  });
+  await page.waitForFunction(()=>turnRequests.length===1);const req=await page.evaluate(()=>turnRequests[0]);
+  assert.deepEqual(req.query.turnIds,['turn-1','turn-2']);
+  const model={model:'gpt-6-astra',inputTokens:100000,cachedInputTokens:50000,outputTokens:10000,totalTokens:110000};
+  const reference={status:'ok',planName:'plus',selectedPlan:'plus',models:{'gpt-6-astra':10000000},apiModels:{'gpt-6-astra':100}};
+  const row=(turnId,other={})=>({turnId,models:[model],eventCount:1,partial:false,issues:[],status:'complete',...other});
+  await page.evaluate(({req,reference,row1,row2})=>__codexQuotaUpdateTurnUsage({reference,turns:[row1,row2]},req.id),{req,reference,row1:row('turn-1'),row2:row('turn-2',{partial:true})});
+  await page.waitForTimeout(300);
+  assert.match(await page.locator('[data-content-search-turn-key="turn-1"] .cq-turn-usage').innerText(),/估算.*%/);
+  assert.match(await page.locator('[data-content-search-turn-key="turn-2"] .cq-turn-usage').innerText(),/不完整/);
+  assert.equal(await page.locator('.cq-turn-usage').count(),2);
+  assert.deepEqual(await page.locator('.cq-turn-usage').first().evaluate(el=>{const style=node=>{const s=getComputedStyle(node);return [s.fontFamily,s.fontSize,s.fontWeight,s.lineHeight,s.color]};return [style(el),style(el.previousElementSibling)]}).then(([a,b])=>a.map((v,i)=>v===b[i])),[true,true,true,true,true]);
+  assert.equal(await page.evaluate(()=>turnRequests.length),1);
+  await page.evaluate(()=>{document.querySelector('[data-content-search-turn-key="turn-1"]').remove();const e=document.createElement('div');e.dataset.contentSearchTurnKey='turn-3';e.innerHTML='<div class="text-size-chat text-secondary"><button>用时 1m</button></div>';document.querySelector('#chat').append(e);});
+  await page.waitForFunction(()=>turnRequests.length===2);const next=await page.evaluate(()=>turnRequests[1]);
+  assert.deepEqual(next.query.turnIds,['turn-3']);
+  await page.evaluate(({req,reference,row1})=>__codexQuotaUpdateTurnUsage({reference,turns:[row1]},req.id),{req,reference,row1:row('turn-3')});
+  assert.doesNotMatch(await page.locator('[data-content-search-turn-key="turn-3"] .cq-turn-usage').innerText(),/%/);
+  await page.evaluate(({next,reference,row3})=>__codexQuotaUpdateTurnUsage({reference,turns:[row3]},next.id),{next,reference,row3:row('turn-3',{models:[{...model,model:'unknown-model'}]})});
+  assert.match(await page.locator('[data-content-search-turn-key="turn-3"] .cq-turn-usage').innerText(),/缺少基准/);
+  await page.evaluate(()=>{document.querySelector('[data-content-search-turn-key="turn-3"]').dataset.contentSearchTurnKey='turn-4';});
+  await page.waitForFunction(()=>turnRequests.length===3);const recycled=await page.evaluate(()=>turnRequests[2]);
+  assert.deepEqual(recycled.query.turnIds,['turn-4']);
+  assert.doesNotMatch(await page.locator('[data-content-search-turn-key="turn-4"] .cq-turn-usage').innerText(),/%/);
+  const proxyReference={...reference,models:{...reference.models,'gpt-6.1-sol':20000000},apiModels:{...reference.apiModels,'gpt-6.1-sol':200}};
+  const terra={...model,model:'gpt-6.1-terra'};
+  await page.evaluate(({recycled,reference,row4})=>__codexQuotaUpdateTurnUsage({reference,turns:[row4]},recycled.id),{recycled,reference:proxyReference,row4:row('turn-4',{models:[terra,{...terra,model:'codex-auto-review'}]})});
+  assert.match(await page.locator('[data-content-search-turn-key="turn-4"] .cq-turn-usage').innerText(),/间接估算.*%/);
+  assert.doesNotMatch(await page.locator('[data-content-search-turn-key="turn-4"] .cq-turn-usage').innerText(),/不完整/);
+  assert.match(await page.locator('[data-content-search-turn-key="turn-4"] .cq-turn-usage').getAttribute('title'),/Astra 和 Sol/);
+  assert.match(await page.locator('[data-content-search-turn-key="turn-4"] .cq-turn-usage').getAttribute('title'),/审核不占周额度/);
+  await page.evaluate(()=>{document.querySelector('[data-content-search-turn-key="turn-4"]').dataset.contentSearchTurnKey='turn-5'});
+  await page.waitForFunction(()=>turnRequests.length===4);const exempt=await page.evaluate(()=>turnRequests[3]);
+  await page.evaluate(({exempt,reference,row5})=>__codexQuotaUpdateTurnUsage({reference,turns:[row5]},exempt.id),{exempt,reference:proxyReference,row5:row('turn-5',{models:[{...terra,model:'codex-auto-review'}]})});
+  assert.match(await page.locator('[data-content-search-turn-key="turn-5"] .cq-turn-usage').innerText(),/估算.*0%/);
+  assert.doesNotMatch(await page.locator('[data-content-search-turn-key="turn-5"] .cq-turn-usage').innerText(),/不完整/);
+  await page.evaluate(()=>{__codexQuotaSessionScope='another-account';__codexQuotaResetSession();});
+  await page.waitForFunction(()=>turnRequests.length===5);const third=await page.evaluate(()=>turnRequests[4]);
+  await page.evaluate(({next,reference,row2})=>__codexQuotaUpdateTurnUsage({reference,turns:[row2]},next.id),{next,reference,row2:row('turn-2')});
+  assert.doesNotMatch(await page.locator('[data-content-search-turn-key="turn-2"] .cq-turn-usage').innerText(),/%/);
+  await page.evaluate(id=>__codexQuotaUpdateTurnUsage({errorCode:'LOCAL_USAGE_UNAVAILABLE'},id),third.id);
+  assert.match(await page.locator('[data-content-search-turn-key="turn-2"] .cq-turn-usage').innerText(),/暂不可用/);
+ }finally{await close(page);}
 });

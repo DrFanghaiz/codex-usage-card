@@ -12,6 +12,7 @@
   globalThis.__codexQuotaMotionCleanup?.();
   globalThis.__codexQuotaNoticeCleanup?.();
   globalThis.__codexQuotaLocalUsageCleanup?.();
+  globalThis.__codexQuotaTurnUsageCleanup?.();
   for (const key of Object.keys(globalThis)) if (key.startsWith("__codexQuotaApi") || key === "__codexQuotaUpdateApi") delete globalThis[key];
   document.getElementById("cq-settings")?.remove();
   globalThis.__codexQuotaGeometryCleanup?.();
@@ -830,10 +831,7 @@
   const localUsageBaselines = new Map();
   const localApiBaselines = new Map();
   let localReferencePlan="", localReferenceScope=globalThis.__codexQuotaSessionScope;
-  try {
-    const stored=JSON.parse(localStorage.getItem("codexQuotaReferencePlan") || "null");
-    if(stored?.scope===localReferenceScope) localReferencePlan=stored.plan;
-  } catch {}
+  localReferencePlan=globalThis.__codexQuotaReferencePlan || "";
   if (!["pro100","pro200","pro500"].includes(localReferencePlan)) localReferencePlan="";
   // OpenAI Standard short-context list prices, USD / 1M tokens, checked 2026-10-30.
   const localApiPrices = new Map([
@@ -857,14 +855,25 @@
     const common = ordinary * rates[0] + row.cachedInputTokens * rates[1] + row.outputTokens * rates[2];
     return [(common + write * rates[3]) / 1e6, (common + write * rates[4]) / 1e6];
   };
-  const localQuotaEstimate = models => {
-    // Compare the same models: these two views describe one workload, not additive or independent evidence.
-    const covered=models.filter(row=>localUsageBaselines.has(row.model));
-    const token=covered.length ? covered.reduce((sum,row)=>sum+row.totalTokens/localUsageBaselines.get(row.model)*100,0) : null;
+  const quotaExemptModel = 'codex-auto-review';
+  const localQuotaEstimate = (models, baselines = localUsageBaselines, apiBaselines = localApiBaselines) => {
+    const exempt=models.filter(row=>row.model===quotaExemptModel);
+    const covered=models.filter(row=>row.model!==quotaExemptModel && baselines.has(row.model));
+    const token=covered.length ? covered.reduce((sum,row)=>sum+row.totalTokens/baselines.get(row.model)*100,0) : null;
     const priced=covered.map(row=>({row,cost:apiEquivalent(row)}));
-    const api=covered.length && priced.every(({row,cost})=>cost && localApiBaselines.has(row.model))
-      ? priced.reduce((sum,{row,cost})=>[sum[0]+cost[0]/localApiBaselines.get(row.model)*100,sum[1]+cost[1]/localApiBaselines.get(row.model)*100],[0,0]) : null;
-    return {token,api,range:token===null ? null : api ? [Math.min(token,api[0]),Math.max(token,api[1])] : [token,token],partial:covered.length<models.length};
+    const directApi=covered.length && priced.every(({row,cost})=>cost && apiBaselines.has(row.model))
+      ? priced.reduce((sum,{row,cost})=>[sum[0]+cost[0]/apiBaselines.get(row.model)*100,sum[1]+cost[1]/apiBaselines.get(row.model)*100],[0,0]) : null;
+    const anchors=['gpt-6-astra','gpt-6.1-sol'].map(name=>apiBaselines.get(name));
+    const proxy=anchors.every(value=>Number.isFinite(value) && value>0)
+      ? models.filter(row=>row.model!==quotaExemptModel && !baselines.has(row.model)).map(row=>({row,cost:apiEquivalent(row)})).filter(item=>item.cost) : [];
+    const proxyCost=proxy.reduce((sum,{cost})=>[sum[0]+cost[0],sum[1]+cost[1]],[0,0]);
+    const indirect=proxy.length ? [proxyCost[0]/Math.max(...anchors)*100,proxyCost[1]/Math.min(...anchors)*100] : [0,0];
+    const directRange=token===null ? [0,0] : directApi ? [Math.min(token,directApi[0]),Math.max(token,directApi[1])] : [token,token];
+    const api=directApi || !covered.length ? [indirect[0]+(directApi?.[0] || 0),indirect[1]+(directApi?.[1] || 0)] : null;
+    const counted=covered.length+proxy.length+exempt.length;
+    const exemptOnly=exempt.length>0 && counted===models.length && !covered.length && !proxy.length;
+    return {token,api:directApi || proxy.length ? api : null,range:covered.length || proxy.length || exemptOnly ? [directRange[0]+indirect[0],directRange[1]+indirect[1]] : null,
+      partial:counted<models.length || proxy.some(({row})=>row.cacheWriteKnown===false),proxy:proxy.length>0,covered:counted,exempt:exempt.length>0,exemptOnly};
   };
   const localPercent = value => value>0 && value<.01 ? "<0.01" : new Intl.NumberFormat(navigator.language,{maximumFractionDigits:2}).format(value);
   const localEstimateText = estimate => {
@@ -1235,7 +1244,7 @@
     delete globalThis.__codexQuotaLocalUsageRange;
     delete globalThis.__codexQuotaUpdateLocalUsage;
   };
-  const requestLocalUsage = (panel, change = () => {}) => {
+  const requestLocalUsage = (panel, change = () => {}, saveReferencePlan = false) => {
     if(panel.cqPeriod!=="custom") {
       const end=new Date(),start=new Date(end);start.setHours(0,0,0,0);
       if(panel.cqPeriod==="week")start.setDate(start.getDate()-(start.getDay()+6)%7);
@@ -1246,8 +1255,8 @@
     panel.cqCloseCalendar?.(false);
     clearTimeout(localUsageTimer);
     localUsageRequestId = `local-${uiRevision}-${++localUsageSequence}-${Date.now()}`;
-    if(localReferenceScope!==globalThis.__codexQuotaSessionScope) {localReferencePlan="";localReferenceScope=globalThis.__codexQuotaSessionScope;}
-    globalThis.__codexQuotaLocalUsageRange = {start, end, ...interval, ...(localReferencePlan ? {referencePlan:localReferencePlan} : {})};
+    if(localReferenceScope!==globalThis.__codexQuotaSessionScope) {localReferencePlan=globalThis.__codexQuotaReferencePlan || "";localReferenceScope=globalThis.__codexQuotaSessionScope;}
+    globalThis.__codexQuotaLocalUsageRange = {start, end, ...interval, referencePlan:localReferencePlan, ...(saveReferencePlan ? {saveReferencePlan:true} : {})};
     const result = panel.querySelector(".cq-local-result");
     animateLocalLayout(panel,()=>{
       change();
@@ -1272,6 +1281,10 @@
     syncLocalRefresh(panel);
     const query=panel.querySelector('.cq-interval-actions button');query.textContent=words("应用", "Apply");query.setAttribute("aria-busy","false");
     const range = globalThis.__codexQuotaLocalUsageRange;
+    if (reply?.referencePlanSaveError || range?.saveReferencePlan && reply?.errorCode && reply?.referencePlanSaved !== true) {
+      const note=document.querySelector('.cq-local-reference-status');
+      if(note) {note.textContent=reply?.referencePlanSaveError ? words('套餐保存失败，请重新选择。','Could not save tier; choose it again.') : words('套餐保存状态未知，请重新选择。','Tier save status unknown; choose it again.');note.setAttribute('data-cq-warning','');}
+    }
     const data=reply?.interval?.local && {...reply.interval.local,reference:reply.reference,interval:reply.interval};
     const valid = reply && !reply.errorCode && reply.start===range?.start && reply.end===range?.end && data && data.start===range.start && data.end===range.end &&
       reply.interval.start===range.intervalStart && reply.interval.end===range.intervalEnd &&
@@ -1322,12 +1335,13 @@
       }
       const select=weekly.querySelector("select");select.hidden=source.planName!=="pro";select.value=localReferencePlan;
       const note=weekly.querySelector(".cq-local-reference-status");
-      note.textContent=!validReference || source.status==="unavailable" ? words("参考数据暂不可用，将自动重试。", "References unavailable; retry scheduled.")
+      note.textContent=reply.referencePlanSaveError ? words("套餐保存失败，请重新选择。", "Could not save tier; choose it again.")
+        :!validReference || source.status==="unavailable" ? words("参考数据暂不可用，将自动重试。", "References unavailable; retry scheduled.")
         :source.status==="needs_plan" ? ""
         :source.status==="snapshot" ? source.referenceCheckFailed ? words("旧档检查失败；使用参考快照", "Legacy check failed; using snapshot") : words("旧 20x 参考快照", "Legacy 20x reference snapshot")
         :source.status==="stale" ? words("更新失败；保留上次成功基准。", "Update failed; previous references retained.") : "";
       const referenceFailed=source.status==='stale' || Boolean(source.referenceCheckFailed);
-      note.toggleAttribute('data-cq-warning',referenceFailed);
+      note.toggleAttribute('data-cq-warning',referenceFailed || Boolean(reply.referencePlanSaveError));
       const link=weekly.querySelector("a");link.href="https://modeldial.com/subscriptions?period=week&view=insights";
       link.classList.toggle('cq-local-partial',referenceFailed);
       link.textContent=referenceFailed ? `ModelDial · ${words("更新失败", "Update failed")}` : releaseDate(source.lastSuccessAt) ? `ModelDial · ${words("已核对", "Checked")} ${new Date(source.lastSuccessAt).toLocaleDateString()}`
@@ -1337,8 +1351,7 @@
     result.replaceChildren();
     const totals = data.models.reduce((sum,row) => ({input:sum.input+row.inputTokens, cache:sum.cache+row.cachedInputTokens,
       output:sum.output+row.outputTokens, tokens:sum.tokens+row.totalTokens}), {input:0,cache:0,output:0,tokens:0});
-    const covered = data.models.filter(row => localUsageBaselines.has(row.model));
-    const excluded = data.models.filter(row => !localUsageBaselines.has(row.model)).reduce((sum,row) => sum+row.totalTokens,0);
+    const excluded = data.models.filter(row => row.model!==quotaExemptModel && !localUsageBaselines.has(row.model)).reduce((sum,row) => sum+row.totalTokens,0);
     const estimate=localQuotaEstimate(data.models);
     const priced = data.models.map(row => ({row,cost:apiEquivalent(row)})).filter(item => item.cost);
     const cost = priced.reduce((sum,item)=>[sum[0]+item.cost[0],sum[1]+item.cost[1]],[0,0]);
@@ -1390,8 +1403,10 @@
           const choose=addText("button","cq-choose-reference",words("选择参考套餐","Choose reference tier"),local);choose.type="button";
           choose.onclick=()=>{openSettings(choose);reference.open=true;reference.querySelector("select").focus({preventScroll:true});};
         } else addText("small","",row.local.eventCount ? words("无可比基准","No comparable reference") : words("无记录","No records"),local);
-      } else if(intervalEstimate.partial)addText("small","cq-local-partial",words(`${covered.length} / ${data.models.length} 个模型可比`,`${covered.length} / ${data.models.length} comparable models`),local);
+      } else if(intervalEstimate.partial)addText("small","cq-local-partial",words(`${intervalEstimate.covered} / ${row.local.models.length} 个模型可估算`,`${intervalEstimate.covered} / ${row.local.models.length} models estimated`),local);
+      else if(intervalEstimate.exemptOnly)addText("small","",words("审核不占周额度","Review uses no weekly quota"),local);
       else if(!intervalEstimate.api)addText("small","",words("仅 Token 口径","Token only"),local);
+      if(intervalEstimate.proxy)addText("small","",words("含 API 价格间接估算","Includes API-price proxy"),local);
       if(row.local.partial)addText("small","cq-local-partial",words("统计不完整","Incomplete"),local);
       const account=addText("div","cq-local-recent-account","",values);
       addText("span","cq-local-metric-label",words("账号额度变化", "Account quota change"),account);
@@ -1434,15 +1449,17 @@
       let upper=lower;
       if(low!==high){estimated.dataset.range="";addText("span","cq-local-value-unit","–",lower);upper=addText('span','cq-local-estimate-bound','',estimated);addText("span","cq-local-value-number",high,upper);}
       addText("span", "cq-local-value-unit", "%", upper);
-      if(!estimate.api)addText('small','cq-local-estimate-note',words('仅 Token 口径','Token only'),estimateRow);
+      if(estimate.exemptOnly)addText('small','cq-local-estimate-note',words('审核不占周额度','Review uses no weekly quota'),estimateRow);
+      else if(!estimate.api)addText('small','cq-local-estimate-note',words('仅 Token 口径','Token only'),estimateRow);
       else if(estimate.partial)addText('small','cq-local-estimate-note cq-local-partial',words('部分模型','Partial models'),estimateRow);
+      if(estimate.proxy)addText('small','cq-local-estimate-note',words('含 API 价格间接估算','Includes API-price proxy'),estimateRow);
     } else {estimated.textContent = words("未折算", "Not estimated");estimated.dataset.unavailable = "";}
     const methods=addText('details','cq-local-estimate-methods','');methods.hidden=!estimate.range;
     const methodsSummary=addText('summary','',words('周额度参考估算','Reference quota estimate'),methods);methodsSummary.append(toolIcon('back','cq-local-detail-arrow'));methods.append(estimateRow);
     for(const [scope,part] of [[dateText,estimate]]) {
       addText('p','cq-local-method-scope',scope,methods);
       const methodValues=addText('dl','cq-local-method-values','',methods);
-      for(const [label,value] of [['Token',part.token===null ? '—' : `≈ ${localPercent(part.token)}%`],['API',part.api ? `≈ ${localPercent(part.api[0])}${localPercent(part.api[0])===localPercent(part.api[1]) ? '' : `–${localPercent(part.api[1])}`}%` : '—']]) {
+      for(const [label,value] of [[part.proxy ? words('Token（直接）','Token (direct)') : 'Token',part.token===null ? '—' : `≈ ${localPercent(part.token)}%`],['API',part.api ? `≈ ${localPercent(part.api[0])}${localPercent(part.api[0])===localPercent(part.api[1]) ? '' : `–${localPercent(part.api[1])}`}%` : '—']]) {
         const pair=addText('div','','',methodValues);addText('dt','',label,pair);addText('dd','',value,pair);
       }
     }
@@ -1723,8 +1740,8 @@
     panel.querySelector("summary").textContent = words("口径与来源", "Scope and sources");
     panel.querySelector("summary").append(toolIcon("back", "cq-local-detail-arrow"));
     panel.querySelector("details p").textContent = words(
-      "Token／API 各自按模型用量除以周参考计算。两口径范围不是置信区间，不代表官方扣量。",
-      "Token/API estimates divide model usage by weekly references. Their range is not a confidence interval or official consumption.");
+      "Token／API 按模型用量除以周参考计算。其他有价格的模型按 Astra 和 Sol 的 API 等值间接推算。范围不是置信区间，不代表官方扣量。",
+      "Token/API estimates use weekly references. Other priced models use an indirect Astra and Sol API-equivalent proxy. The range is not a confidence interval or official consumption.");
     const reference=panel.querySelector(".cq-local-reference"), explanation=reference.querySelector("p");
     const referenceText=(tag,className,text,parent=reference)=>{const node=document.createElement(tag);node.className=className;node.textContent=text;parent.append(node);return node;};
     const weeklyReference=referenceText("section","cq-local-reference-section cq-local-weekly-reference","");
@@ -1740,8 +1757,9 @@
     planChoice.value=localReferencePlan;
     planChoice.onchange=()=>{
       localReferencePlan=planChoice.value;
-      try {localStorage.setItem("codexQuotaReferencePlan",JSON.stringify({scope:localReferenceScope,plan:localReferencePlan}));} catch {}
-      requestLocalUsage(panel);
+      resetTurnUsage();
+      globalThis.__codexQuotaReferencePlan=localReferencePlan;
+      requestLocalUsage(panel,()=>{},true);
     };
     referenceText("p","cq-local-reference-status","",weeklyReference);
     const apiReference=referenceText("section","cq-local-reference-section cq-local-api-reference","");
@@ -3018,6 +3036,7 @@
 
   globalThis.__codexQuotaUpdateOfficial = (data, requestId) => {
     if (!acceptQuotaResponse("official", requestId)) return;
+    const previousTurnPlan = globalThis.__codexQuotaOfficialPayload?.planName;
     if (data && Object.hasOwn(data, "network")) globalThis.__codexQuotaNetworkDiagnosis = sanitizeNetworkDiagnosis(data.network);
     const awaitingSession = globalThis.__codexQuotaAwaitingFreshSession;
     globalThis.__codexQuotaOfficialNeedsData = false;
@@ -3033,6 +3052,7 @@
       }
       globalThis.__codexQuotaOfficialUsageFingerprint = fingerprint;
       globalThis.__codexQuotaOfficialPayload = data;
+      if (previousTurnPlan !== data.planName) resetTurnUsage();
       globalThis.__codexQuotaOfficialErrorCode = null;
       globalThis.__codexQuotaOfficialError = null;
       globalThis.__codexQuotaOfficialLastSuccessAt = now;
@@ -3483,6 +3503,7 @@
 
 
   globalThis.__codexQuotaResetSession = () => {
+    resetTurnUsage();
     alertGeneration++;
     clearTimeout(localUsageTimer); localUsageRequestId = null;
     document.getElementById("cq-local-usage")?.remove();
@@ -3615,11 +3636,186 @@
   };
 
 
+  // Turn labels only inspect native duration controls and their stable turn keys.
+  const turnRows = new Map();
+  let turnObserver, turnThemeObserver, turnScanTimer, turnRequestTimer, turnRefreshTimer;
+  let turnPending = null, turnGeneration = 0, turnSequence = 0, turnInstalled = false, turnScope;
+  const turnSelector = '[data-content-search-turn-key] .text-size-chat.text-secondary > button';
+  const turnDescription = words('本机额度估算，非官方实际扣量', 'Local quota estimate, not actual account usage');
+  const turnButtons = () => [...document.querySelectorAll(turnSelector)].filter(button => {
+    const id = button.closest('[data-content-search-turn-key]')?.getAttribute('data-content-search-turn-key');
+    const rect = button.getBoundingClientRect();
+    return /^[a-zA-Z0-9-]{1,80}$/.test(id || '') && /^(用时|worked\s+for|worked)\s*\d/i.test(button.textContent.trim()) &&
+      rect.width > 0 && rect.height > 0 && rect.bottom >= -300 && rect.top <= innerHeight + 300;
+  }).slice(0, 50);
+  const turnPlan = () => {
+    if (localReferenceScope !== globalThis.__codexQuotaSessionScope) {
+      localReferenceScope = globalThis.__codexQuotaSessionScope;
+      localReferencePlan = ['pro100','pro200','pro500'].includes(globalThis.__codexQuotaReferencePlan) ? globalThis.__codexQuotaReferencePlan : '';
+    }
+    return localReferencePlan;
+  };
+  const scheduleTurnScan = (delay = 200) => {
+    if (!turnInstalled) return;
+    clearTimeout(turnScanTimer);
+    turnScanTimer = setTimeout(scanTurns, delay);
+  };
+  const resetTurnUsage = () => {
+    turnGeneration++;
+    turnRows.clear();
+    turnPending = null;
+    clearTimeout(turnRequestTimer);
+    clearTimeout(turnRefreshTimer);
+    delete globalThis.__codexQuotaTurnUsageQuery;
+    document.querySelectorAll('.cq-turn-usage').forEach(node => node.remove());
+    scheduleTurnScan();
+  };
+  const turnLabel = (button, item) => {
+    let label = button.nextElementSibling;
+    if (!label?.classList.contains('cq-turn-usage')) {
+      label = document.createElement('span');
+      label.className = 'cq-turn-usage';
+      label.style.marginLeft = '8px';
+      button.after(label);
+    }
+    const native = getComputedStyle(button);
+    for (const property of ['fontFamily','fontSize','fontWeight','lineHeight','letterSpacing','color']) label.style[property] = native[property];
+    const text = item?.text || words('估算中', 'Estimating');
+    label.textContent = text;
+    label.title = item?.title || turnDescription;
+    label.setAttribute('aria-label', `${turnDescription}，${text}`);
+  };
+  const renderTurns = () => {
+    const buttons = turnButtons();
+    const live = new Set(buttons);
+    document.querySelectorAll('.cq-turn-usage').forEach(label => {
+      if (!live.has(label.previousElementSibling)) label.remove();
+    });
+    for (const button of buttons) {
+      const id = button.closest('[data-content-search-turn-key]').getAttribute('data-content-search-turn-key');
+      turnLabel(button, turnRows.get(id));
+    }
+    return [...new Set(buttons.map(button => button.closest('[data-content-search-turn-key]').getAttribute('data-content-search-turn-key')))];
+  };
+  const turnUnavailable = () => ({text:words('估算暂不可用','Estimate unavailable'),title:turnDescription});
+  const scanTurns = () => {
+    if (!turnInstalled || document.visibilityState === 'hidden') return;
+    const plan = turnPlan(), scope = globalThis.__codexQuotaSessionScope;
+    if (turnScope !== scope) { resetTurnUsage(); turnScope = scope; }
+    const ids = renderTurns();
+    if (!scope || turnPending || !ids.length) return;
+    const needed = ids.filter(id => !turnRows.has(id));
+    if (!needed.length) return;
+    const requestId = `${requestEpoch}-turn-${++turnSequence}`;
+    const generation = turnGeneration;
+    turnPending = {requestId,scope,plan,generation,ids:needed};
+    globalThis.__codexQuotaTurnUsageQuery = {turnIds:needed,referencePlan:plan};
+    console.info('__codexQuotaTurnUsageRequest__', requestId);
+    clearTimeout(turnRequestTimer);
+    turnRequestTimer = setTimeout(() => {
+      if (turnPending?.requestId !== requestId) return;
+      for (const id of needed) turnRows.set(id, turnUnavailable());
+      turnPending = null;
+      delete globalThis.__codexQuotaTurnUsageQuery;
+      renderTurns();
+      scheduleTurnScan();
+    }, 60000);
+  };
+  globalThis.__codexQuotaUpdateTurnUsage = (payload, requestId) => {
+    const pending = turnPending;
+    if (!pending || pending.requestId !== requestId || pending.generation !== turnGeneration) return;
+    if (pending.scope !== globalThis.__codexQuotaSessionScope || pending.plan !== turnPlan()) { resetTurnUsage(); return; }
+    clearTimeout(turnRequestTimer);
+    turnPending = null;
+    delete globalThis.__codexQuotaTurnUsageQuery;
+    const reference = payload?.reference;
+    const entries = reference?.models && typeof reference.models === 'object' && !Array.isArray(reference.models) ? Object.entries(reference.models) : [];
+    const apiEntries = reference?.apiModels && typeof reference.apiModels === 'object' && !Array.isArray(reference.apiModels) ? Object.entries(reference.apiModels) : [];
+    const validReference = ['ok','stale','snapshot'].includes(reference?.status) &&
+      [null,'plus','pro100','pro200','pro500'].includes(reference.selectedPlan) &&
+      (reference.planName !== 'pro' || reference.selectedPlan === pending.plan && Boolean(pending.plan)) &&
+      (reference.selectedPlan !== 'pro200' || reference.referenceKind === 'legacy20x') && entries.length <= 16 &&
+      entries.every(([name,value]) => /^gpt-[a-z0-9.-]{1,60}$/.test(name) && Number.isFinite(value) && value > 0 && value < 1e14) &&
+      (reference.apiModels == null || typeof reference.apiModels === 'object' && !Array.isArray(reference.apiModels)) &&
+      apiEntries.length <= 16 && apiEntries.every(([name,value]) => entries.some(([model]) => model === name) && Number.isFinite(value) && value > 0 && value < 1e9);
+    const baselines = new Map(validReference ? entries : []), apiBaselines = new Map(validReference ? apiEntries : []);
+    const rows = Array.isArray(payload?.turns) ? payload.turns : [];
+    let running = false;
+    for (const id of pending.ids) {
+      const matches = rows.filter(row => row?.turnId === id);
+      const row = matches.length === 1 ? matches[0] : null;
+      if (!row || !['complete','running','unavailable'].includes(row.status) || !validLocalModels(row.models) ||
+          !Number.isSafeInteger(row.eventCount) || row.eventCount < 0 || typeof row.partial !== 'boolean' || !validLocalIssues(row.issues) ||
+          row.status === 'unavailable' || !row.eventCount) {
+        turnRows.set(id, row?.status === 'running' ? {text:words('估算中','Estimating'),title:turnDescription} : turnUnavailable());
+        if (row?.status === 'running') running = true;
+        continue;
+      }
+      const estimate = localQuotaEstimate(row.models, baselines, apiBaselines);
+      if (!estimate.range) {
+        turnRows.set(id, {text:words('估算缺少基准','Estimate needs reference'),title:turnDescription});
+      } else {
+        const partial = row.partial || estimate.partial || !estimate.api && !estimate.exemptOnly;
+        const state = row.status === 'running' ? words('进行中','In progress') : partial ? words('不完整','Partial') : '';
+        const text = `${estimate.proxy ? words('间接估算','Proxy est.') : words('估算','Est.')} ${localEstimateText(estimate)}${state ? ` · ${state}` : ''}`;
+        turnRows.set(id, {text,title:`${turnDescription}${estimate.proxy ? words('；按 Astra 和 Sol 的 API 等值参考间接推算','; approximated from Astra and Sol API-equivalent references') : ''}${estimate.exempt ? words('；自动审核不占周额度','; automatic review uses no weekly quota') : ''}${partial ? words('；部分记录或参考缺失','; incomplete records or reference') : ''}`});
+      }
+      if (row.status === 'running') running = true;
+    }
+    while (turnRows.size > 100) turnRows.delete(turnRows.keys().next().value);
+    renderTurns();
+    if (running) {
+      clearTimeout(turnRefreshTimer);
+      turnRefreshTimer = setTimeout(() => {
+        for (const row of rows) if (row.status === 'running') turnRows.delete(row.turnId);
+        scheduleTurnScan(0);
+      }, 10000);
+    }
+    scheduleTurnScan();
+  };
+  const installTurnUsage = () => {
+    if (turnInstalled) return;
+    turnInstalled = true;
+    turnObserver = new MutationObserver(records => {
+      for (const record of records) {
+        if (record.type === 'attributes') { scheduleTurnScan(); break; }
+        if (record.target.closest?.('.cq-turn-usage,#codex-quota-popover,#codex-quota-trigger')) continue;
+        const target = record.target;
+        if (target.matches?.('.text-size-chat.text-secondary') && [...record.addedNodes,...record.removedNodes].some(node => !node.classList?.contains('cq-turn-usage')) ||
+            [...record.addedNodes,...record.removedNodes].some(node => node.nodeType === 1 && (node.matches('[data-content-search-turn-key]') || node.querySelector('[data-content-search-turn-key]') ||
+              target.closest?.('[data-content-search-turn-key]') && (node.matches('.text-size-chat.text-secondary') || node.querySelector('.text-size-chat.text-secondary'))))) {
+          scheduleTurnScan();
+          break;
+        }
+      }
+    });
+    turnObserver.observe(document.body,{childList:true,subtree:true,attributes:true,attributeFilter:['data-content-search-turn-key']});
+    turnThemeObserver = new MutationObserver(() => scheduleTurnScan());
+    turnThemeObserver.observe(document.documentElement,{attributes:true,attributeFilter:['class','style','data-theme','data-color-theme']});
+    turnThemeObserver.observe(document.body,{attributes:true,attributeFilter:['class','data-theme','data-color-theme']});
+    const onTurnEnvironmentChange = () => scheduleTurnScan();
+    document.addEventListener('scroll', onTurnEnvironmentChange, true);
+    window.addEventListener('resize', onTurnEnvironmentChange);
+    document.addEventListener('visibilitychange', onTurnEnvironmentChange);
+    globalThis.__codexQuotaTurnUsageCleanup = () => {
+      turnInstalled = false;
+      turnObserver.disconnect(); turnThemeObserver.disconnect();
+      document.removeEventListener('scroll', onTurnEnvironmentChange, true);
+      window.removeEventListener('resize', onTurnEnvironmentChange);
+      document.removeEventListener('visibilitychange', onTurnEnvironmentChange);
+      clearTimeout(turnScanTimer); clearTimeout(turnRequestTimer); clearTimeout(turnRefreshTimer);
+      resetTurnUsage();
+      delete globalThis.__codexQuotaUpdateTurnUsage;
+    };
+    scheduleTurnScan(0);
+  };
+
   const install = () => {
     try {
       for (const node of document.querySelectorAll("[data-codex-quota-source]")) node.removeAttribute("data-codex-quota-source");
       installLayout();
       observeOfficialCards();
+      installTurnUsage();
       installAutoRefresh();
       return true;
     } catch (error) { console.error("Codex quota UI installation failed", error); return false; }
