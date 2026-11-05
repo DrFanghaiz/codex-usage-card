@@ -11,6 +11,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
+using System.Linq;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Web.Script.Serialization;
@@ -24,6 +25,10 @@ public static class LocalUsageRegressions
     {
         return Json.Serialize(new { type="event_msg", timestamp=Stamp(day, minute), payload=new { type="token_count", info=new { total_token_usage=total, last_token_usage=last }, rate_limits=new { plan_type=plan } } }) + "\n";
     }
+    private static string TurnEvent(string kind, string root, string turn) { return Json.Serialize(new {type="event_msg",timestamp=Stamp(2,0),payload=new {type=kind,root_turn_id=root,turn_id=turn}})+"\n"; }
+    private static string TurnRecord(string root, string thread, string response, Dictionary<string,object> usage) { return Json.Serialize(new {type="token_usage_record",payload=new {root_turn_id=root,thread_id=thread,response_id=response,usage=usage}})+"\n"; }
+    private static Dictionary<string,object> TurnRead(string root, params string[] ids) { return LocalUsage.Read(root,"2026-09-01","2026-09-02",DateTimeOffset.UtcNow,null,null,ids); }
+    private static Dictionary<string,object> Turn(Dictionary<string,object> result, int index=0) { return ((List<Dictionary<string,object>>)result["turns"])[index]; }
     private static string Meta(string provider) { return Json.Serialize(new { type="session_meta", payload=new { model_provider=provider } }) + "\n"; }
     private static string Model(string model) { return Json.Serialize(new { type="turn_context", payload=new { model=model } }) + "\n"; }
     private static Dictionary<string, object> CW(long input, long cache, long written, long output)
@@ -431,6 +436,36 @@ public static class LocalUsageRegressions
             bool rejected=false;try{LocalUsage.Read(recentRoot,"2026-09-01","2026-09-01",recentNow,pair[0],pair[1]);}catch(ArgumentException){rejected=true;}
             Check(rejected,"Malformed, incomplete, unzoned, reverse, equal or future intervals cannot fall back to fixed windows");
         }
+        var turnRoot=Dir(root,"turns"); var turnSessions=Dir(turnRoot,"sessions");
+        var mainFile=Path.Combine(turnSessions,"main.jsonl");var childFile=Path.Combine(turnSessions,"child.jsonl");
+        var mainMeta=Json.Serialize(new {type="session_meta",payload=new {model_provider="openai",id="main-thread",timestamp=Stamp(1,0)}})+"\n";
+        var childMeta=Json.Serialize(new {type="session_meta",payload=new {model_provider="openai",id="child-thread",parent_thread_id="main-thread",timestamp=Stamp(1,0),source=new {subagent="review"}}})+"\n";
+        var m=C(10,2,1); var sub=C(20,4,2);
+        var mainText=mainMeta+Model("gpt-6-astra")+TurnEvent("task_started","root-1","root-1")+E(2,1,m,m,"pro")+TurnRecord("root-1","main-thread","response-1",m)+TurnEvent("task_complete","root-1","root-1");
+        var childText=childMeta+Model("gpt-6.1-sol")+TurnEvent("task_started","root-1","child-1")+E(2,2,sub,sub,"pro")+TurnRecord("root-1","child-thread","response-2",sub);
+        File.WriteAllText(mainFile,mainText,new UTF8Encoding(false));File.WriteAllText(childFile,childText,new UTF8Encoding(false));
+        var turn=Turn(TurnRead(turnRoot,"root-1"));
+        Check(Total(turn)==33 && (int)turn["eventCount"]==2 && (string)turn["status"]=="running" && (bool)turn["partial"],"Child work is included and remains running after root completion");
+        File.AppendAllText(childFile,TurnEvent("task_complete","root-1","child-1"),new UTF8Encoding(false));
+        turn=Turn(TurnRead(turnRoot,"root-1"));
+        Check(Total(turn)==33 && (string)turn["status"]=="complete" && !(bool)turn["partial"],"Incremental child completion does not prematurely mark a running root complete");
+        var turnArchive=Dir(turnRoot,"archived_sessions");File.WriteAllText(Path.Combine(turnArchive,"copy.jsonl"),mainText,new UTF8Encoding(false));
+        turn=Turn(TurnRead(turnRoot,"root-1"));
+        Check(Total(turn)==33 && (int)turn["eventCount"]==2 && !(bool)turn["partial"],"Archived copies and usage records never duplicate selected token_count consumption");
+        var more=C(5,1,1); var total=C(15,3,2);
+        File.AppendAllText(mainFile,TurnEvent("task_started","root-2","root-2")+E(2,3,total,more,"pro")+TurnRecord("root-2","main-thread","response-3",more)+TurnEvent("task_complete","root-2","root-2"),new UTF8Encoding(false));
+        var second=Turn(TurnRead(turnRoot,"root-1","root-2"),1);
+        Check(Total(second)==6 && !(bool)second["partial"] && (string)second["status"]=="complete","Incremental scan keeps separate root turn attribution");
+        Check((string)Turn(TurnRead(turnRoot,"missing"))["status"]=="unavailable","Missing turn is unavailable instead of a claimed zero");
+        File.AppendAllText(mainFile,TurnEvent("task_started","root-3","root-3")+E(2,4,C(20,4,3),more,"pro")+TurnEvent("task_complete","root-3","root-3"),new UTF8Encoding(false));
+        Check((bool)Turn(TurnRead(turnRoot,"root-3"))["partial"],"Missing cross-check usage record is partial");
+        var oldTotal=Total(Read(turnRoot));
+        File.AppendAllText(mainFile,Json.Serialize(new {type="token_usage_record",payload=new {root_turn_id="root-3",thread_id="main-thread",response_id="bad",usage=(object)null}})+"\n",new UTF8Encoding(false));
+        Check(Total(Read(turnRoot))==oldTotal && IssueCount(Read(turnRoot),"INVALID_TOKEN_EVENT")==0,"Turn-only malformed records do not alter existing LocalUsage statistics");
+        Check(IssueCount(Turn(TurnRead(turnRoot,"root-3")),"INVALID_TOKEN_EVENT")==1,"Turn-only malformed record remains visible in its turn");
+        foreach(var invalid in new[]{new string[0],new[]{"bad/id"},new[]{"duplicate","duplicate"},Enumerable.Range(0,51).Select(x=>"turn-"+x).ToArray()}) {
+            bool rejected=false;try{TurnRead(turnRoot,invalid);}catch(ArgumentException){rejected=true;}Check(rejected,"Invalid turn request rejected");
+        }
     }
 __LOCAL_USAGE__
 __STRING_VALUE__
@@ -441,7 +476,7 @@ Add-Type -TypeDefinition $harness -ReferencedAssemblies System.dll,System.Core.d
 $root=Join-Path ([IO.Path]::GetTempPath()) ('codex-local-usage-test-'+[Guid]::NewGuid().ToString('N'))
 try {
     [LocalUsageRegressions]::Run($root)
-    'Local usage regressions: 97 groups passed (cumulative, date range, identified copies, independent threads, nested fork history, missing/restored ancestors, cyclic ancestry, warm EOF, append, subsets, truncation, unknown model/provider, inherited baseline, API exclusion, malformed/oversized tails, arbitrary precise intervals, exact partial-day buckets and metadata, unchanged day buckets, interval validation, response privacy).'
+    'Local usage regressions: 97 existing groups plus per-turn attribution, deduplication, incremental and bounds regressions passed (cumulative, date range, identified copies, independent threads, nested fork history, missing/restored ancestors, cyclic ancestry, warm EOF, append, subsets, truncation, unknown model/provider, inherited baseline, API exclusion, malformed/oversized tails, arbitrary precise intervals, exact partial-day buckets and metadata, unchanged day buckets, interval validation, response privacy).'
 } finally {
     $resolved=[IO.Path]::GetFullPath($root)
     if ($resolved.StartsWith([IO.Path]::GetFullPath([IO.Path]::GetTempPath()),[StringComparison]::OrdinalIgnoreCase) -and [IO.Path]::GetFileName($resolved).StartsWith('codex-local-usage-test-')) {

@@ -145,6 +145,10 @@ try {
       New-Item -ItemType Directory -Path (Split-Path -Parent $historyFixture) -Force | Out-Null
       [IO.File]::WriteAllText($historyFixture, "retained history fixture`n", [Text.UTF8Encoding]::new($false))
       $historyHash = (Get-FileHash -LiteralPath $historyFixture -Algorithm SHA256).Hash
+      $planFixture = Join-Path $global:installerTest_destination 'native-patch\account-reference-plans\synthetic-account.txt'
+      New-Item -ItemType Directory -Path (Split-Path -Parent $planFixture) -Force | Out-Null
+      [IO.File]::WriteAllText($planFixture, 'pro200', [Text.UTF8Encoding]::new($false))
+      $planHash = (Get-FileHash -LiteralPath $planFixture -Algorithm SHA256).Hash
     }
     $shortcutPath = Join-Path $caseRoot 'launcher.lnk'
     $previousShortcut = $null
@@ -242,7 +246,10 @@ function Restore-CodexOfficialShortcuts {
     }
     $officialExpected = if (($successExpected -and $global:installerTest_scenario -ne 'skip-success') -or $global:installerTest_scenario -eq 'official-undo-failure') { 'configured official shortcut' } else { 'original official shortcut' }
     Assert ((Get-Content -LiteralPath $global:installerTest_officialPath -Raw).Trim() -ceq $officialExpected) 'Official shortcut configuration or rollback was not preserved'
-    if ($global:installerTest_scenario -eq 'shortcut-create') { Assert ((Get-FileHash -LiteralPath $historyFixture -Algorithm SHA256).Hash -eq $historyHash) 'Upgrade changed persisted account history' }
+    if ($global:installerTest_scenario -eq 'shortcut-create') {
+      Assert ((Get-FileHash -LiteralPath $historyFixture -Algorithm SHA256).Hash -eq $historyHash) 'Upgrade changed persisted account history'
+      Assert ((Get-FileHash -LiteralPath $planFixture -Algorithm SHA256).Hash -eq $planHash) 'Upgrade changed persisted account reference plan'
+    }
     if ($successExpected -and $global:installerTest_scenario -ne 'skip-success') {
       Assert ($installOutput -match 'OfficialShortcutStatus\s*:\s*Configured') 'Official shortcut result was not reported'
     }
