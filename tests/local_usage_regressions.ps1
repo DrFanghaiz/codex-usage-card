@@ -26,6 +26,8 @@ public static class LocalUsageRegressions
         return Json.Serialize(new { type="event_msg", timestamp=Stamp(day, minute), payload=new { type="token_count", info=new { total_token_usage=total, last_token_usage=last }, rate_limits=new { plan_type=plan } } }) + "\n";
     }
     private static string TurnEvent(string kind, string root, string turn) { return Json.Serialize(new {type="event_msg",timestamp=Stamp(2,0),payload=new {type=kind,root_turn_id=root,turn_id=turn}})+"\n"; }
+    private static string TimedTurnEvent(string kind, string root, string turn, int minute) { return Json.Serialize(new {type="event_msg",timestamp=Stamp(2,minute),payload=new {type=kind,root_turn_id=root,turn_id=turn}})+"\n"; }
+    private static string UnstampedTurnEvent(string kind, string root, string turn) { return Json.Serialize(new {type="event_msg",timestamp=(string)null,payload=new {type=kind,root_turn_id=root,turn_id=turn}})+"\n"; }
     private static string TurnRecord(string root, string thread, string response, Dictionary<string,object> usage) { return Json.Serialize(new {type="token_usage_record",payload=new {root_turn_id=root,thread_id=thread,response_id=response,usage=usage}})+"\n"; }
     private static Dictionary<string,object> TurnRead(string root, params string[] ids) { return LocalUsage.Read(root,"2026-09-01","2026-09-02",DateTimeOffset.UtcNow,null,null,ids); }
     private static Dictionary<string,object> Turn(Dictionary<string,object> result, int index=0) { return ((List<Dictionary<string,object>>)result["turns"])[index]; }
@@ -463,6 +465,37 @@ public static class LocalUsageRegressions
         File.AppendAllText(mainFile,Json.Serialize(new {type="token_usage_record",payload=new {root_turn_id="root-3",thread_id="main-thread",response_id="bad",usage=(object)null}})+"\n",new UTF8Encoding(false));
         Check(Total(Read(turnRoot))==oldTotal && IssueCount(Read(turnRoot),"INVALID_TOKEN_EVENT")==0,"Turn-only malformed records do not alter existing LocalUsage statistics");
         Check(IssueCount(Turn(TurnRead(turnRoot,"root-3")),"INVALID_TOKEN_EVENT")==1,"Turn-only malformed record remains visible in its turn");
+        var root4Prefix=TimedTurnEvent("task_started","root-4","root-4",5)+E(2,5,C(25,5,4),more,"pro")+TurnRecord("root-4","main-thread","response-4",more);
+        File.WriteAllText(Path.Combine(turnArchive,"stale-main.jsonl"),File.ReadAllText(mainFile)+root4Prefix,new UTF8Encoding(false));
+        File.AppendAllText(mainFile,root4Prefix+TimedTurnEvent("turn_aborted","root-4","root-4",6),new UTF8Encoding(false));
+        File.AppendAllText(childFile,TimedTurnEvent("task_started","root-4","child-2",5),new UTF8Encoding(false));
+        var aborted=Turn(TurnRead(turnRoot,"root-4"));
+        Check((string)aborted["status"]=="running" && (bool)aborted["partial"],"An aborted root still waits for a running child");
+        File.AppendAllText(childFile,TimedTurnEvent("turn_aborted","root-4","child-2",7),new UTF8Encoding(false));
+        aborted=Turn(TurnRead(turnRoot,"root-4"));
+        Check((string)aborted["status"]=="complete" && (bool)aborted["partial"],"A stale archived start cannot keep an aborted root running");
+        var root5Prefix=TimedTurnEvent("task_started","root-5","root-5",8)+E(2,8,C(30,6,5),more,"pro")+TurnRecord("root-5","main-thread","response-5",more)+TimedTurnEvent("task_complete","root-5","root-5",9);
+        File.WriteAllText(Path.Combine(turnArchive,"completed-main.jsonl"),File.ReadAllText(mainFile)+root5Prefix,new UTF8Encoding(false));
+        File.AppendAllText(mainFile,root5Prefix+TimedTurnEvent("task_started","root-5","root-5",10),new UTF8Encoding(false));
+        var restarted=Turn(TurnRead(turnRoot,"root-5"));
+        Check((string)restarted["status"]=="running" && (bool)restarted["partial"],"A newer start remains active even if an older archive completed the same operation");
+        File.AppendAllText(mainFile,TimedTurnEvent("task_complete","root-5","root-5",11),new UTF8Encoding(false));
+        Check((string)Turn(TurnRead(turnRoot,"root-5"))["status"]=="complete","A later finish ends the restarted operation");
+        var root6Prefix=TimedTurnEvent("task_started","root-6","root-6",12)+E(2,12,C(35,7,6),more,"pro")+TurnRecord("root-6","main-thread","response-6",more);
+        File.WriteAllText(Path.Combine(turnArchive,"ambiguous-main.jsonl"),File.ReadAllText(mainFile)+root6Prefix,new UTF8Encoding(false));
+        File.AppendAllText(mainFile,root6Prefix+TimedTurnEvent("task_complete","root-6","root-6",12),new UTF8Encoding(false));
+        var ambiguous=Turn(TurnRead(turnRoot,"root-6"));
+        Check((string)ambiguous["status"]=="running" && (bool)ambiguous["partial"],"Equal timestamps in conflicting copies remain conservatively unresolved");
+        var root7Prefix=UnstampedTurnEvent("task_started","root-7","root-7")+E(2,14,C(40,8,7),more,"pro")+TurnRecord("root-7","main-thread","response-7",more);
+        File.WriteAllText(Path.Combine(turnArchive,"unstamped-main.jsonl"),File.ReadAllText(mainFile)+root7Prefix,new UTF8Encoding(false));
+        File.AppendAllText(mainFile,root7Prefix+TimedTurnEvent("task_complete","root-7","root-7",15),new UTF8Encoding(false));
+        var unstamped=Turn(TurnRead(turnRoot,"root-7"));
+        Check((string)unstamped["status"]=="running" && (bool)unstamped["partial"],"A copy without a reliable start time cannot be declared finished");
+        var root8Prefix=TimedTurnEvent("task_started","root-8","root-8",16)+E(2,16,C(45,9,8),more,"pro")+TurnRecord("root-8","main-thread","response-8",more);
+        File.WriteAllText(Path.Combine(turnArchive,"stale-finished-main.jsonl"),File.ReadAllText(mainFile)+root8Prefix,new UTF8Encoding(false));
+        File.AppendAllText(mainFile,root8Prefix+TimedTurnEvent("task_complete","root-8","root-8",17),new UTF8Encoding(false));
+        var finished=Turn(TurnRead(turnRoot,"root-8"));
+        Check((string)finished["status"]=="complete" && !(bool)finished["partial"],"A strictly later completion resolves a stale archived start");
         foreach(var invalid in new[]{new string[0],new[]{"bad/id"},new[]{"duplicate","duplicate"},Enumerable.Range(0,51).Select(x=>"turn-"+x).ToArray()}) {
             bool rejected=false;try{TurnRead(turnRoot,invalid);}catch(ArgumentException){rejected=true;}Check(rejected,"Invalid turn request rejected");
         }

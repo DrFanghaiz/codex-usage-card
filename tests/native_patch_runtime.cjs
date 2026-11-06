@@ -808,6 +808,50 @@ test('account tier survives helper reinjection and stays isolated between accoun
  }finally{await close(page)}
 });
 
+test('previous-message summaries use the same single-turn quota lookup',async()=>{
+ const page=await pageFor();try{
+  await page.evaluate(()=>{
+   const info=console.info;globalThis.turnRequests=[];
+   console.info=(...args)=>{if(args[0]==='__codexQuotaTurnUsageRequest__')turnRequests.push({id:args[1],query:structuredClone(__codexQuotaTurnUsageQuery)});info.apply(console,args)};
+   document.querySelector('#chat').innerHTML=`<div data-content-search-turn-key="turn-zh"><div class="text-size-chat text-secondary"><button>上 1,089 条消息</button></div></div><div data-content-search-turn-key="turn-en"><div class="text-size-chat text-secondary"><button>1 previous message</button></div></div><div data-content-search-turn-key="turn-en-many"><div class="text-size-chat text-secondary"><button>23 previous messages</button></div></div><div data-content-search-turn-key="turn-worked"><div class="text-size-chat text-secondary"><button>用时 1m</button></div></div><div data-content-search-turn-key="unrelated"><div class="text-size-chat text-secondary"><button>上 89 条消息记录</button></div></div>`;
+  });
+  await page.waitForFunction(()=>turnRequests.length===1);const req=await page.evaluate(()=>turnRequests[0]);
+  assert.deepEqual(req.query.turnIds,['turn-zh','turn-en','turn-en-many','turn-worked']);
+  const reference={status:'ok',planName:'plus',selectedPlan:'plus',models:{'gpt-6-astra':10000000},apiModels:{'gpt-6-astra':100}};
+  const row=id=>({turnId:id,models:[{model:'gpt-6-astra',inputTokens:100000,cachedInputTokens:50000,outputTokens:10000,totalTokens:110000}],eventCount:1,partial:false,issues:[],status:'complete'});
+  await page.evaluate(({req,reference,rows})=>__codexQuotaUpdateTurnUsage({reference,turns:rows},req.id),{req,reference,rows:[row('turn-zh'),{...row('turn-en'),models:[],eventCount:0,status:'unavailable'},row('turn-en-many'),row('turn-worked')]});
+  assert.match(await page.locator('[data-content-search-turn-key="turn-zh"] .cq-turn-usage').innerText(),/估算.*%/);
+  assert.match(await page.locator('[data-content-search-turn-key="turn-en"] .cq-turn-usage').innerText(),/暂不可用/);
+  assert.equal(await page.locator('[data-content-search-turn-key="unrelated"] .cq-turn-usage').count(),0);
+  await page.locator('[data-content-search-turn-key="unrelated"] button').evaluate(button=>{button.firstChild.data='上89条消息'});
+  await page.waitForFunction(()=>turnRequests.length===2);const changed=await page.evaluate(()=>turnRequests[1]);
+  assert.deepEqual(changed.query.turnIds,['unrelated']);
+  await page.evaluate(({changed,reference,row})=>__codexQuotaUpdateTurnUsage({reference,turns:[row]},changed.id),{changed,reference,row:{...row('unrelated'),models:[],eventCount:0,status:'unavailable'}});
+  assert.match(await page.locator('[data-content-search-turn-key="unrelated"] .cq-turn-usage').innerText(),/暂不可用/);
+  await page.locator('[data-content-search-turn-key="turn-worked"] button').evaluate(button=>{button.textContent='上3条消息'});
+  await page.waitForTimeout(300);assert.equal(await page.locator('[data-content-search-turn-key="turn-worked"] .cq-turn-usage').count(),1);
+  assert.equal(await page.evaluate(()=>turnRequests.length),2);
+ }finally{await close(page)}
+});
+
+test('scrolling unchanged turns does not rewrite quota labels',async()=>{
+ const page=await pageFor();try{
+  await page.evaluate(()=>{
+   const info=console.info;globalThis.turnRequests=[];
+   console.info=(...args)=>{if(args[0]==='__codexQuotaTurnUsageRequest__')turnRequests.push(args[1]);info.apply(console,args)};
+   document.querySelector('#chat').innerHTML='<div data-content-search-turn-key="stable-turn"><div class="text-size-chat text-secondary"><button>用时 1m</button></div></div>';
+  });
+  await page.waitForFunction(()=>turnRequests.length===1);
+  await page.evaluate(()=>__codexQuotaUpdateTurnUsage({reference:{status:'ok',planName:'plus',selectedPlan:'plus',models:{'gpt-6-astra':10000000},apiModels:{'gpt-6-astra':100}},turns:[{turnId:'stable-turn',models:[{model:'gpt-6-astra',inputTokens:100000,cachedInputTokens:50000,outputTokens:10000,totalTokens:110000}],eventCount:1,partial:false,issues:[],status:'complete'}]},turnRequests[0]));
+  await page.waitForFunction(()=>document.querySelector('.cq-turn-usage')?.textContent.includes('%'));
+  await page.waitForTimeout(300);
+  await page.evaluate(()=>{globalThis.labelChanges=0;const label=document.querySelector('.cq-turn-usage');globalThis.labelChangeObserver=new MutationObserver(records=>labelChanges+=records.length);labelChangeObserver.observe(label,{attributes:true,childList:true,subtree:true,characterData:true})});
+  for(let i=0;i<3;i++){await page.evaluate(()=>document.dispatchEvent(new Event('scroll')));await page.waitForTimeout(260)}
+  assert.equal(await page.evaluate(()=>labelChanges),0,'unchanged scroll must not rewrite label text or attributes');
+  assert.equal(await page.evaluate(()=>turnRequests.length),1,'unchanged scroll must not query logs again');
+ }finally{await close(page)}
+});
+
 test('turn estimates follow native duration controls and reject stale or incomplete replies',async()=>{
  const page=await pageFor();try{
   await page.evaluate(()=>{

@@ -1,8 +1,8 @@
 # Codex Usage Card
 
-Codex Usage Card v3.0.0 在官方额度图标上方提供本机用量分析入口，并在每条回复的用时旁显示本机额度估算。统计页支持今日／本周／自选区间，展示本机估算、账号额度变化、token 和 API 等值。参考套餐按账号保存在本机；不可归属或缺少参考的数据会明确提示。估算不是官方扣量或实际账单。
+Codex Usage Card v3.0.1 在官方额度图标上方提供本机用量分析入口，并在每条回复的用时或消息摘要旁显示本机额度估算。统计页支持今日／本周／自选区间，展示本机估算、账号额度变化、token 和 API 等值。参考套餐按账号保存在本机；不可归属或缺少参考的数据会明确提示。估算不是官方扣量或实际账单。
 
-以下安装命令对应 v3.0.0。
+以下安装命令对应 v3.0.1。
 
 ## 一键安装
 
@@ -11,7 +11,7 @@ Codex Usage Card v3.0.0 在官方额度图标上方提供本机用量分析入�
 在 PowerShell 7 中运行：
 
 ```powershell
-$installer = Join-Path $env:TEMP 'install-codex-usage-card.ps1'; Invoke-WebRequest 'https://raw.githubusercontent.com/DrFanghaiz/codex-usage-card/v3.0.0/install.ps1' -OutFile $installer; Unblock-File -LiteralPath $installer; & $installer
+$installer = Join-Path $env:TEMP 'install-codex-usage-card.ps1'; Invoke-WebRequest 'https://raw.githubusercontent.com/DrFanghaiz/codex-usage-card/v3.0.1/install.ps1' -OutFile $installer; Unblock-File -LiteralPath $installer; & $installer
 ```
 
 安装器会校验发布包的 SHA-256，把 Skill 安装到 `$CODEX_HOME\skills`（未设置时为 `$env:USERPROFILE\.codex\skills`），把无窗口修复器部署到 `$env:LOCALAPPDATA\CodexUsageCard`，并注册当前用户的计划任务 `Codex Usage Card`。从旧版升级时，只迁移路径与动作完全匹配的旧任务。安装完成后会输出 `ActivationState`、`StageCodes` 和 `CardVisible` 等只读验收结果；Codex 未运行时显示等待状态，不把已完成安装误报为失败。
@@ -23,6 +23,12 @@ python "$env:USERPROFILE\.codex\skills\.system\skill-installer\scripts\install-s
 ```
 
 安装后重新启动 Codex，使新 Skill 出现在可用 Skill 列表中。
+
+## v3.0.1 消息摘要与性能修复
+
+- “上 N 条消息”和“用时”使用同一轮次标识显示额度估算；无法匹配本机日志时明确显示不可用。
+- 滚动时不再重写未变化的额度标签；按线程和时间合并归档副本的任务状态，避免已结束轮次持续重复查询。记录顺序无法确认时保留不完整状态。
+- 安装包校验值和验收记录见 [v3.0.1 发布记录](docs/releases/v3.0.1.md)。
 
 ## v3.0.0 逐条额度估算
 
