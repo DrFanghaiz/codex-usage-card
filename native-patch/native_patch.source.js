@@ -3636,18 +3636,27 @@
   };
 
 
-  // Turn labels only inspect native duration controls and their stable turn keys.
+  // Native duration and previous-message summaries share the same turn key.
   const turnRows = new Map();
-  let turnObserver, turnThemeObserver, turnScanTimer, turnRequestTimer, turnRefreshTimer;
+  let turnObserver, turnTextObserver, turnThemeObserver, turnScanTimer, turnRequestTimer, turnRefreshTimer;
+  let turnTextTargets = [];
   let turnPending = null, turnGeneration = 0, turnSequence = 0, turnInstalled = false, turnScope;
   const turnSelector = '[data-content-search-turn-key] .text-size-chat.text-secondary > button';
   const turnDescription = words('本机额度估算，非官方实际扣量', 'Local quota estimate, not actual account usage');
-  const turnButtons = () => [...document.querySelectorAll(turnSelector)].filter(button => {
-    const id = button.closest('[data-content-search-turn-key]')?.getAttribute('data-content-search-turn-key');
-    const rect = button.getBoundingClientRect();
-    return /^[a-zA-Z0-9-]{1,80}$/.test(id || '') && /^(用时|worked\s+for|worked)\s*\d/i.test(button.textContent.trim()) &&
-      rect.width > 0 && rect.height > 0 && rect.bottom >= -300 && rect.top <= innerHeight + 300;
-  }).slice(0, 50);
+  const turnButtons = () => {
+    const candidates = [...document.querySelectorAll(turnSelector)];
+    if (turnTextObserver && (candidates.length !== turnTextTargets.length || candidates.some((button,index) => button !== turnTextTargets[index]))) {
+      turnTextObserver.disconnect();
+      for (const button of candidates) turnTextObserver.observe(button,{characterData:true,subtree:true});
+      turnTextTargets = candidates;
+    }
+    return candidates.filter(button => {
+      const id = button.closest('[data-content-search-turn-key]')?.getAttribute('data-content-search-turn-key');
+      if (!/^[a-zA-Z0-9-]{1,80}$/.test(id || '') || !/^(?:(?:用时|worked\s+for|worked)\s*\d|上\s*\d[\d,，]*\s*条消息(?:\s|$)|\d[\d,]*\s+previous\s+messages?(?:\s|$))/i.test(button.textContent.trim())) return false;
+      const rect = button.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0 && rect.bottom >= -300 && rect.top <= innerHeight + 300;
+    }).slice(0, 50);
+  };
   const turnPlan = () => {
     if (localReferenceScope !== globalThis.__codexQuotaSessionScope) {
       localReferenceScope = globalThis.__codexQuotaSessionScope;
@@ -3670,7 +3679,8 @@
     document.querySelectorAll('.cq-turn-usage').forEach(node => node.remove());
     scheduleTurnScan();
   };
-  const turnLabel = (button, item) => {
+  const turnStyleProperties = ['fontFamily','fontSize','fontWeight','lineHeight','letterSpacing','color'];
+  const turnLabel = (button, item, native) => {
     let label = button.nextElementSibling;
     if (!label?.classList.contains('cq-turn-usage')) {
       label = document.createElement('span');
@@ -3678,23 +3688,24 @@
       label.style.marginLeft = '8px';
       button.after(label);
     }
-    const native = getComputedStyle(button);
-    for (const property of ['fontFamily','fontSize','fontWeight','lineHeight','letterSpacing','color']) label.style[property] = native[property];
+    for (const property of turnStyleProperties) if (label.style[property] !== native[property]) label.style[property] = native[property];
     const text = item?.text || words('估算中', 'Estimating');
-    label.textContent = text;
-    label.title = item?.title || turnDescription;
-    label.setAttribute('aria-label', `${turnDescription}，${text}`);
+    if (label.textContent !== text) label.textContent = text;
+    const title = item?.title || turnDescription, accessible = `${turnDescription}，${text}`;
+    if (label.title !== title) label.title = title;
+    if (label.getAttribute('aria-label') !== accessible) label.setAttribute('aria-label', accessible);
   };
   const renderTurns = () => {
     const buttons = turnButtons();
+    const styles = buttons.map(button => {const native=getComputedStyle(button);return Object.fromEntries(turnStyleProperties.map(property=>[property,native[property]]));});
     const live = new Set(buttons);
     document.querySelectorAll('.cq-turn-usage').forEach(label => {
       if (!live.has(label.previousElementSibling)) label.remove();
     });
-    for (const button of buttons) {
+    buttons.forEach((button,index) => {
       const id = button.closest('[data-content-search-turn-key]').getAttribute('data-content-search-turn-key');
-      turnLabel(button, turnRows.get(id));
-    }
+      turnLabel(button, turnRows.get(id), styles[index]);
+    });
     return [...new Set(buttons.map(button => button.closest('[data-content-search-turn-key]').getAttribute('data-content-search-turn-key')))];
   };
   const turnUnavailable = () => ({text:words('估算暂不可用','Estimate unavailable'),title:turnDescription});
@@ -3776,12 +3787,13 @@
   const installTurnUsage = () => {
     if (turnInstalled) return;
     turnInstalled = true;
+    turnTextObserver = new MutationObserver(() => scheduleTurnScan());
     turnObserver = new MutationObserver(records => {
       for (const record of records) {
         if (record.type === 'attributes') { scheduleTurnScan(); break; }
         if (record.target.closest?.('.cq-turn-usage,#codex-quota-popover,#codex-quota-trigger')) continue;
         const target = record.target;
-        if (target.matches?.('.text-size-chat.text-secondary') && [...record.addedNodes,...record.removedNodes].some(node => !node.classList?.contains('cq-turn-usage')) ||
+        if (target.closest?.(turnSelector) || target.matches?.('.text-size-chat.text-secondary') && [...record.addedNodes,...record.removedNodes].some(node => !node.classList?.contains('cq-turn-usage')) ||
             [...record.addedNodes,...record.removedNodes].some(node => node.nodeType === 1 && (node.matches('[data-content-search-turn-key]') || node.querySelector('[data-content-search-turn-key]') ||
               target.closest?.('[data-content-search-turn-key]') && (node.matches('.text-size-chat.text-secondary') || node.querySelector('.text-size-chat.text-secondary'))))) {
           scheduleTurnScan();
@@ -3799,7 +3811,7 @@
     document.addEventListener('visibilitychange', onTurnEnvironmentChange);
     globalThis.__codexQuotaTurnUsageCleanup = () => {
       turnInstalled = false;
-      turnObserver.disconnect(); turnThemeObserver.disconnect();
+      turnObserver.disconnect(); turnTextObserver.disconnect(); turnTextTargets = []; turnThemeObserver.disconnect();
       document.removeEventListener('scroll', onTurnEnvironmentChange, true);
       window.removeEventListener('resize', onTurnEnvironmentChange);
       document.removeEventListener('visibilitychange', onTurnEnvironmentChange);

@@ -22,7 +22,7 @@ internal static class CodexNativeQuotaPatch
     private static string NativeScript;
     private static int NextCommandId;
     private const int IoDeadlineMilliseconds = 15000;
-    private const string ProductVersion = "3.0.0";
+    private const string ProductVersion = "3.0.1";
     private static volatile string SessionScope = Guid.NewGuid().ToString("N");
     private static string LoginFingerprint;
     private static int SessionGeneration;
@@ -429,9 +429,11 @@ internal static class CodexNativeQuotaPatch
             public readonly List<Issue> TurnIssues = new List<Issue>();
             public readonly HashSet<string> StartedTurns = new HashSet<string>();
             public readonly HashSet<string> CompletedTurns = new HashSet<string>();
-            public readonly HashSet<string> ActiveTurns = new HashSet<string>();
+            public readonly HashSet<string> AbortedTurns = new HashSet<string>();
+            public readonly Dictionary<string, TurnActivity> TurnActivities = new Dictionary<string, TurnActivity>();
         }
         private sealed class TurnRecord { public string Root, Thread, Response, Key; }
+        private struct TurnActivity { public string Root; public bool Active; public DateTimeOffset? At; }
         private sealed class Bucket
         {
             private readonly SortedDictionary<string, Counts> models = new SortedDictionary<string, Counts>(StringComparer.Ordinal);
@@ -695,14 +697,25 @@ internal static class CodexNativeQuotaPatch
         {
             return !String.IsNullOrEmpty(id) && Regex.IsMatch(id, @"\A[A-Za-z0-9-]{1,80}\z");
         }
+        private static void SetTurnActivity(Log log, string root, string operation, string timestamp, bool active)
+        {
+            var at = default(DateTimeOffset);
+            var timed = Regex.IsMatch(timestamp, @"(?:Z|[+-]\d{2}:\d{2})\z", RegexOptions.IgnoreCase) &&
+                DateTimeOffset.TryParse(timestamp, CultureInfo.InvariantCulture, DateTimeStyles.None, out at);
+            log.TurnActivities[root + "/" + operation] = new TurnActivity { Root = root, Active = active,
+                At = timed ? (DateTimeOffset?)at : null };
+        }
         private static Dictionary<string, object> TurnPayload(string[] ids, Dictionary<string, Entry> selected, HashSet<string> present, List<Issue> issues, Dictionary<string, string> history, HashSet<string> inherited, Dictionary<string, DateTimeOffset> snapshots)
         {
             var wanted = new HashSet<string>(ids);
             var buckets = ids.ToDictionary(id => id, id => new Bucket());
             var started = new HashSet<string>();
             var completed = new HashSet<string>();
+            var aborted = new HashSet<string>();
             var partial = new HashSet<string>();
             var active = new HashSet<string>();
+            var activeOperations = new Dictionary<string, TurnActivity>();
+            var endedOperations = new Dictionary<string, DateTimeOffset>();
             var records = new Dictionary<string, int>();
             var responses = new Dictionary<string, string>();
             foreach (var file in present)
@@ -711,7 +724,26 @@ internal static class CodexNativeQuotaPatch
                 if (!Logs.TryGetValue(file, out log)) continue;
                 started.UnionWith(log.StartedTurns.Where(wanted.Contains));
                 completed.UnionWith(log.CompletedTurns.Where(wanted.Contains));
-                active.UnionWith(log.ActiveTurns.Select(op => op.Split('/')[0]).Where(wanted.Contains));
+                aborted.UnionWith(log.AbortedTurns.Where(wanted.Contains));
+                foreach (var pair in log.TurnActivities)
+                {
+                    var activity = pair.Value;
+                    if (!wanted.Contains(activity.Root)) continue;
+                    var key = (log.Thread ?? log.FileKey) + "/" + pair.Key;
+                    if (activity.Active)
+                    {
+                        TurnActivity existing;
+                        if (!activeOperations.TryGetValue(key, out existing) ||
+                            (existing.At.HasValue && (!activity.At.HasValue || activity.At.Value > existing.At.Value)))
+                            activeOperations[key] = activity;
+                    }
+                    else if (activity.At.HasValue)
+                    {
+                        DateTimeOffset endedAt;
+                        if (!endedOperations.TryGetValue(key, out endedAt) || activity.At.Value > endedAt)
+                            endedOperations[key] = activity.At.Value;
+                    }
+                }
                 if (log.Entries.Any(entry => entry.RootTurn == null)) partial.UnionWith(log.StartedTurns.Where(wanted.Contains));
                 foreach (var record in log.TurnRecords)
                 {
@@ -726,6 +758,13 @@ internal static class CodexNativeQuotaPatch
                     responses.Add(record.Response, key);
                     int count; records.TryGetValue(key, out count); records[key] = count + 1;
                 }
+            }
+            // A conflicting active copy is resolved only by a strictly later, timestamped end.
+            foreach (var pair in activeOperations)
+            {
+                DateTimeOffset endedAt;
+                if (!pair.Value.At.HasValue || !endedOperations.TryGetValue(pair.Key, out endedAt) || pair.Value.At.Value >= endedAt)
+                    active.Add(pair.Value.Root);
             }
             var issueKeys = new HashSet<string>();
             foreach (var issue in issues.Concat(present.SelectMany(file => Logs[file].TurnIssues)))
@@ -758,8 +797,8 @@ internal static class CodexNativeQuotaPatch
             {
                 var row = buckets[id].Payload();
                 row["turnId"] = id;
-                row["partial"] = (bool)row["partial"] || partial.Contains(id);
-                row["status"] = (int)row["eventCount"] == 0 ? "unavailable" : completed.Contains(id) && !active.Contains(id) ? "complete" : "running";
+                row["partial"] = (bool)row["partial"] || partial.Contains(id) || aborted.Contains(id);
+                row["status"] = (int)row["eventCount"] == 0 ? "unavailable" : (completed.Contains(id) || aborted.Contains(id)) && !active.Contains(id) ? "complete" : "running";
                 if ((started.Contains(id) && !completed.Contains(id)) || active.Contains(id)) row["partial"] = true;
                 turns.Add(row);
             }
@@ -771,7 +810,7 @@ internal static class CodexNativeQuotaPatch
             if (file.Length < log.Offset || !AnchorMatches(path, log) || (log.Offset == file.Length && log.Written != file.LastWriteTimeUtc) ||
                 (log.Created != default(DateTime) && log.Created != file.CreationTimeUtc))
             {
-                log.Offset = 0; log.Anchor = null; log.Entries.Clear(); log.Issues.Clear(); log.Snapshots.Clear(); log.TurnRecords.Clear(); log.TurnIssues.Clear(); log.StartedTurns.Clear(); log.CompletedTurns.Clear(); log.ActiveTurns.Clear(); log.Previous = null; log.RootTurn = null;
+                log.Offset = 0; log.Anchor = null; log.Entries.Clear(); log.Issues.Clear(); log.Snapshots.Clear(); log.TurnRecords.Clear(); log.TurnIssues.Clear(); log.StartedTurns.Clear(); log.CompletedTurns.Clear(); log.AbortedTurns.Clear(); log.TurnActivities.Clear(); log.Previous = null; log.RootTurn = null;
                 log.Model = "unknown"; log.Provider = null; log.Session = null; log.Thread = null; log.Parent = null; log.HistoryStart = 0; log.Subagent = false; log.SeenCounts = false; log.NewRequestSeen = false; log.MetadataAt = null; log.Line = 0;
             }
             log.Tail = null;
@@ -948,7 +987,7 @@ internal static class CodexNativeQuotaPatch
                     if (log.RootTurn != null) {
                         log.StartedTurns.Add(log.RootTurn);
                         var operation = StringValue(data, "turn_id");
-                        if (ValidTurnId(operation)) log.ActiveTurns.Add(log.RootTurn + "/" + operation);
+                        if (ValidTurnId(operation)) SetTurnActivity(log, log.RootTurn, operation, StringValue(root, "timestamp"), true);
                     }
                     DateTimeOffset started;
                     if (log.MetadataAt.HasValue && DateTimeOffset.TryParse(StringValue(root, "timestamp"), CultureInfo.InvariantCulture, DateTimeStyles.None, out started) && started >= log.MetadataAt.Value)
@@ -959,8 +998,12 @@ internal static class CodexNativeQuotaPatch
                 {
                     var rootTurn = StringValue(data, "root_turn_id");
                     var operation = StringValue(data, "turn_id");
-                    if (ValidTurnId(rootTurn) && ValidTurnId(operation)) log.ActiveTurns.Remove(rootTurn + "/" + operation);
-                    if (ValidTurnId(rootTurn) && rootTurn == operation && StringValue(data, "type") != "turn_aborted") log.CompletedTurns.Add(rootTurn);
+                    if (ValidTurnId(rootTurn) && ValidTurnId(operation)) SetTurnActivity(log, rootTurn, operation, StringValue(root, "timestamp"), false);
+                    if (ValidTurnId(rootTurn) && rootTurn == operation)
+                    {
+                        if (StringValue(data, "type") == "turn_aborted") log.AbortedTurns.Add(rootTurn);
+                        else log.CompletedTurns.Add(rootTurn);
+                    }
                     return;
                 }
                 if (type == "token_usage_record")
