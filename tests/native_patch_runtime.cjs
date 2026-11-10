@@ -214,6 +214,39 @@ test('official account samples retain partial endpoints, gaps and failure states
  }finally{await close(page);}
 });
 
+test('cross-cycle account changes show only validated sampled segments, including totals over 100',async()=>{
+ const page=await pageFor(officialPayload(),{width:390,height:800});try{
+  await showLocalUsage(page);const {range,id}=await applyCustom(page);
+  const start=Date.parse(range.intervalStart),end=Date.parse(range.intervalEnd),step=(end-start)/8;
+  const at=n=>new Date(start+step*n).toISOString();
+  const segments=[{startAt:at(0),endAt:at(1),usedPercent:85},{startAt:at(2),endAt:at(3),usedPercent:88},{startAt:at(4),endAt:at(5),usedPercent:4}];
+  const data=localUsagePayload(range);
+  data.interval.account={...data.interval.account,status:'partial',usedPercent:177,crossReset:true,resetAdjusted:false,fullWindow:false,hasGaps:false,segments,sampledStartAt:segments[0].startAt,sampledEndAt:segments.at(-1).endAt};
+  await updateLocalUsage(page,data,id);
+  assert.match(await page.locator('.cq-local-recent-account strong').innerText(),/177/);
+  assert.match(await page.locator('.cq-local-recent-account').innerText(),/跨周期.*仅已采样/);
+  assert.match(await page.locator('.cq-interval-sampled-range').innerText(),/采样 3 段/);
+  await page.locator('.cq-interval-sampled-range').focus();await page.keyboard.press('Enter');
+  assert.equal(await page.locator('.cq-interval-segments').evaluate(n=>n.open),true);
+  assert.match(await page.locator('.cq-interval-segments').innerText(),/85[\s\S]*88[\s\S]*4/);
+  assert.equal(await page.locator('#cq-local-usage').evaluate(n=>n.scrollWidth<=n.clientWidth+1),true);
+  await page.keyboard.press('Space');assert.equal(await page.locator('.cq-interval-segments').evaluate(n=>n.open),false);
+  assert.notEqual(await page.locator('.cq-local-recent-local strong').innerText(),'—');
+  assert.equal(await page.locator('.cq-local-recent-account strong').evaluate(n=>n.scrollWidth<=n.clientWidth+1),true);
+  data.interval.account.hasGaps=true;data.interval.account.resetAdjusted=true;await updateLocalUsage(page,data,id);
+  assert.match(await page.locator('.cq-local-recent-account').innerText(),/重置时间变化.*有间断/);
+  const zero=segments.map(s=>({...s,usedPercent:0}));data.interval.account={...data.interval.account,usedPercent:0,segments:zero};await updateLocalUsage(page,data,id);
+  assert.match(await page.locator('.cq-local-recent-account strong').innerText(),/0/);
+  data.interval.account={...data.interval.account,status:'reset',usedPercent:null,segments:[],resetAdjusted:false};await updateLocalUsage(page,data,id);
+  assert.equal(await page.locator('.cq-local-recent-account strong').innerText(),'—');assert.match(await page.locator('.cq-local-recent-account').innerText(),/跨周期采样不足/);
+  data.interval.account={...data.interval.account,resetAdjusted:true,segments};await updateLocalUsage(page,data,id);
+  assert.equal(await page.locator('.cq-local-recent-account strong').innerText(),'—');assert.match(await page.locator('.cq-local-recent-account').innerText(),/重置时间变化.*无法累计/);
+  await page.locator('.cq-interval-sampled-range').press('Enter');assert.match(await page.locator('.cq-interval-segments').innerText(),/85[\s\S]*88[\s\S]*4/);
+  data.interval.account={...data.interval.account,status:'partial',usedPercent:177,segments:segments.map((s,i)=>({...s,usedPercent:i===0?84:s.usedPercent}))};await updateLocalUsage(page,data,id);
+  assert.match(await page.locator('.cq-local-page-note').innerText(),/区间结果暂不可用/);
+ }finally{await close(page);}
+});
+
 test('first read shows a skeleton, retry is explicit and later loading retains the prior applied range',async()=>{
  const page=await pageFor();try{
   await showLocalUsage(page);let r=await localUsageRequest(page);assert.equal(await page.locator('.cq-local-skeleton').isVisible(),true);
