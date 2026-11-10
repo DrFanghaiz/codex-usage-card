@@ -1362,13 +1362,31 @@
     recent.setAttribute("aria-label",words("区间周额度消耗", "Interval weekly consumption"));
     const row = data.interval;
     const historyErrors={HISTORY_WRITE_FAILED:words("历史保存失败", "History could not be saved"),HISTORY_READ_FAILED:words("历史暂不可读", "History could not be read"),HISTORY_CORRUPT:words("历史记录损坏", "History contains damaged records")};
+    const crossReset = row?.account?.crossReset === true;
+    const segments = row?.account?.segments;
+    let validSegments = true;
+    if (crossReset && (row.account.usedPercent !== null || Array.isArray(segments) && segments.length > 0)) {
+      validSegments = (row.account.status === 'partial' && row.account.usedPercent !== null || row.account.status === 'reset' && row.account.usedPercent === null && row.account.resetAdjusted === true) && row.account.fullWindow !== true && Array.isArray(segments) && segments.length > 0;
+      let previousEnd = Date.parse(row.start), sum = 0;
+      for (const segment of validSegments ? segments : []) {
+        const start = Date.parse(segment?.startAt), end = Date.parse(segment?.endAt);
+        if (!releaseDate(segment?.startAt) || !releaseDate(segment?.endAt) || start < previousEnd || start >= end || end > Date.parse(row.end) ||
+            !Number.isFinite(segment?.usedPercent) || segment.usedPercent < 0 || segment.usedPercent > 100) { validSegments = false; break; }
+        previousEnd = end; sum += segment.usedPercent;
+      }
+      validSegments = validSegments && Date.parse(segments[0].startAt) === Date.parse(row.account.sampledStartAt) &&
+        Date.parse(segments[segments.length-1].endAt) === Date.parse(row.account.sampledEndAt) &&
+        (row.account.usedPercent === null || Math.abs(sum - row.account.usedPercent) <= 1e-8 * Math.max(1, sum));
+    }
     const validInterval = row && releaseDate(row.start) && releaseDate(row.end) && Date.parse(row.start)<Date.parse(row.end) &&
       validLocalModels(row.local?.models) && Number.isSafeInteger(row.local.eventCount) && row.local.eventCount>=0 &&
       typeof row.local.partial==="boolean" && row.account &&
       ["ok","partial","insufficient_history","reset","counter_decreased","unavailable"].includes(row.account.status) &&
       (row.account.hasGaps==null || typeof row.account.hasGaps==="boolean") &&
+      (row.account.crossReset==null || typeof row.account.crossReset==="boolean") &&
+      (row.account.resetAdjusted==null || typeof row.account.resetAdjusted==="boolean" && (!row.account.resetAdjusted || crossReset)) &&
       (row.account.historyError==null || Object.hasOwn(historyErrors,row.account.historyError)) &&
-      (row.account.usedPercent===null || Number.isFinite(row.account.usedPercent) && row.account.usedPercent>=0 && row.account.usedPercent<=100) &&
+      (row.account.usedPercent===null || Number.isFinite(row.account.usedPercent) && row.account.usedPercent>=0 && (crossReset || row.account.usedPercent<=100)) && validSegments &&
       (!["ok","partial"].includes(row.account.status) || row.account.usedPercent!==null && releaseDate(row.account.sampledStartAt) && releaseDate(row.account.sampledEndAt) &&
         Date.parse(row.account.sampledStartAt)>=Date.parse(row.start) && Date.parse(row.account.sampledStartAt)<Date.parse(row.account.sampledEndAt) && Date.parse(row.account.sampledEndAt)<=Date.parse(row.end));
     const intervalEstimate=validInterval ? localQuotaEstimate(row.local.models) : null;
@@ -1409,19 +1427,32 @@
       if(intervalEstimate.proxy)addText("small","",words("含 API 价格间接估算","Includes API-price proxy"),local);
       if(row.local.partial)addText("small","cq-local-partial",words("统计不完整","Incomplete"),local);
       const account=addText("div","cq-local-recent-account","",values);
-      addText("span","cq-local-metric-label",words("账号额度变化", "Account quota change"),account);
+      addText("span","cq-local-metric-label",crossReset ? words("账号已采样变化", "Sampled account change") : words("账号额度变化", "Account quota change"),account);
       const actual=["ok","partial"].includes(row.account.status) && row.account.usedPercent!==null;
       const measured=addText("strong","",actual ? `+${percent(row.account.usedPercent).replace("%","")}` : "—",account);
       if(actual)addText("span","cq-account-unit",words("百分点","pp"),measured);
-      if(actual)measured.title=words("官方周额度百分点变化，包含其他设备", "Official weekly percentage-point change, including other devices");
-      const states={insufficient_history:words("该区间采样不足", "Insufficient interval samples"),reset:words("跨重置周期", "Reset crossed"),counter_decreased:words("额度已校正", "Counter corrected"),unavailable:historyErrors[row.account.historyError] || words("历史暂不可用", "History unavailable")};
-      if(!actual || row.account.status==="partial") addText("small",actual && row.account.hasGaps ? "cq-history-gap" : "",actual ? row.account.hasGaps ? words("部分覆盖 · 有间断", "Partial coverage · gaps") : words("仅覆盖部分区间", "Partial interval only") : states[row.account.status],account);
-      if(actual) {
-        const coverage=addText("p","cq-interval-coverage","",account);
+      if(actual)measured.title=crossReset ? words("周额度已采样分段变化之和；未推算重置附近缺口，包含其他设备", "Sum of sampled weekly changes; reset gaps are not inferred and other devices are included") : words("官方周额度百分点变化，包含其他设备", "Official weekly percentage-point change, including other devices");
+      const states={insufficient_history:words("该区间采样不足", "Insufficient interval samples"),reset:crossReset ? row.account.resetAdjusted ? words("重置时间变化 · 无法累计", "Reset time changed · cannot combine") : words("跨周期采样不足", "Insufficient cross-cycle samples") : words("跨重置周期", "Reset crossed"),counter_decreased:words("额度已校正", "Counter corrected"),unavailable:historyErrors[row.account.historyError] || words("历史暂不可用", "History unavailable")};
+      if(!actual || row.account.status==="partial") {
+        const partialText=crossReset ? `${row.account.resetAdjusted ? words("重置时间变化", "Reset time changed") : words("跨周期", "Across cycles")} · ${words("仅已采样", "Sampled only")}${row.account.hasGaps ? words(" · 有间断", " · gaps") : ""}` : row.account.hasGaps ? words("部分覆盖 · 有间断", "Partial coverage · gaps") : words("仅覆盖部分区间", "Partial interval only");
+        addText("small",actual && row.account.hasGaps ? "cq-history-gap" : "",actual ? partialText : states[row.account.status],account);
+      }
+      if(actual || crossReset && row.account.status === "reset" && Array.isArray(segments) && segments.length > 0) {
+        const coverage=addText("div","cq-interval-coverage","",account);
         const sampleStart=localShortStamp(row.account.sampledStartAt),sampleEnd=localShortStamp(row.account.sampledEndAt);
         const sameDay=new Date(row.account.sampledStartAt).toDateString()===new Date(row.account.sampledEndAt).toDateString();
-        const range=addText("span",row.account.status==="partial" ? "cq-interval-sampled-range" : "",words(`采样 ${sampleStart} → ${sameDay ? sampleEnd.split(' ').at(-1) : sampleEnd}`,`Samples ${sampleStart} → ${sameDay ? sampleEnd.split(' ').at(-1) : sampleEnd}`),coverage);
-        range.title=intervalStamp(row.account.sampledStartAt,row.account.sampledEndAt);
+        if(crossReset) {
+          const details=addText("details","cq-interval-segments","",coverage);
+          addText("summary","cq-interval-sampled-range",words(`采样 ${segments.length} 段`,`Samples: ${segments.length} segments`),details);
+          for(const segment of segments) {
+            const line=addText("div","cq-interval-segment","",details);
+            addText("span","",intervalStamp(segment.startAt,segment.endAt),line);
+            addText("span","",`+${localPercent(segment.usedPercent)} ${words("百分点","pp")}`,line);
+          }
+        } else {
+          const range=addText("span",row.account.status==="partial" ? "cq-interval-sampled-range" : "",words(`采样 ${sampleStart} → ${sameDay ? sampleEnd.split(' ').at(-1) : sampleEnd}`,`Samples ${sampleStart} → ${sameDay ? sampleEnd.split(' ').at(-1) : sampleEnd}`),coverage);
+          range.title=intervalStamp(row.account.sampledStartAt,row.account.sampledEndAt);
+        }
         addText("span","",words("含其他设备","Includes other devices"),coverage);
       }
       account.toggleAttribute("data-cq-warning",row.account.status!=="ok" || Boolean(row.account.hasGaps || row.account.historyError));
@@ -2305,6 +2336,13 @@
       #cq-local-usage .cq-account-unit { margin-left:2px; font-size:11px; line-height:1; font-weight:500; color:var(--cq-muted); letter-spacing:0; }
       #cq-local-usage .cq-local-recent-row :is(small,.cq-choose-reference,.cq-interval-coverage) { grid-column:1/-1; font-size:10.5px; line-height:15px; margin:3px 0 0; }
       #cq-local-usage .cq-interval-coverage { display:flex; flex-wrap:wrap; column-gap:6px; row-gap:0; color:var(--cq-muted); }
+      #cq-local-usage .cq-interval-segments[open] { flex-basis:100%; }
+      #cq-local-usage .cq-interval-segments > summary { min-height:15px; gap:3px; font-size:10.5px; line-height:15px; font-weight:400; color:var(--cq-muted); }
+      #cq-local-usage .cq-interval-segments > summary::after { content:"⌄"; }
+      #cq-local-usage .cq-interval-segments[open] > summary::after { transform:rotate(180deg); }
+      #cq-local-usage .cq-interval-segment { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:8px; padding-top:4px; font-size:10px; line-height:15px; font-variant-numeric:tabular-nums; }
+      #cq-local-usage .cq-interval-segment > span:first-child { overflow-wrap:anywhere; }
+      #cq-local-usage .cq-interval-segment > span:last-child { white-space:nowrap; }
       #cq-local-usage .cq-choose-reference { justify-self:start; min-height:15px; padding:0; }
       #cq-local-usage .cq-local-highlights { margin:2px 0 0; padding:0; border-top:1px solid var(--cq-s6); gap:0; }
       #cq-local-usage .cq-local-highlights > div { min-width:0; padding:6px 12px 8px; }

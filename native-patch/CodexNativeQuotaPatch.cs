@@ -22,7 +22,7 @@ internal static class CodexNativeQuotaPatch
     private static string NativeScript;
     private static int NextCommandId;
     private const int IoDeadlineMilliseconds = 15000;
-    private const string ProductVersion = "3.0.1";
+    private const string ProductVersion = "3.0.2";
     private static volatile string SessionScope = Guid.NewGuid().ToString("N");
     private static string LoginFingerprint;
     private static int SessionGeneration;
@@ -1928,7 +1928,8 @@ internal static class CodexNativeQuotaPatch
                 { "requestedEndAt", end.ToString("o", CultureInfo.InvariantCulture) },
                 { "sampledStartAt", null }, { "sampledEndAt", null }, { "usedPercent", null }, { "status", "insufficient_history" },
                 { "coveredSeconds", 0d }, { "fullWindow", false }, { "coverageStartAt", null }, { "coverageEndAt", null },
-                { "hasGaps", false }, { "historyError", null } };
+                { "hasGaps", false }, { "historyError", null }, { "crossReset", false }, { "resetAdjusted", false },
+                { "segments", new List<Dictionary<string, object>>() } };
             if (String.IsNullOrEmpty(accountKey)) { result["status"] = "unavailable"; return result; }
             var folder = Folder(root, accountKey);
             lock (Gate)
@@ -1971,16 +1972,47 @@ internal static class CodexNativeQuotaPatch
                 result["sampledEndAt"] = last.At.ToString("o", CultureInfo.InvariantCulture);
                 result["coveredSeconds"] = (last.At - first.At).TotalSeconds;
                 if (last.At <= first.At) return result;
+                var epoch = new DateTimeOffset(1970, 1, 1, 0, 0, 0, TimeSpan.Zero);
                 var previous = first;
+                var periodStart = first;
+                var periods = new List<Tuple<Sample, Sample>>();
+                var crossed = false;
+                var ambiguous = false;
                 foreach (var sample in samples)
                 {
-                    if (sample.Reset != first.Reset) { result["status"] = "reset"; return result; }
-                    if (sample.Used < previous.Used) { result["status"] = "counter_decreased"; return result; }
+                    if (sample.Reset <= (sample.At - epoch).TotalSeconds) { result["status"] = "reset"; return result; }
                     if (sample.Segment != previous.Segment) result["hasGaps"] = true;
+                    if (sample.Reset != previous.Reset)
+                    {
+                        crossed = true; result["crossReset"] = true;
+                        var adjusted = sample.Reset <= previous.Reset || previous.Reset > (sample.At - epoch).TotalSeconds;
+                        if (adjusted) result["resetAdjusted"] = true;
+                        if (adjusted && sample.Used < previous.Used) ambiguous = true;
+                        if (periodStart.At < previous.At) periods.Add(Tuple.Create(periodStart, previous));
+                        periodStart = sample;
+                    }
+                    else if (sample.Used < previous.Used) { result["status"] = "counter_decreased"; return result; }
                     previous = sample;
                 }
-                if (first.Reset <= (last.At - new DateTimeOffset(1970, 1, 1, 0, 0, 0, TimeSpan.Zero)).TotalSeconds)
-                { result["status"] = "reset"; return result; }
+                if (crossed)
+                {
+                    if (periodStart.At < last.At) periods.Add(Tuple.Create(periodStart, last));
+                    if (periods.Count == 0) { result["status"] = "reset"; return result; }
+                    var segments = (List<Dictionary<string, object>>)result["segments"];
+                    double observed = 0, seconds = 0;
+                    foreach (var period in periods)
+                    {
+                        var amount = period.Item2.Used - period.Item1.Used;
+                        observed += amount; seconds += (period.Item2.At - period.Item1.At).TotalSeconds;
+                        segments.Add(new Dictionary<string, object> { { "startAt", period.Item1.At.ToString("o", CultureInfo.InvariantCulture) },
+                            { "endAt", period.Item2.At.ToString("o", CultureInfo.InvariantCulture) }, { "usedPercent", amount } });
+                    }
+                    result["sampledStartAt"] = segments[0]["startAt"]; result["sampledEndAt"] = segments[segments.Count - 1]["endAt"];
+                    result["coveredSeconds"] = seconds;
+                    if (ambiguous) result["status"] = "reset";
+                    else { result["usedPercent"] = observed; result["status"] = "partial"; }
+                    return result;
+                }
                 result["usedPercent"] = last.Used - first.Used;
                 var full = first.At == start && last.At == end && !(bool)result["hasGaps"] && result["historyError"] == null;
                 result["status"] = full ? "ok" : "partial"; result["fullWindow"] = full;
