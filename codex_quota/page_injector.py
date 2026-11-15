@@ -1,10 +1,12 @@
 import argparse
+import ipaddress
 import json
 import os
 import subprocess
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 from urllib.request import Request, ProxyHandler, build_opener
 
 import websocket
@@ -13,6 +15,35 @@ import websocket
 
 class PageInjectionError(RuntimeError):
     pass
+
+
+_UNREPORTED_CDP_PORTS_PS = (
+    "try { foreach ($row in @(Get-CimInstance -Namespace 'root/StandardCimv2' "
+    "-ClassName 'MSFT_NetTCPConnection' -Filter 'State = 0 AND RemotePort = 0' -ErrorAction Stop)) { "
+    "$state=-1; $remotePort=-1; $localPort=-1; $owner=-1; "
+    "if (-not [int]::TryParse([string]$row.State,[ref]$state) -or $state -ne 0 -or "
+    "-not [int]::TryParse([string]$row.RemotePort,[ref]$remotePort) -or $remotePort -ne 0 -or "
+    "-not [int]::TryParse([string]$row.LocalPort,[ref]$localPort) -or $localPort -lt 1 -or $localPort -gt 65535 -or "
+    "-not [int]::TryParse([string]$row.OwningProcess,[ref]$owner) -or $ids -notcontains $owner) { continue }; "
+    "$localAddress=$null; $remoteAddress=$null; "
+    "if (-not [Net.IPAddress]::TryParse([string]$row.LocalAddress,[ref]$localAddress) -or "
+    "-not [Net.IPAddress]::TryParse([string]$row.RemoteAddress,[ref]$remoteAddress)) { continue }; "
+    "if (($localAddress.Equals([Net.IPAddress]::Loopback) -and $remoteAddress.Equals([Net.IPAddress]::Any)) -or "
+    "($localAddress.Equals([Net.IPAddress]::IPv6Loopback) -and $remoteAddress.Equals([Net.IPAddress]::IPv6Any))) { Write-Output $localPort } "
+    "} } catch {}; $null=$true"
+)
+
+
+def _is_local_cdp_websocket(value: Any, port: int | None = None) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        uri = urlsplit(value)
+        return (uri.scheme == "ws" and uri.hostname is not None
+                and str(ipaddress.ip_address(uri.hostname)) in {"127.0.0.1", "::1"} and uri.port is not None
+                and (port is None or uri.port == port) and uri.username is None and uri.password is None)
+    except ValueError:
+        return False
 
 
 def _discover_debug_port() -> int:
@@ -28,7 +59,7 @@ def _discover_debug_port() -> int:
         "if ($parts.Count -lt 5 -or $parts[0] -ne 'TCP' -or "
         "$parts[3] -ne 'LISTENING' -or $ids -notcontains ([int]$parts[4])) { continue }; "
         "if ($parts[1] -match '^(127\\.0\\.0\\.1|\\[::1\\]):(\\d+)$') { "
-        "Write-Output $Matches[2] } }"
+        "Write-Output $Matches[2] } }; " + _UNREPORTED_CDP_PORTS_PS
     )
     try:
         result = subprocess.run(
@@ -57,7 +88,7 @@ def _discover_debug_port() -> int:
             ]
         except PageInjectionError:
             continue
-        if len(candidates) == 1 and isinstance(candidates[0].get("webSocketDebuggerUrl"), str):
+        if len(candidates) == 1 and _is_local_cdp_websocket(candidates[0].get("webSocketDebuggerUrl"), port):
             valid_ports.append(port)
     if len(valid_ports) != 1:
         raise PageInjectionError(f"expected one Codex debug port, found {len(valid_ports)}")
@@ -96,7 +127,7 @@ def _is_codex_main_page(value: dict[str, Any]) -> bool:
 def target_info(port: int) -> dict[str, Any]:
     candidates = [
         value for value in _targets(port)
-        if _is_codex_main_page(value)
+        if _is_codex_main_page(value) and _is_local_cdp_websocket(value.get("webSocketDebuggerUrl"), port)
     ]
     if len(candidates) != 1:
         raise PageInjectionError(f"expected one Codex page target, found {len(candidates)}")
@@ -107,13 +138,15 @@ def target_info(port: int) -> dict[str, Any]:
 
 
 def _connect(target: dict[str, Any]) -> websocket.WebSocket:
+    if not _is_local_cdp_websocket(target.get("webSocketDebuggerUrl")):
+        raise PageInjectionError("target has an invalid local WebSocket debugger URL")
     try:
         return websocket.create_connection(
             target["webSocketDebuggerUrl"],
             timeout=5,
             http_proxy_host=None,
             http_proxy_port=None,
-            http_no_proxy=["127.0.0.1", "localhost"],
+            http_no_proxy=["127.0.0.1", "::1"],
             suppress_origin=True,
         )
     except Exception as exc:

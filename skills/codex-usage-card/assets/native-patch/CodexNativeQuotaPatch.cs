@@ -22,7 +22,7 @@ internal static class CodexNativeQuotaPatch
     private static string NativeScript;
     private static int NextCommandId;
     private const int IoDeadlineMilliseconds = 15000;
-    private const string ProductVersion = "3.0.2";
+    private const string ProductVersion = "3.1.0";
     private static volatile string SessionScope = Guid.NewGuid().ToString("N");
     private static string LoginFingerprint;
     private static int SessionGeneration;
@@ -422,6 +422,7 @@ internal static class CodexNativeQuotaPatch
             public Counts Previous;
             public int Line;
             public Issue Tail;
+            public List<WeeklyLogSample> WeeklySamples;
             public readonly List<Entry> Entries = new List<Entry>();
             public readonly List<Issue> Issues = new List<Issue>();
             public readonly List<Snapshot> Snapshots = new List<Snapshot>();
@@ -432,6 +433,7 @@ internal static class CodexNativeQuotaPatch
             public readonly HashSet<string> AbortedTurns = new HashSet<string>();
             public readonly Dictionary<string, TurnActivity> TurnActivities = new Dictionary<string, TurnActivity>();
         }
+        private struct WeeklyLogSample { public long UtcTicks; public double Used; }
         private sealed class TurnRecord { public string Root, Thread, Response, Key; }
         private struct TurnActivity { public string Root; public bool Active; public DateTimeOffset? At; }
         private sealed class Bucket
@@ -565,10 +567,29 @@ internal static class CodexNativeQuotaPatch
                 var entries = new List<Entry>();
                 var snapshots = new Dictionary<string, DateTimeOffset>();
                 var allSnapshots = new List<Snapshot>();
+                var firstObserved = Int64.MaxValue;
+                var lastObserved = Int64.MinValue;
+                double? lastObservedUsed = null;
+                var startTicks = selectedStart.UtcTicks;
+                var endTicks = selectedEnd.UtcTicks;
                 foreach (var file in present)
                 {
                     Log log;
                     if (!Logs.TryGetValue(file, out log)) continue;
+                    if (hasInterval && log.WeeklySamples != null)
+                    {
+                        foreach (var sample in log.WeeklySamples)
+                        {
+                            if (sample.UtcTicks < startTicks || sample.UtcTicks > endTicks) continue;
+                            firstObserved = Math.Min(firstObserved, sample.UtcTicks);
+                            if (sample.UtcTicks > lastObserved)
+                            {
+                                lastObserved = sample.UtcTicks;
+                                lastObservedUsed = sample.Used;
+                            }
+                            else if (sample.UtcTicks == lastObserved && lastObservedUsed != sample.Used) lastObservedUsed = null;
+                        }
+                    }
                     queryIssues.AddRange(log.Issues);
                     allSnapshots.AddRange(log.Snapshots);
                     foreach (var snapshot in log.Snapshots)
@@ -688,7 +709,16 @@ internal static class CodexNativeQuotaPatch
                     }
                     local["daily"] = intervalDaily;
                     local["hasLogs"] = present.Count > 0;
-                    payload["interval"] = new Dictionary<string, object> { { "start", intervalStart }, { "end", intervalEnd }, { "local", local } };
+                    var interval = new Dictionary<string, object> { { "start", intervalStart }, { "end", intervalEnd }, { "local", local } };
+                    if (lastObserved != Int64.MinValue)
+                    {
+                        interval["logQuota"] = new Dictionary<string, object> {
+                            { "firstAt", new DateTimeOffset(firstObserved, TimeSpan.Zero).ToString("o", CultureInfo.InvariantCulture) },
+                            { "lastAt", new DateTimeOffset(lastObserved, TimeSpan.Zero).ToString("o", CultureInfo.InvariantCulture) },
+                            { "latestUsedPercent", lastObservedUsed }
+                        };
+                    }
+                    payload["interval"] = interval;
                 }
                 return payload;
             }
@@ -812,6 +842,7 @@ internal static class CodexNativeQuotaPatch
             {
                 log.Offset = 0; log.Anchor = null; log.Entries.Clear(); log.Issues.Clear(); log.Snapshots.Clear(); log.TurnRecords.Clear(); log.TurnIssues.Clear(); log.StartedTurns.Clear(); log.CompletedTurns.Clear(); log.AbortedTurns.Clear(); log.TurnActivities.Clear(); log.Previous = null; log.RootTurn = null;
                 log.Model = "unknown"; log.Provider = null; log.Session = null; log.Thread = null; log.Parent = null; log.HistoryStart = 0; log.Subagent = false; log.SeenCounts = false; log.NewRequestSeen = false; log.MetadataAt = null; log.Line = 0;
+                log.WeeklySamples = null;
             }
             log.Tail = null;
             log.Created = file.CreationTimeUtc;
@@ -929,11 +960,50 @@ internal static class CodexNativeQuotaPatch
             var limits = data.TryGetValue("rate_limits", out raw) ? raw as Dictionary<string, object> : null;
             var plan = limits == null ? "" : StringValue(limits, "plan_type");
             if (plan == "api" || plan == "apikey") { excluded = true; return false; }
-            if (Regex.IsMatch(plan, @"\A(?:free|go|plus|pro|team|business|enterprise|edu)\z")) return true;
+            if (IsSubscriptionPlan(plan)) return true;
             // plan_type can be null while the same event still carries an explicit official Codex quota window.
             if (!String.IsNullOrEmpty(plan) || limits == null || StringValue(limits, "limit_id") != "codex") return false;
             return (limits.TryGetValue("primary", out raw) && OfficialWindow(raw)) ||
                 (limits.TryGetValue("secondary", out raw) && OfficialWindow(raw));
+        }
+        private static bool IsSubscriptionPlan(string plan)
+        {
+            switch (plan)
+            {
+                case "free": case "go": case "plus": case "pro":
+                case "team": case "business": case "enterprise": case "edu":
+                    return true;
+                default:
+                    return false;
+            }
+        }
+        private static bool TryWeeklyLogWindow(Dictionary<string, object> limits, string slot, DateTimeOffset at, out double used)
+        {
+            used = 0;
+            object raw;
+            var window = limits.TryGetValue(slot, out raw) ? raw as Dictionary<string, object> : null;
+            double minutes, reset;
+            return window != null && Number(window, "window_minutes", out minutes) && minutes == 10080 &&
+                Number(window, "used_percent", out used) && used >= 0 && used <= 100 &&
+                Number(window, "resets_at", out reset) && reset > at.ToUnixTimeSeconds();
+        }
+        private static void ObserveWeeklyLogQuota(Log log, Dictionary<string, object> data, string timestamp, DateTimeOffset at)
+        {
+            if (log.Provider != "openai" || (log.Subagent && !log.NewRequestSeen && log.HistoryStart >= log.Line)) return;
+            object raw;
+            var limits = data.TryGetValue("rate_limits", out raw) ? raw as Dictionary<string, object> : null;
+            if (limits == null || StringValue(limits, "limit_id") != "codex") return;
+            var plan = StringValue(limits, "plan_type");
+            if ((!String.IsNullOrEmpty(plan) && !IsSubscriptionPlan(plan)) ||
+                !Regex.IsMatch(timestamp, @"(?:Z|[+-]\d{2}:\d{2})\z", RegexOptions.IgnoreCase)) return;
+            double primary, secondary;
+            var hasPrimary = TryWeeklyLogWindow(limits, "primary", at, out primary);
+            var hasSecondary = TryWeeklyLogWindow(limits, "secondary", at, out secondary);
+            if (hasPrimary == hasSecondary) return;
+            var sample = new WeeklyLogSample { UtcTicks = at.UtcTicks, Used = hasPrimary ? primary : secondary };
+            var samples = log.WeeklySamples ?? (log.WeeklySamples = new List<WeeklyLogSample>());
+            if (samples.Count == 0 || samples[samples.Count - 1].UtcTicks != sample.UtcTicks || samples[samples.Count - 1].Used != sample.Used)
+                samples.Add(sample);
         }
         private static void Consume(string line, Log log)
         {
@@ -1018,16 +1088,18 @@ internal static class CodexNativeQuotaPatch
                     return;
                 }
                 if (type != "event_msg" || StringValue(data, "type") != "token_count") return;
+                var timestamp = StringValue(root, "timestamp");
+                DateTimeOffset stamp;
+                var hasStamp = DateTimeOffset.TryParse(timestamp, CultureInfo.InvariantCulture, DateTimeStyles.None, out stamp);
+                if (hasStamp) ObserveWeeklyLogQuota(log, data, timestamp, stamp);
                 var info = data.TryGetValue("info", out raw) ? raw as Dictionary<string, object> : null;
                 if (info == null) return; // A limit-only update reports no token consumption.
-                var day = EventDay(StringValue(root, "timestamp"));
+                var day = EventDay(timestamp);
                 var total = Counts.Parse(info.TryGetValue("total_token_usage", out raw) ? raw : null);
                 var current = Counts.Parse(info.TryGetValue("last_token_usage", out raw) ? raw : null);
                 var previous = log.Previous;
                 if (total == null) { log.Issues.Add(ParseIssue(line, log, "INVALID_TOKEN_EVENT")); return; }
-                DateTimeOffset stamp;
-                var hasStamp = DateTimeOffset.TryParse(StringValue(root, "timestamp"), CultureInfo.InvariantCulture, DateTimeStyles.None, out stamp);
-                var eventSuffix = StringValue(root, "timestamp") + "/" + total.Key;
+                var eventSuffix = timestamp + "/" + total.Key;
                 var eventKey = log.Thread == null ? eventSuffix : log.Thread + "/" + eventSuffix;
                 // Only declared history from before the child existed belongs to its parent.
                 var historyKey = log.Thread != null && log.Parent != null && log.Thread != log.Parent && log.Subagent &&
@@ -2615,51 +2687,70 @@ internal static class CodexNativeQuotaPatch
 
         var ports = await FindListeningPortsAsync(processIds);
         var matches = new List<CdpTarget>();
-        foreach (var port in ports)
+        var attempted = new HashSet<int>();
+        for (var pass = 0; pass < 2; pass++)
         {
-            try
+            if (pass == 1)
             {
-                var request = (HttpWebRequest)WebRequest.Create(
-                    "http://127.0.0.1:" + port + "/json/list");
-                request.Proxy = null;
-                request.Timeout = 3000;
-                request.ReadWriteTimeout = 3000;
-                using (var deadline = new CancellationTokenSource(3000))
-                using (deadline.Token.Register(request.Abort))
-                using (var response = (HttpWebResponse)request.GetResponse())
-                using (var reader = new StreamReader(response.GetResponseStream()))
-                {
-                    var values = Json.DeserializeObject(reader.ReadToEnd()) as object[];
-                    if (values == null) continue;
-                    var pages = new List<CdpTarget>();
-                    foreach (var value in values)
-                    {
-                        var item = value as Dictionary<string, object>;
-                        if (item == null) continue;
-                        var target = new CdpTarget
-                        {
-                            Type = StringValue(item, "type"),
-                            Title = StringValue(item, "title"),
-                            Url = StringValue(item, "url"),
-                            WebSocketDebuggerUrl = StringValue(item, "webSocketDebuggerUrl")
-                        };
-                        if (target.Type == "page" &&
-                            String.Equals(target.Url, "app://-/index.html", StringComparison.OrdinalIgnoreCase) &&
-                            !String.IsNullOrWhiteSpace(target.WebSocketDebuggerUrl))
-                        {
-                            pages.Add(target);
-                        }
-                    }
-                    matches.AddRange(pages);
-                }
+                if (matches.Count > 0) break;
+                ports = FindUnreportedPorts(processIds);
             }
-            catch
+            foreach (var port in ports)
             {
-                // Ignore unrelated local listeners and ports that are closing.
+                if (!attempted.Add(port)) continue;
+                try
+                {
+                    var request = (HttpWebRequest)WebRequest.Create(
+                        "http://127.0.0.1:" + port + "/json/list");
+                    request.Proxy = null;
+                    request.Timeout = 3000;
+                    request.ReadWriteTimeout = 3000;
+                    using (var deadline = new CancellationTokenSource(3000))
+                    using (deadline.Token.Register(request.Abort))
+                    using (var response = (HttpWebResponse)request.GetResponse())
+                    using (var reader = new StreamReader(response.GetResponseStream()))
+                    {
+                        var values = Json.DeserializeObject(reader.ReadToEnd()) as object[];
+                        if (values == null) continue;
+                        var pages = new List<CdpTarget>();
+                        foreach (var value in values)
+                        {
+                            var item = value as Dictionary<string, object>;
+                            if (item == null) continue;
+                            var target = new CdpTarget
+                            {
+                                Type = StringValue(item, "type"),
+                                Title = StringValue(item, "title"),
+                                Url = StringValue(item, "url"),
+                                WebSocketDebuggerUrl = StringValue(item, "webSocketDebuggerUrl")
+                            };
+                            if (target.Type == "page" &&
+                                String.Equals(target.Url, "app://-/index.html", StringComparison.OrdinalIgnoreCase) &&
+                                IsLocalCdpWebSocket(target.WebSocketDebuggerUrl, port))
+                            {
+                                pages.Add(target);
+                            }
+                        }
+                        matches.AddRange(pages);
+                    }
+                }
+                catch
+                {
+                    // Ignore unrelated local listeners and ports that are closing.
+                }
             }
         }
         if (matches.Count == 0) throw new InvalidOperationException("Codex page target is unavailable");
         return matches;
+    }
+
+    private static bool IsLocalCdpWebSocket(string value, int port)
+    {
+        Uri uri;
+        IPAddress address;
+        return Uri.TryCreate(value, UriKind.Absolute, out uri) && uri.Scheme == "ws" && uri.Port == port &&
+            String.IsNullOrEmpty(uri.UserInfo) && IPAddress.TryParse(uri.DnsSafeHost, out address) &&
+            (IPAddress.Loopback.Equals(address) || IPAddress.IPv6Loopback.Equals(address));
     }
 
     private static async Task<HashSet<int>> FindListeningPortsAsync(HashSet<int> processIds)
@@ -2691,6 +2782,32 @@ internal static class CodexNativeQuotaPatch
             }
             return ports;
         }
+    }
+
+    private static HashSet<int> FindUnreportedPorts(HashSet<int> processIds)
+    {
+        // Some systems omit a reachable loopback socket from netstat and report state 0 via CIM.
+        // Treat it only as a candidate; FindTargetsAsync still verifies the real Codex CDP page.
+        var ports = new HashSet<int>();
+        using (var searcher = new ManagementObjectSearcher(@"root\StandardCimv2",
+            "SELECT LocalAddress, LocalPort, RemoteAddress, RemotePort, State, OwningProcess FROM MSFT_NetTCPConnection WHERE State = 0 AND RemotePort = 0"))
+        using (var rows = searcher.Get())
+        {
+            foreach (ManagementObject row in rows)
+            using (row)
+            {
+                if (row["State"] == null || row["LocalPort"] == null || row["RemotePort"] == null || row["OwningProcess"] == null) continue;
+                IPAddress local, remote;
+                if (!IPAddress.TryParse(Convert.ToString(row["LocalAddress"]), out local) ||
+                    !IPAddress.TryParse(Convert.ToString(row["RemoteAddress"]), out remote)) continue;
+                var port = Convert.ToInt32(row["LocalPort"]);
+                if (Convert.ToInt32(row["State"]) == 0 && Convert.ToInt32(row["RemotePort"]) == 0 &&
+                    processIds.Contains(Convert.ToInt32(row["OwningProcess"])) && port > 0 && port <= 65535 &&
+                    (IPAddress.Loopback.Equals(local) && IPAddress.Any.Equals(remote) ||
+                     IPAddress.IPv6Loopback.Equals(local) && IPAddress.IPv6Any.Equals(remote))) ports.Add(port);
+            }
+        }
+        return ports;
     }
 
     private static Dictionary<string, object> SendCommand(
@@ -3305,7 +3422,7 @@ internal static class CodexNativeQuotaPatch
             client = new TcpClient();
             client.ReceiveTimeout = 5000;
             client.SendTimeout = 5000;
-            client.Connect(uri.Host, uri.Port);
+            client.Connect(uri.DnsSafeHost, uri.Port);
             stream = client.GetStream();
             stream.ReadTimeout = 5000;
             stream.WriteTimeout = 5000;

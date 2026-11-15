@@ -49,6 +49,33 @@ function Select-NetworkDiagnosis($Current, $Candidate) {
   }
 }
 
+function Get-CodexUnreportedPorts([int[]]$ProcessIds) {
+  try {
+    $rows = @(Get-CimInstance -Namespace 'root/StandardCimv2' -ClassName 'MSFT_NetTCPConnection' -Filter 'State = 0 AND RemotePort = 0' -ErrorAction Stop)
+  } catch { return } # This optional source must not break ordinary netstat discovery.
+  foreach ($row in $rows) {
+    $state = -1; $remotePort = -1; $localPort = -1; $owner = -1
+    if (-not [int]::TryParse([string]$row.State, [ref]$state) -or $state -ne 0 -or
+        -not [int]::TryParse([string]$row.RemotePort, [ref]$remotePort) -or $remotePort -ne 0 -or
+        -not [int]::TryParse([string]$row.LocalPort, [ref]$localPort) -or $localPort -lt 1 -or $localPort -gt 65535 -or
+        -not [int]::TryParse([string]$row.OwningProcess, [ref]$owner) -or $owner -notin $ProcessIds) { continue }
+    $localAddress = $null; $remoteAddress = $null
+    if (-not [Net.IPAddress]::TryParse([string]$row.LocalAddress, [ref]$localAddress) -or
+        -not [Net.IPAddress]::TryParse([string]$row.RemoteAddress, [ref]$remoteAddress)) { continue }
+    if (($localAddress.Equals([Net.IPAddress]::Loopback) -and $remoteAddress.Equals([Net.IPAddress]::Any)) -or
+        ($localAddress.Equals([Net.IPAddress]::IPv6Loopback) -and $remoteAddress.Equals([Net.IPAddress]::IPv6Any))) { $localPort }
+  }
+}
+
+function Test-CodexLoopbackWebSocket([string]$Url, [int]$Port) {
+  $uri = $null
+  $address = $null
+  [Uri]::TryCreate($Url, [UriKind]::Absolute, [ref]$uri) -and $uri.Scheme -ceq 'ws' -and
+    [Net.IPAddress]::TryParse($uri.DnsSafeHost, [ref]$address) -and
+    ($address.Equals([Net.IPAddress]::Loopback) -or $address.Equals([Net.IPAddress]::IPv6Loopback)) -and
+    $uri.Port -eq $Port -and [string]::IsNullOrEmpty($uri.UserInfo)
+}
+
 function Test-StartupPromptWindow([int]$ProcessId) {
   if (-not ('CodexUsageCard.DoctorWindowProbe' -as [type])) {
     Add-Type -TypeDefinition @'
@@ -235,6 +262,7 @@ if (-not $codexInspectionFailed -and -not $codexRunning) {
         [int]$Matches[1]
       }
     } | Select-Object -Unique)
+    $ports = @($ports + @(Get-CodexUnreportedPorts $codexProcessIds) | Select-Object -Unique)
     if ($ports.Count -eq 0) {
       $stageCodes += 'CDP_PORT_UNAVAILABLE'
     } else {
@@ -252,7 +280,7 @@ if (-not $codexInspectionFailed -and -not $codexRunning) {
             foreach ($item in $items) {
               if ($item.type -eq 'page' -and
                   $item.url -eq 'app://-/index.html' -and
-                  -not [String]::IsNullOrWhiteSpace($item.webSocketDebuggerUrl)) {
+                  (Test-CodexLoopbackWebSocket $item.webSocketDebuggerUrl $port)) {
                 $targets += [pscustomobject]@{
                   WebSocketDebuggerUrl = [string]$item.webSocketDebuggerUrl
                 }

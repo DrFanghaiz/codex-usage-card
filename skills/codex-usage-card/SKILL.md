@@ -17,6 +17,8 @@ The current development UI is local usage analytics, not a replacement official 
 
 Current v2.7 approved layout: one main usage page and one Today / This week / Custom precision range; no content tabs or separate date query. Primary readings are the local Token/API quota estimate range and account weekly percentage-point change; secondary readings are tokens and API equivalent. Every reading and chart uses interval.local, including its precise daily buckets; never render full-day outer data as interval usage. Sources and tier selection live in settings; preserve sample gaps and actual coverage. See docs/unified-usage-20261104.md.
 
+If normal `netstat` discovery finds no valid Codex page, the Helper also checks CIM TCP records reported with state 0. Only accept candidate loopback sockets owned by Codex processes with a wildcard remote address and remote port zero; still require the real `app://-/index.html` target and a WebSocket on the same loopback port. Doctor and the Python discovery tool apply the same candidate and endpoint checks. This is local discovery only; retain existing quota-request limits and never infer that a port is absent merely because `netstat` omitted it.
+
 ## Historical Sidebar v3 maintenance
 
 The following describes v2.6 and earlier. The v2.7 local analysis entry above supersedes old quota-card mounting, main-page and geometry rules; retained data and safety contracts still apply.
