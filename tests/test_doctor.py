@@ -59,22 +59,70 @@ ConvertTo-Json -Compress -InputObject $results
         self.assertEqual(ROOT_DOCTOR, SKILL_DOCTOR)
 
     @unittest.skipUnless(shutil.which('powershell.exe') and shutil.which('pwsh'), 'Both PowerShell versions required')
+    def test_unreported_ports_are_owned_loopback_candidates_and_provider_failure_is_optional(self):
+        start = ROOT_DOCTOR.index('function Get-CodexUnreportedPorts')
+        end = ROOT_DOCTOR.index('function Test-StartupPromptWindow', start)
+        helpers = ROOT_DOCTOR[start:end]
+        rows = [
+            dict(State=0, RemotePort=0, LocalPort=58353, OwningProcess=42, LocalAddress='127.0.0.1', RemoteAddress='0.0.0.0'),
+            dict(State=0, RemotePort=0, LocalPort=58354, OwningProcess=42, LocalAddress='::1', RemoteAddress='::'),
+            dict(State=0, RemotePort=0, LocalPort=58361, OwningProcess=42, LocalAddress='0:0:0:0:0:0:0:1', RemoteAddress='0:0:0:0:0:0:0:0'),
+            dict(State=0, RemotePort=0, LocalPort=58355, OwningProcess=43, LocalAddress='127.0.0.1', RemoteAddress='0.0.0.0'),
+            dict(State=0, RemotePort=0, LocalPort=58356, OwningProcess=42, LocalAddress='192.168.1.2', RemoteAddress='0.0.0.0'),
+            dict(State=0, RemotePort=1, LocalPort=58357, OwningProcess=42, LocalAddress='127.0.0.1', RemoteAddress='0.0.0.0'),
+            dict(State=2, RemotePort=0, LocalPort=58358, OwningProcess=42, LocalAddress='127.0.0.1', RemoteAddress='0.0.0.0'),
+            dict(State=None, RemotePort=0, LocalPort=58359, OwningProcess=42, LocalAddress='127.0.0.1', RemoteAddress='0.0.0.0'),
+            dict(State=0, RemotePort=0, LocalPort=65536, OwningProcess=42, LocalAddress='127.0.0.1', RemoteAddress='0.0.0.0'),
+            dict(State=0, RemotePort=0, LocalPort=58360, OwningProcess=42, LocalAddress='127.0.0.1', RemoteAddress='127.0.0.1'),
+            dict(State=0, RemotePort=0, LocalPort=58362, OwningProcess=42, LocalAddress='127.0.0.1', RemoteAddress='::'),
+            dict(State=0, RemotePort=0, LocalPort=58363, OwningProcess=42, LocalAddress='localhost', RemoteAddress='0.0.0.0'),
+        ]
+        encoded = base64.b64encode(json.dumps(rows).encode()).decode('ascii')
+        prefix = "$ErrorActionPreference='Stop'\n" + helpers + "\n" + \
+            "$rows=ConvertFrom-Json ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('" + encoded + "')))\n"
+        for shell in ('powershell.exe', 'pwsh'):
+            with self.subTest(shell=shell):
+                command = prefix + '''
+function Get-CimInstance { param($Namespace,$ClassName,$Filter,$ErrorAction) $rows }
+[int[]]$ports = @(Get-CodexUnreportedPorts @(42))
+ConvertTo-Json -Compress -InputObject $ports
+'''
+                result = subprocess.run([shell, '-NoProfile', '-Command', command], capture_output=True, text=True, check=True, timeout=15)
+                self.assertEqual(json.loads(result.stdout), [58353, 58354, 58361])
+                failed = prefix + '''
+function Get-CimInstance { throw 'unavailable' }
+[int[]]$ports = @(@(1234) + @(Get-CodexUnreportedPorts @(42)) | Select-Object -Unique)
+ConvertTo-Json -Compress -InputObject $ports
+'''
+                result = subprocess.run([shell, '-NoProfile', '-Command', failed], capture_output=True, text=True, check=True, timeout=15)
+                self.assertEqual(json.loads(result.stdout), [1234])
+
+    @unittest.skipUnless(shutil.which('powershell.exe') and shutil.which('pwsh'), 'Both PowerShell versions required')
     def test_cdp_target_arrays_select_each_main_page_without_joining_urls(self):
         start = ROOT_DOCTOR.index('            $items = ')
         end = ROOT_DOCTOR.index('          } catch {', start)
         selection = ROOT_DOCTOR[start:end]
+        helper_start = ROOT_DOCTOR.index('function Test-CodexLoopbackWebSocket')
+        helper_end = ROOT_DOCTOR.index('function Test-StartupPromptWindow', helper_start)
+        websocket_check = ROOT_DOCTOR[helper_start:helper_end]
         main = dict(type='page', url='app://-/index.html', webSocketDebuggerUrl='ws://127.0.0.1:1234/devtools/page/main')
         other = dict(type='page', url='https://example.test/', webSocketDebuggerUrl='ws://127.0.0.1:1234/devtools/page/other')
         worker = dict(type='worker', url='app://-/worker.js', webSocketDebuggerUrl='ws://127.0.0.1:1234/devtools/worker/background')
         second = dict(main, webSocketDebuggerUrl='ws://127.0.0.1:1234/devtools/page/second')
         cases = [([], []), ([main], [main['webSocketDebuggerUrl']]),
                  ([worker, other, main, dict(main, webSocketDebuggerUrl='')], [main['webSocketDebuggerUrl']]),
-                 ([main, worker, second], [main['webSocketDebuggerUrl'], second['webSocketDebuggerUrl']])]
+                 ([main, worker, second], [main['webSocketDebuggerUrl'], second['webSocketDebuggerUrl']]),
+                 ([dict(main, webSocketDebuggerUrl='ws://example.test:1234/devtools/page/x'),
+                   dict(main, webSocketDebuggerUrl='ws://127.0.0.1:4321/devtools/page/x'),
+                   dict(main, webSocketDebuggerUrl='ws://user@127.0.0.1:1234/devtools/page/x'),
+                   dict(main, webSocketDebuggerUrl='wss://127.0.0.1:1234/devtools/page/x'),
+                   dict(main, webSocketDebuggerUrl='ws://[::1]:1234/devtools/page/x')],
+                  ['ws://[::1]:1234/devtools/page/x'])]
         for shell in ('powershell.exe', 'pwsh'):
             for targets, expected in cases:
                 with self.subTest(shell=shell, count=len(targets)):
                     encoded = base64.b64encode(json.dumps(targets).encode()).decode('ascii')
-                    command = "$ErrorActionPreference='Stop'\n$targets=@()\n$json=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('" + encoded + "'))\n" + selection + '''
+                    command = "$ErrorActionPreference='Stop'\n" + websocket_check + "\n$port=1234\n$targets=@()\n$json=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('" + encoded + "'))\n" + selection + '''
 [string[]]$selected = @($targets | ForEach-Object { $_.WebSocketDebuggerUrl })
 ConvertTo-Json -Compress -InputObject $selected
 '''

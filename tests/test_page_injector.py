@@ -4,14 +4,21 @@ import shutil
 import subprocess
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from codex_quota.page_injector import (
     NATIVE_PATCH_READY_SCRIPT,
     NATIVE_QUOTA_SCRIPT as BUNDLED_NATIVE_QUOTA_SCRIPT,
+    PageInjectionError,
+    _UNREPORTED_CDP_PORTS_PS,
+    _connect,
+    _discover_debug_port,
     _is_codex_main_page,
+    _is_local_cdp_websocket,
     card_present,
     resolve_port,
+    target_info,
 )
 
 NATIVE_QUOTA_SCRIPT = (
@@ -32,6 +39,60 @@ class PageInjectorTests(unittest.TestCase):
         with patch("codex_quota.page_injector._discover_debug_port", return_value=9229) as discover:
             self.assertEqual(resolve_port(None), 9229)
         discover.assert_called_once_with()
+
+    @unittest.skipUnless(shutil.which('powershell.exe') and shutil.which('pwsh'), 'Windows PowerShell required')
+    def test_unreported_cdp_ports_are_limited_to_owned_loopback_bindings(self):
+        rows = [
+            dict(State=0, RemotePort=0, LocalPort=58353, OwningProcess=42, LocalAddress='127.0.0.1', RemoteAddress='0.0.0.0'),
+            dict(State=0, RemotePort=0, LocalPort=58354, OwningProcess=42, LocalAddress='::1', RemoteAddress='::'),
+            dict(State=0, RemotePort=0, LocalPort=58361, OwningProcess=42, LocalAddress='0:0:0:0:0:0:0:1', RemoteAddress='0:0:0:0:0:0:0:0'),
+            dict(State=0, RemotePort=0, LocalPort=58355, OwningProcess=43, LocalAddress='127.0.0.1', RemoteAddress='0.0.0.0'),
+            dict(State=0, RemotePort=0, LocalPort=58356, OwningProcess=42, LocalAddress='192.168.1.10', RemoteAddress='0.0.0.0'),
+            dict(State=0, RemotePort=9, LocalPort=58357, OwningProcess=42, LocalAddress='127.0.0.1', RemoteAddress='0.0.0.0'),
+            dict(State=2, RemotePort=0, LocalPort=58358, OwningProcess=42, LocalAddress='127.0.0.1', RemoteAddress='0.0.0.0'),
+            dict(State=None, RemotePort=0, LocalPort=58359, OwningProcess=42, LocalAddress='127.0.0.1', RemoteAddress='0.0.0.0'),
+            dict(State=0, RemotePort=0, LocalPort=65536, OwningProcess=42, LocalAddress='127.0.0.1', RemoteAddress='0.0.0.0'),
+            dict(State=0, RemotePort=0, LocalPort=0, OwningProcess=42, LocalAddress='127.0.0.1', RemoteAddress='0.0.0.0'),
+            dict(State=0, RemotePort=0, LocalPort=58360, OwningProcess=42, LocalAddress='127.0.0.1', RemoteAddress='127.0.0.1'),
+            dict(State=0, RemotePort=0, LocalPort=58362, OwningProcess=42, LocalAddress='127.0.0.1', RemoteAddress='::'),
+            dict(State=0, RemotePort=0, LocalPort=58363, OwningProcess=42, LocalAddress='localhost', RemoteAddress='0.0.0.0'),
+        ]
+        import base64
+        encoded = base64.b64encode(json.dumps(rows).encode()).decode('ascii')
+        for shell in ('powershell.exe', 'pwsh'):
+            with self.subTest(shell=shell):
+                command = "$ErrorActionPreference='Stop'; $ids=@(42); " + \
+                    "$rows=ConvertFrom-Json ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('" + encoded + "'))); " + \
+                    "function Get-CimInstance { param($Namespace,$ClassName,$Filter,$ErrorAction) $rows }; " + \
+                    "$result=@(& { " + _UNREPORTED_CDP_PORTS_PS + " }); ConvertTo-Json -Compress -InputObject $result"
+                result = subprocess.run([shell, '-NoProfile', '-Command', command], capture_output=True, text=True, check=True, timeout=15)
+                self.assertEqual(json.loads(result.stdout), [58353, 58354, 58361])
+                failed = "$ErrorActionPreference='Stop'; $ids=@(42); function Get-CimInstance { throw 'unavailable' }; Write-Output 1234; " + _UNREPORTED_CDP_PORTS_PS
+                result = subprocess.run([shell, '-NoProfile', '-Command', failed], capture_output=True, text=True, check=True, timeout=15)
+                self.assertEqual(result.stdout.strip(), '1234')
+
+    def test_discovery_validates_the_loopback_websocket_for_each_candidate(self):
+        main = {'type': 'page', 'url': 'app://-/index.html', 'webSocketDebuggerUrl': 'ws://127.0.0.1:58353/devtools/page/a'}
+        with patch('codex_quota.page_injector.os.name', 'nt'), \
+             patch('codex_quota.page_injector.subprocess.run', return_value=SimpleNamespace(returncode=0, stdout='58353\n58353\n70000\n')), \
+             patch('codex_quota.page_injector._targets', return_value=[main]) as targets:
+            self.assertEqual(_discover_debug_port(), 58353)
+            targets.assert_called_once_with(58353)
+        with patch('codex_quota.page_injector._targets', return_value=[main]):
+            self.assertEqual(target_info(58353), main)
+            with self.assertRaises(PageInjectionError):
+                target_info(58354)
+        for url in ('ws://example.test:58353/devtools/page/a', 'ws://127.0.0.1:1234/devtools/page/a',
+                    'ws://user@127.0.0.1:58353/devtools/page/a', 'wss://127.0.0.1:58353/devtools/page/a',
+                    'ws://localhost:58353/devtools/page/a', 'ws://127.0.0.1:bad/devtools/page/a'):
+            with self.subTest(url=url):
+                self.assertFalse(_is_local_cdp_websocket(url, 58353))
+        self.assertTrue(_is_local_cdp_websocket('ws://[::1]:58353/devtools/page/a', 58353))
+        self.assertTrue(_is_local_cdp_websocket('ws://[0:0:0:0:0:0:0:1]:58353/devtools/page/a', 58353))
+        with patch('codex_quota.page_injector.websocket.create_connection') as connect:
+            with self.assertRaises(PageInjectionError):
+                _connect({'webSocketDebuggerUrl': 'ws://example.test:58353/devtools/page/a'})
+            connect.assert_not_called()
 
     def test_main_page_filter_excludes_overlay_targets(self):
         self.assertTrue(_is_codex_main_page({"title": "Codex", "url": "app://-/index.html"}))

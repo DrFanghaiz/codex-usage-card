@@ -36,24 +36,27 @@
     const message = document.getElementById("cq-refresh-message");
     if (!button || message?.cqOwner === button) message?.remove();
   };
-  const showRefreshMessage = (button) => {
-    const text = button.dataset.cqMessage;
+  const showRefreshMessage = (button, text = button.dataset.cqMessage, tooltip = false) => {
     if (!text || !button.isConnected || !button.getClientRects().length || document.visibilityState !== "visible") return;
+    const previous = document.getElementById("cq-refresh-message");
+    if (tooltip && previous?.cqOwner === button && previous.textContent === text) return;
     hideRefreshMessage();
     const message = document.createElement("div");
     message.id = "cq-refresh-message";
     message.popover = "manual";
-    message.setAttribute("role", "status");
+    message.setAttribute("role", tooltip ? "tooltip" : "status");
     message.cqOwner = button;
     message.textContent = text;
-    const style = getComputedStyle(button.closest(".codex-native-compact-usage"));
+    const style = getComputedStyle(button.closest(".codex-native-compact-usage") || button);
     for (const name of ["--cq-solid", "--cq-ink", "--cq-border"]) message.style.setProperty(name, style.getPropertyValue(name));
     document.body.append(message);
     message.showPopover();
     const rect = button.getBoundingClientRect();
-    message.style.left = Math.max(8, Math.min(innerWidth - message.offsetWidth - 8, rect.right - message.offsetWidth)) + "px";
+    const side = tooltip && rect.right + message.offsetWidth + 16 <= innerWidth;
+    message.style.left = Math.max(8, Math.min(innerWidth - message.offsetWidth - 8, side ? rect.right + 8 : rect.right - message.offsetWidth)) + "px";
     const above = rect.top - message.offsetHeight - 7;
-    message.style.top = Math.max(8, Math.min(innerHeight - message.offsetHeight - 8, above >= 8 ? above : rect.bottom + 7)) + "px";
+    const top = side ? rect.top + (rect.height - message.offsetHeight) / 2 : above >= 8 ? above : rect.bottom + 7;
+    message.style.top = Math.max(8, Math.min(innerHeight - message.offsetHeight - 8, top)) + "px";
     delete button.dataset.cqShowMessage;
   };
   const clearRefreshFeedback = (button) => {
@@ -475,7 +478,17 @@
       progress: visual.generator ? visual.generator.next(elapsed).value : visual.initial,
       velocity: visual.generator ? visual.generator.velocity(elapsed) : 0};
   };
-  const suspendInlineAlert = () => { pauseInlineTimer(); clearInlineVisual(); };
+  const suspendInlineAlert = () => {
+    pauseInlineTimer();
+    clearInlineVisual();
+    const trigger = document.getElementById("codex-quota-trigger");
+    if (trigger) hideRefreshMessage(trigger);
+  };
+  const syncRailAlertHint = trigger => {
+    if (trigger.matches('[data-cq-collapsed][data-cq-alert-visible]:is(:hover,:focus-visible)')) {
+      showRefreshMessage(trigger, inlineAlert?.announced, true);
+    } else hideRefreshMessage(trigger);
+  };
   const removeNotice = () => {
     suspendInlineAlert();
     inlineAlert = null;
@@ -546,7 +559,7 @@
     const text = `${label} ${formatPercent(item.remaining)}%`;
     trigger.dataset.cqAlert = item.recovered ? "recovery" : "low";
     trigger.setAttribute("aria-label", `${trigger.cqBaseLabel || ""} · ${text}`);
-    trigger.title = `${trigger.cqBaseTitle || ""} · ${text}`;
+    trigger.title = trigger.hasAttribute("data-cq-collapsed") ? "" : `${trigger.cqBaseTitle || ""} · ${text}`;
     const announcement = document.getElementById("cq-inline-announcement");
     if (announcement && state.announced !== text) { announcement.textContent = text; state.announced = text; }
     if (!visible(trigger) || trigger.getAttribute("aria-expanded") === "true" || quotaShell?.popup.matches(":popover-open") || sharedPopover || paneMotion) {
@@ -554,7 +567,7 @@
     }
     const layer = trigger.querySelector(".cq-inline-alert"), surface = trigger.querySelector(".cq-inline-surface");
     if (trigger.hasAttribute("data-cq-collapsed")) {
-      clearInlineVisual(); trigger.setAttribute("data-cq-alert-visible", ""); updateInlineTimer(); return;
+      clearInlineVisual(); trigger.setAttribute("data-cq-alert-visible", ""); syncRailAlertHint(trigger); updateInlineTimer(); return;
     }
     const normal = trigger.querySelector(trigger.hasAttribute("data-cq-graphical") ? ":scope > .cq-trigger-graphics" : ":scope > .cq-trigger-copy");
     const box = normal.getBoundingClientRect(), origin = trigger.getBoundingClientRect();
@@ -699,12 +712,23 @@
       "\n" + networkLines.map(([label, value]) => `${label}: ${value}`).join("\n");
   };
 
-  const openSettings = (opener) => {
+  const openSettings = (opener, referenceTarget) => {
     const existing = document.getElementById("cq-settings");
     const popup = document.getElementById("codex-quota-popover");
     const host = opener.closest("#cq-local-usage");
     if (!popup || !host) return;
-    if (existing) { animatePane(host, existing, true); syncReleaseUI(); existing.querySelector("button").focus({preventScroll: true}); return; }
+    const reveal = panel => {
+      const reference = panel.querySelector(".cq-local-reference"), body = panel.querySelector(".cq-settings-body");
+      const back = panel.querySelector("header button");
+      if (referenceTarget && reference) reference.open = true;
+      animatePane(host, panel, true);
+      syncReleaseUI();
+      const target = referenceTarget && reference?.querySelector(referenceTarget);
+      body.scrollTop = 0;
+      if (target) body.scrollTop = target.getBoundingClientRect().top - body.getBoundingClientRect().top - 8;
+      (target || back).focus({preventScroll: true});
+    };
+    if (existing) { reveal(existing); return; }
     const panel = document.createElement("div");
     panel.id = "cq-settings";
     panel.innerHTML = `<form method="dialog"><header><h2 id="cq-settings-title"></h2><button value="close" formnovalidate></button></header>
@@ -816,15 +840,13 @@
       opener.focus({preventScroll: true});
     };
     const reference=host.querySelector(".cq-local-reference");
-    if(reference){reference.hidden=false;panel.querySelector(".cq-options").before(reference);}
+    if(reference){reference.hidden=false;panel.querySelector(".cq-options").after(reference);}
     const body=document.createElement('div');body.className='cq-settings-body';
     body.append(...[...panel.querySelector('form').children].filter(node=>node.tagName!=='HEADER'));panel.querySelector('form').append(body);
     installLocalDetails(panel);
     panel.hidden = true;
     popup.append(panel);
-    animatePane(host, panel, true);
-    syncReleaseUI();
-    back.focus({preventScroll: true});
+    reveal(panel);
   };
 
   // Only the helper's matched public references can produce a weekly estimate.
@@ -1019,7 +1041,7 @@
     const selected=panel.querySelector('[data-period][aria-pressed="true"]'),marker=panel.querySelector('.cq-local-period-marker');
     if(!selected || !marker)return;
     const from=getComputedStyle(marker).left;stopMotion(marker);
-    const index=[...panel.querySelectorAll('[data-period]')].indexOf(selected),target=`calc(2px + ${index} * ((100% - 4px) / 3))`;
+    const index=[...panel.querySelectorAll('[data-period]')].indexOf(selected),target=`calc(2px + ${index} * ((100% - 4px) / var(--cq-period-count)))`;
     marker.style.left=target;const to=getComputedStyle(marker).left;
     if(from!==to)move(marker,{left:[from,to]},{duration:.24,ease:[.2,.8,.2,1]},()=>marker.style.left=target);
   };
@@ -1029,7 +1051,7 @@
     if(loading) {
       placeholder.setAttribute("aria-label",words("正在读取本机日志…","Reading local logs…"));
       const skeleton=document.createElement("div");skeleton.className="cq-local-skeleton";skeleton.setAttribute("aria-hidden","true");
-      skeleton.innerHTML='<section class="cq-local-recent"><p class="cq-local-interval-range"><i></i></p><div class="cq-local-recent-row"><div><span class="cq-local-metric-label">&nbsp;</span><strong>&nbsp;</strong><small>&nbsp;</small></div><div><span class="cq-local-metric-label">&nbsp;</span><strong>&nbsp;</strong><small>&nbsp;</small></div></div></section><div class="cq-local-highlights"><div><span class="cq-local-metric-label">&nbsp;</span><strong><span class="cq-local-value-number">&nbsp;</span><span class="cq-local-value-unit">&nbsp;</span></strong></div><div><span class="cq-local-metric-label">&nbsp;</span><strong><span class="cq-local-value-number">&nbsp;</span><span class="cq-local-value-unit">&nbsp;</span></strong></div></div>';
+      skeleton.innerHTML='<section class="cq-local-recent"><p class="cq-local-interval-range"><i></i></p><div class="cq-local-recent-row"><div><span class="cq-local-metric-label">&nbsp;</span><strong>&nbsp;</strong></div><div><span class="cq-local-metric-label">&nbsp;</span><strong>&nbsp;</strong><small>&nbsp;</small></div></div></section><div class="cq-local-highlights"><div><span class="cq-local-metric-label">&nbsp;</span><strong><span class="cq-local-value-number">&nbsp;</span><span class="cq-local-value-unit">&nbsp;</span></strong></div><div><span class="cq-local-metric-label">&nbsp;</span><strong><span class="cq-local-value-number">&nbsp;</span><span class="cq-local-value-unit">&nbsp;</span></strong></div></div>';
       if(panel.cqPeriod==="week") {
         const chart=document.createElement("section");chart.className="cq-local-daily cq-local-chart-skeleton";
         chart.innerHTML='<div class="cq-local-chart-heading">&nbsp;</div><div class="cq-local-chart-plot"></div><div class="cq-local-day-detail">&nbsp;</div>';skeleton.append(chart);
@@ -1246,8 +1268,12 @@
   };
   const requestLocalUsage = (panel, change = () => {}, saveReferencePlan = false) => {
     if(panel.cqPeriod!=="custom") {
-      const end=new Date(),start=new Date(end);start.setHours(0,0,0,0);
-      if(panel.cqPeriod==="week")start.setDate(start.getDate()-(start.getDay()+6)%7);
+      const end=new Date(),start=new Date(end);
+      if(panel.cqPeriod==="hour")start.setTime(end.getTime()-3600000);
+      else {
+        start.setHours(0,0,0,0);
+        if(panel.cqPeriod==="week")start.setDate(start.getDate()-(start.getDay()+6)%7);
+      }
       panel.cqAppliedInterval={intervalStart:start.toISOString(),intervalEnd:end.toISOString()};
     }
     const interval=panel.cqAppliedInterval;
@@ -1297,7 +1323,8 @@
       panel.querySelector(".cq-local-estimate-tag").textContent="";
       status.toggleAttribute("data-cq-quiet",!result.dataset.loaded);
       status.toggleAttribute("data-cq-warning",Boolean(result.dataset.loaded));
-      status.textContent = result.dataset.loaded ? words("读取失败；保留上次结果，请重试。", "Read failed; previous results retained. Retry.")
+      status.removeAttribute("title");
+      status.textContent = result.dataset.loaded ? words("读取失败，显示上次结果", "Read failed. Showing previous results.")
         : "";
       });
       return;
@@ -1335,17 +1362,17 @@
       }
       const select=weekly.querySelector("select");select.hidden=source.planName!=="pro";select.value=localReferencePlan;
       const note=weekly.querySelector(".cq-local-reference-status");
-      note.textContent=reply.referencePlanSaveError ? words("套餐保存失败，请重新选择。", "Could not save tier; choose it again.")
-        :!validReference || source.status==="unavailable" ? words("参考数据暂不可用，将自动重试。", "References unavailable; retry scheduled.")
-        :source.status==="needs_plan" ? ""
-        :source.status==="snapshot" ? source.referenceCheckFailed ? words("旧档检查失败；使用参考快照", "Legacy check failed; using snapshot") : words("旧 20x 参考快照", "Legacy 20x reference snapshot")
-        :source.status==="stale" ? words("更新失败；保留上次成功基准。", "Update failed; previous references retained.") : "";
       const referenceFailed=source.status==='stale' || Boolean(source.referenceCheckFailed);
-      note.toggleAttribute('data-cq-warning',referenceFailed || Boolean(reply.referencePlanSaveError));
+      note.textContent=reply.referencePlanSaveError ? words("套餐保存失败，请重新选择", "Could not save tier. Choose it again.")
+        :!validReference || source.status==="unavailable" ? words("参考数据暂不可用", "References unavailable") : "";
+      note.toggleAttribute('data-cq-warning',Boolean(note.textContent));
       const link=weekly.querySelector("a");link.href="https://modeldial.com/subscriptions?period=week&view=insights";
-      link.classList.toggle('cq-local-partial',referenceFailed);
-      link.textContent=referenceFailed ? `ModelDial · ${words("更新失败", "Update failed")}` : releaseDate(source.lastSuccessAt) ? `ModelDial · ${words("已核对", "Checked")} ${new Date(source.lastSuccessAt).toLocaleDateString()}`
-        : /^\d{4}-\d\d-\d\d$/.test(source.referenceSnapshotAt || '') ? `ModelDial · ${source.referenceSnapshotAt}` : "ModelDial";
+      link.toggleAttribute("data-cq-warning",referenceFailed);
+      const checked=releaseDate(source.lastSuccessAt) ? new Date(source.lastSuccessAt).toLocaleDateString() : "";
+      const snapshot=source.status==="snapshot" && /^\d{4}-\d\d-\d\d$/.test(source.referenceSnapshotAt || "") ? source.referenceSnapshotAt : "";
+      link.textContent=["ModelDial",referenceFailed ? words("更新失败","Update failed") : "",
+        checked ? words(`${referenceFailed ? "上次核对" : "已核对"} ${checked}`,`${referenceFailed ? "Last checked" : "Checked"} ${checked}`)
+          : snapshot ? words(`参考快照 ${snapshot}`,`Snapshot ${snapshot}`) : ""].filter(Boolean).join(" · ");
       link.title=[releaseDate(source.lastSuccessAt) ? words(`上次成功 ${new Date(source.lastSuccessAt).toLocaleString()}`, `Last success ${new Date(source.lastSuccessAt).toLocaleString()}`) : "",referenceFailed && releaseDate(source.lastAttemptAt) ? words(`上次尝试 ${new Date(source.lastAttemptAt).toLocaleString()}`, `Last attempt ${new Date(source.lastAttemptAt).toLocaleString()}`) : "",releaseDate(source.nextCheckAt) ? words(`下次检查 ${new Date(source.nextCheckAt).toLocaleString()}`, `Next check ${new Date(source.nextCheckAt).toLocaleString()}`) : ""].filter(Boolean).join(" · ");
     }
     result.replaceChildren();
@@ -1389,17 +1416,23 @@
       (row.account.usedPercent===null || Number.isFinite(row.account.usedPercent) && row.account.usedPercent>=0 && (crossReset || row.account.usedPercent<=100)) && validSegments &&
       (!["ok","partial"].includes(row.account.status) || row.account.usedPercent!==null && releaseDate(row.account.sampledStartAt) && releaseDate(row.account.sampledEndAt) &&
         Date.parse(row.account.sampledStartAt)>=Date.parse(row.start) && Date.parse(row.account.sampledStartAt)<Date.parse(row.account.sampledEndAt) && Date.parse(row.account.sampledEndAt)<=Date.parse(row.end));
-    const intervalEstimate=validInterval ? localQuotaEstimate(row.local.models) : null;
+    const intervalEstimate=validInterval ? estimate : null;
+    let partialShown=false;
     if (validInterval) {
       const stamp=value=>new Date(value).toLocaleString(navigator.language,{year:"numeric",month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit",second:"2-digit",hour12:false});
       const intervalStamp=(start,end)=>new Date(start).toDateString()===new Date(end).toDateString()
         ? `${stamp(start)} — ${new Date(end).toLocaleTimeString(navigator.language,{hour:"2-digit",minute:"2-digit",second:"2-digit",hour12:false})}`
         : `${stamp(start)} — ${stamp(end)}`;
       const intervalLabel=addText("p","cq-local-interval-range","",recent);
+      const dateText=`${localShortStamp(row.start)} — ${localShortStamp(row.end)}`;
+      const editRange=addText("button","cq-range-dates","",intervalLabel);
+      editRange.type="button";
+      editRange.setAttribute("aria-label",words(`编辑查询时间：${dateText}`, `Edit time range: ${dateText}`));
+      editRange.setAttribute("aria-controls","cq-interval-controls");
+      editRange.setAttribute("aria-expanded",panel.querySelector('[data-period="custom"]').getAttribute("aria-expanded"));
+      editRange.append(toolIcon("calendar",""),document.createTextNode(dateText));
+      editRange.onclick=()=>panel.cqEditInterval({intervalStart:row.start,intervalEnd:row.end});
       addText("i","cq-range-spinner","",intervalLabel).setAttribute("aria-hidden","true");
-      addText("span","cq-range-dates",`${localShortStamp(row.start)} — ${localShortStamp(row.end)}`,intervalLabel);
-      const span=localDayIndex(data.end)-localDayIndex(data.start)+1;
-      addText("span","cq-range-meta",words(`${span} 天`,`${span}d`),intervalLabel);
       addText("span","cq-range-loading",words("正在读取","Reading"),intervalLabel);
       intervalLabel.title=`${row.start} — ${row.end}`;
       const foot=panel.querySelector('.cq-local-result-stamp');
@@ -1419,13 +1452,22 @@
       if(!intervalEstimate.range) {
         if(row.local.eventCount && data.reference?.status==="needs_plan") {
           const choose=addText("button","cq-choose-reference",words("选择参考套餐","Choose reference tier"),local);choose.type="button";
-          choose.onclick=()=>{openSettings(choose);reference.open=true;reference.querySelector("select").focus({preventScroll:true});};
-        } else addText("small","",row.local.eventCount ? words("无可比基准","No comparable reference") : words("无记录","No records"),local);
-      } else if(intervalEstimate.partial)addText("small","cq-local-partial",words(`${intervalEstimate.covered} / ${row.local.models.length} 个模型可估算`,`${intervalEstimate.covered} / ${row.local.models.length} models estimated`),local);
-      else if(intervalEstimate.exemptOnly)addText("small","",words("审核不占周额度","Review uses no weekly quota"),local);
-      else if(!intervalEstimate.api)addText("small","",words("仅 Token 口径","Token only"),local);
-      if(intervalEstimate.proxy)addText("small","",words("含 API 价格间接估算","Includes API-price proxy"),local);
-      if(row.local.partial)addText("small","cq-local-partial",words("统计不完整","Incomplete"),local);
+          choose.onclick=()=>openSettings(choose,"select");
+        } else {
+          partialShown=!row.local.eventCount && row.local.partial;
+          addText("small",partialShown ? "cq-local-partial" : "",row.local.eventCount ? words("无可比基准","No comparable reference")
+            : partialShown ? words("统计不完整","Incomplete") : words("无记录","No records"),local);
+        }
+      } else if(intervalEstimate.exemptOnly)addText("small","",words("自动审核不占周额度","Automatic review uses no weekly quota"),local);
+      else if(row.local.partial || intervalEstimate.partial) {
+        const count=row.local.models.length;
+        const note=intervalEstimate.covered<count
+          ? words(`${intervalEstimate.covered} / ${count} 个模型可估算`,`${intervalEstimate.covered} / ${count} models estimated`) +
+            (row.local.partial ? words(" · 日志不完整"," · Incomplete logs") : "")
+          : words("统计不完整","Incomplete");
+        addText("small","cq-local-partial",note,local);
+        partialShown=row.local.partial;
+      }
       const account=addText("div","cq-local-recent-account","",values);
       addText("span","cq-local-metric-label",crossReset ? words("账号已采样变化", "Sampled account change") : words("账号额度变化", "Account quota change"),account);
       const actual=["ok","partial"].includes(row.account.status) && row.account.usedPercent!==null;
@@ -1433,9 +1475,11 @@
       if(actual)addText("span","cq-account-unit",words("百分点","pp"),measured);
       if(actual)measured.title=crossReset ? words("周额度已采样分段变化之和；未推算重置附近缺口，包含其他设备", "Sum of sampled weekly changes; reset gaps are not inferred and other devices are included") : words("官方周额度百分点变化，包含其他设备", "Official weekly percentage-point change, including other devices");
       const states={insufficient_history:words("该区间采样不足", "Insufficient interval samples"),reset:crossReset ? row.account.resetAdjusted ? words("重置时间变化 · 无法累计", "Reset time changed · cannot combine") : words("跨周期采样不足", "Insufficient cross-cycle samples") : words("跨重置周期", "Reset crossed"),counter_decreased:words("额度已校正", "Counter corrected"),unavailable:historyErrors[row.account.historyError] || words("历史暂不可用", "History unavailable")};
-      if(!actual || row.account.status==="partial") {
-        const partialText=crossReset ? `${row.account.resetAdjusted ? words("重置时间变化", "Reset time changed") : words("跨周期", "Across cycles")} · ${words("仅已采样", "Sampled only")}${row.account.hasGaps ? words(" · 有间断", " · gaps") : ""}` : row.account.hasGaps ? words("部分覆盖 · 有间断", "Partial coverage · gaps") : words("仅覆盖部分区间", "Partial interval only");
-        addText("small",actual && row.account.hasGaps ? "cq-history-gap" : "",actual ? partialText : states[row.account.status],account);
+      if(!actual)addText("small",row.account.historyError ? "cq-history-feedback" : "",states[row.account.status],account);
+      else if(row.account.resetAdjusted || row.account.hasGaps || !crossReset && row.account.status==="partial") {
+        const notes=[row.account.resetAdjusted ? words("重置时间变化","Reset time changed") : "",
+          row.account.hasGaps ? words("采样有间断","Sampling gaps") : !crossReset && row.account.status==="partial" ? words("部分采样","Partial sampling") : ""];
+        addText("small",row.account.hasGaps ? "cq-history-gap" : "",notes.filter(Boolean).join(" · "),account);
       }
       if(actual || crossReset && row.account.status === "reset" && Array.isArray(segments) && segments.length > 0) {
         const coverage=addText("div","cq-interval-coverage","",account);
@@ -1443,25 +1487,39 @@
         const sameDay=new Date(row.account.sampledStartAt).toDateString()===new Date(row.account.sampledEndAt).toDateString();
         if(crossReset) {
           const details=addText("details","cq-interval-segments","",coverage);
-          addText("summary","cq-interval-sampled-range",words(`采样 ${segments.length} 段`,`Samples: ${segments.length} segments`),details);
+          addText("summary","cq-interval-sampled-range",words(`跨周期 · ${segments.length} 段`,`Across cycles · ${segments.length} segments`),details);
           for(const segment of segments) {
             const line=addText("div","cq-interval-segment","",details);
             addText("span","",intervalStamp(segment.startAt,segment.endAt),line);
             addText("span","",`+${localPercent(segment.usedPercent)} ${words("百分点","pp")}`,line);
           }
-        } else {
+        } else if(row.account.status==="partial" || row.account.hasGaps ||
+            Date.parse(row.account.sampledStartAt)!==Date.parse(row.start) || Date.parse(row.account.sampledEndAt)!==Date.parse(row.end)) {
           const range=addText("span",row.account.status==="partial" ? "cq-interval-sampled-range" : "",words(`采样 ${sampleStart} → ${sameDay ? sampleEnd.split(' ').at(-1) : sampleEnd}`,`Samples ${sampleStart} → ${sameDay ? sampleEnd.split(' ').at(-1) : sampleEnd}`),coverage);
           range.title=intervalStamp(row.account.sampledStartAt,row.account.sampledEndAt);
         }
         addText("span","",words("含其他设备","Includes other devices"),coverage);
       }
-      account.toggleAttribute("data-cq-warning",row.account.status!=="ok" || Boolean(row.account.hasGaps || row.account.historyError));
-      if(row.account.hasGaps && row.account.status!=="partial")addText("small","cq-history-gap",words("采样存在间断", "Sampling has gaps"),account);
       if(row.account.historyError && row.account.status!=="unavailable")addText("small","cq-history-feedback",historyErrors[row.account.historyError],account);
       if(releaseDate(row.account.coverageStartAt) && releaseDate(row.account.coverageEndAt))
         account.title=words(`已有账号采样：${stamp(row.account.coverageStartAt)} — ${stamp(row.account.coverageEndAt)}`,`Available account samples: ${stamp(row.account.coverageStartAt)} — ${stamp(row.account.coverageEndAt)}`);
-    } else addText("p","cq-local-page-note",words("区间结果暂不可用，请查询有效起止时间。", "Interval unavailable; apply valid start and end times."),recent);
-    const dateText=`${data.start} — ${data.end}`;
+      const observed = row.logQuota;
+      if (observed && releaseDate(observed.firstAt) && releaseDate(observed.lastAt) &&
+          Date.parse(row.start) <= Date.parse(observed.firstAt) && Date.parse(observed.firstAt) <= Date.parse(observed.lastAt) &&
+          Date.parse(observed.lastAt) <= Date.parse(row.end) &&
+          (observed.latestUsedPercent === null || Number.isFinite(observed.latestUsedPercent) && observed.latestUsedPercent >= 0 && observed.latestUsedPercent <= 100)) {
+        const logQuota = addText("div", "cq-local-log-quota", "", values);
+        addText("span", "cq-local-metric-label", words("日志周额度", "Weekly quota from logs"), logQuota);
+        const used = observed.latestUsedPercent;
+        addText("strong", "", used === null ? "—" : words(`已用 ${localPercent(used)}%`, `${localPercent(used)}% used`), logQuota);
+        const context=addText("div","cq-interval-coverage cq-log-context","",logQuota);
+        addText("span", "", used === null ? words("读数不一致 · 账号未核验", "Conflicting readings · account unverified") : words("账号未核验", "Account unverified"), context);
+        const first = localShortStamp(observed.firstAt), last = localShortStamp(observed.lastAt);
+        const exactTime = intervalStamp(observed.firstAt, observed.lastAt);
+        const span = Date.parse(observed.firstAt) === Date.parse(observed.lastAt) ? last : first === last ? exactTime : `${first} — ${last}`;
+        addText("span", "", words(`日志时间 ${span}`, `Log times ${span}`), context).title = exactTime;
+      }
+    } else addText("p","cq-local-page-note",words("区间读数暂不可用", "Interval readings unavailable"),recent);
     const highlights = addText("div", "cq-local-highlights", "");
     const tokenRow=addText("div","cq-local-total","",highlights);
     addText("span","cq-local-metric-label",words("总 token","Total tokens"),tokenRow);
@@ -1470,30 +1528,14 @@
     if(total.unit)addText("span","cq-local-value-unit",total.unit,totalValue);
     totalValue.title=`${numberText(totals.tokens)} token`;
     if(!data.eventCount){totalValue.textContent=data.partial ? words("暂不可用","Unavailable") : words("无记录","No records");totalValue.title=totalValue.textContent;}
-    const estimateRow = addText("div", "cq-local-estimate", "");
-    const estimated = addText("strong", "", "", estimateRow);
-    if (estimate.range) {
-      addText("span", "cq-local-value-unit", "≈ ", estimated);
-      const [low,high]=estimate.range.map(localPercent);
-      const lower=addText('span','cq-local-estimate-bound','',estimated);
-      addText("span", "cq-local-value-number",low,lower);
-      let upper=lower;
-      if(low!==high){estimated.dataset.range="";addText("span","cq-local-value-unit","–",lower);upper=addText('span','cq-local-estimate-bound','',estimated);addText("span","cq-local-value-number",high,upper);}
-      addText("span", "cq-local-value-unit", "%", upper);
-      if(estimate.exemptOnly)addText('small','cq-local-estimate-note',words('审核不占周额度','Review uses no weekly quota'),estimateRow);
-      else if(!estimate.api)addText('small','cq-local-estimate-note',words('仅 Token 口径','Token only'),estimateRow);
-      else if(estimate.partial)addText('small','cq-local-estimate-note cq-local-partial',words('部分模型','Partial models'),estimateRow);
-      if(estimate.proxy)addText('small','cq-local-estimate-note',words('含 API 价格间接估算','Includes API-price proxy'),estimateRow);
-    } else {estimated.textContent = words("未折算", "Not estimated");estimated.dataset.unavailable = "";}
     const methods=addText('details','cq-local-estimate-methods','');methods.hidden=!estimate.range;
-    const methodsSummary=addText('summary','',words('周额度参考估算','Reference quota estimate'),methods);methodsSummary.append(toolIcon('back','cq-local-detail-arrow'));methods.append(estimateRow);
-    for(const [scope,part] of [[dateText,estimate]]) {
-      addText('p','cq-local-method-scope',scope,methods);
-      const methodValues=addText('dl','cq-local-method-values','',methods);
-      for(const [label,value] of [[part.proxy ? words('Token（直接）','Token (direct)') : 'Token',part.token===null ? '—' : `≈ ${localPercent(part.token)}%`],['API',part.api ? `≈ ${localPercent(part.api[0])}${localPercent(part.api[0])===localPercent(part.api[1]) ? '' : `–${localPercent(part.api[1])}`}%` : '—']]) {
-        const pair=addText('div','','',methodValues);addText('dt','',label,pair);addText('dd','',value,pair);
-      }
+    const methodsSummary=addText('summary','',words('估算明细','Estimate details'),methods);methodsSummary.append(toolIcon('back','cq-local-detail-arrow'));
+    const methodValues=addText('dl','cq-local-method-values','',methods);
+    for(const [label,value] of [['Token',estimate.token===null ? '—' : `≈ ${localPercent(estimate.token)}%`],[words('API 等值','API equivalent'),estimate.api ? localEstimateText({range:estimate.api}) : '—']]) {
+      const pair=addText('div','','',methodValues);addText('dt','',label,pair);addText('dd','',value,pair);
     }
+    if(estimate.proxy)addText("p","cq-local-method-note",words("部分模型按 API 等值间接估算","Some models use API-equivalent estimates"),methods);
+    if(estimate.exemptOnly)addText("p","cq-local-method-note",words("自动审核不占周额度","Automatic review uses no weekly quota"),methods);
     const costRow = addText("div", "cq-local-cost", "", highlights);
     addText("span", "cq-local-metric-label", unpriced || priced.some(item=>item.row.cacheWriteKnown===false) ? words("部分 API 等值", "Partial API equivalent") : words("API 等值", "API equivalent"), costRow);
     const costValue = addText("strong", "", "", costRow);
@@ -1553,8 +1595,8 @@
     const missing = issues.filter(issue => issue.affectsTotals);
     status.textContent = data.partial ? words("统计不完整", "Incomplete") : !data.eventCount ? words("无记录", "No records") : "";
     status.title = data.partial ? missing.map(issue=>`${localIssueLabels[issue.code]} ${numberText(issue.count)}`).join(" · ") : "";
-    status.toggleAttribute("data-cq-quiet", !data.partial && data.eventCount > 0);
-    status.toggleAttribute("data-cq-warning", data.partial);
+    status.toggleAttribute("data-cq-quiet", partialShown || !data.partial);
+    status.removeAttribute("data-cq-warning");
     if (issues.length) {
       const details = addText("details", "cq-local-issues", "");
       const summary = addText("summary", "", words("统计说明", "Coverage details"), details);
@@ -1735,8 +1777,8 @@
       event.preventDefault();const dates=read(true);if(!dates)return;sync(dates);
       const range=globalThis.__codexQuotaLocalUsageRange;
       if(form.querySelector('[type="submit"]').getAttribute('aria-busy')==='true' && dates[0].toISOString()===range?.intervalStart && dates[1].toISOString()===range?.intervalEnd)return;
-      panel.cqAppliedInterval={intervalStart:dates[0].toISOString(),intervalEnd:dates[1].toISOString()};panel.cqPeriod="custom";
-      requestLocalUsage(panel,()=>{form.hidden=true;panel.querySelector('[data-period="custom"]').setAttribute("aria-expanded","false");});
+      panel.cqAppliedInterval={intervalStart:dates[0].toISOString(),intervalEnd:dates[1].toISOString()};panel.cqSelectPeriod("custom");
+      requestLocalUsage(panel,()=>panel.cqSetIntervalEditor(false));
     };
     sync();
   };
@@ -1751,8 +1793,8 @@
     panel.setAttribute("role", "region");
     panel.setAttribute("aria-labelledby", "cq-local-title");
     panel.innerHTML = `<header><h2 id="cq-local-title"></h2></header>
-      <div class="cq-local-periods" role="group"><span class="cq-local-period-marker" aria-hidden="true"></span><button type="button" data-period="today"></button><button type="button" data-period="week"></button><button type="button" data-period="custom" aria-expanded="false"></button></div>
-      <form class="cq-interval-controls" hidden><div class="cq-interval-endpoints"><div class="cq-interval-endpoint"><div class="cq-interval-heading"><label for="cq-interval-start-date"></label><button type="button" data-date-field="intervalStart"></button></div><input id="cq-interval-start-date" name="intervalStart" type="text" placeholder="YYYY-MM-DD" autocomplete="off" inputmode="numeric" required><input name="intervalStartTime" type="text" placeholder="HH:mm:ss" autocomplete="off" inputmode="numeric" required><input type="range" name="fromSlider" step="1"></div><div class="cq-interval-endpoint"><div class="cq-interval-heading"><label for="cq-interval-end-date"></label><button type="button" data-date-field="intervalEnd"></button></div><input id="cq-interval-end-date" name="intervalEnd" type="text" placeholder="YYYY-MM-DD" autocomplete="off" inputmode="numeric" required><input name="intervalEndTime" type="text" placeholder="HH:mm:ss" autocomplete="off" inputmode="numeric" required><input type="range" name="toSlider" step="1"></div></div><div class="cq-interval-presets" role="group"></div><div class="cq-interval-actions"><output></output><button type="submit"></button></div></form>
+      <div class="cq-local-periods" role="group"><span class="cq-local-period-marker" aria-hidden="true"></span><button type="button" data-period="hour"></button><button type="button" data-period="today"></button><button type="button" data-period="week"></button><button type="button" data-period="custom" aria-controls="cq-interval-controls" aria-expanded="false"></button></div>
+      <form id="cq-interval-controls" class="cq-interval-controls" hidden><div class="cq-interval-endpoints"><div class="cq-interval-endpoint"><div class="cq-interval-heading"><label for="cq-interval-start-date"></label><button type="button" data-date-field="intervalStart"></button></div><input id="cq-interval-start-date" name="intervalStart" type="text" placeholder="YYYY-MM-DD" autocomplete="off" inputmode="numeric" required><input name="intervalStartTime" type="text" placeholder="HH:mm:ss" autocomplete="off" inputmode="numeric" required><input type="range" name="fromSlider" step="1"></div><div class="cq-interval-endpoint"><div class="cq-interval-heading"><label for="cq-interval-end-date"></label><button type="button" data-date-field="intervalEnd"></button></div><input id="cq-interval-end-date" name="intervalEnd" type="text" placeholder="YYYY-MM-DD" autocomplete="off" inputmode="numeric" required><input name="intervalEndTime" type="text" placeholder="HH:mm:ss" autocomplete="off" inputmode="numeric" required><input type="range" name="toSlider" step="1"></div></div><div class="cq-interval-presets" role="group"></div><div class="cq-interval-actions"><output></output><button type="submit"></button></div></form>
       <div class="cq-local-result" role="region" aria-busy="false"></div><p class="cq-local-status" role="status"></p>
       <footer class="cq-local-foot"><button type="button" class="cq-local-refresh"><span class="cq-local-result-stamp"></span></button><button type="button" class="cq-local-source-link"></button></footer>
       <details class="cq-local-reference" hidden><summary></summary><p></p></details>`;
@@ -1763,7 +1805,7 @@
     const refresh = panel.querySelector('.cq-local-refresh');
     refresh.title = words("刷新本机日志", "Refresh local logs"); refresh.setAttribute("aria-label",refresh.title);
     refresh.prepend(toolIcon("refresh", "")); refresh.onclick = () => requestLocalUsage(panel);
-    const source=panel.querySelector('.cq-local-source-link');source.textContent=words("口径说明","About estimates");source.onclick=()=>{openSettings(source);const reference=document.querySelector('#cq-settings .cq-local-reference');animateLocalLayout(document.getElementById('cq-settings'),()=>reference.open=true);};
+    const source=panel.querySelector('.cq-local-source-link');source.textContent=words("口径说明","About estimates");source.onclick=()=>openSettings(source,":scope > summary");
     const settings = document.createElement("button"); settings.type = "button"; settings.className = "cq-settings-button";
     settings.append(toolIcon("settings", "")); settings.onclick = () => openSettings(settings);
     panel.querySelector('header').append(settings); syncReleaseUI();
@@ -1771,8 +1813,8 @@
     panel.querySelector("summary").textContent = words("口径与来源", "Scope and sources");
     panel.querySelector("summary").append(toolIcon("back", "cq-local-detail-arrow"));
     panel.querySelector("details p").textContent = words(
-      "Token／API 按模型用量除以周参考计算。其他有价格的模型按 Astra 和 Sol 的 API 等值间接推算。范围不是置信区间，不代表官方扣量。",
-      "Token/API estimates use weekly references. Other priced models use an indirect Astra and Sol API-equivalent proxy. The range is not a confidence interval or official consumption.");
+      "按每周参考值估算。Token 和 API 等值共同决定估算范围。",
+      "Estimates use weekly references. The range combines token and API-equivalent estimates.");
     const reference=panel.querySelector(".cq-local-reference"), explanation=reference.querySelector("p");
     const referenceText=(tag,className,text,parent=reference)=>{const node=document.createElement(tag);node.className=className;node.textContent=text;parent.append(node);return node;};
     const weeklyReference=referenceText("section","cq-local-reference-section cq-local-weekly-reference","");
@@ -1801,37 +1843,52 @@
     const caveatSummary=referenceText("summary","",words("口径与限制", "Scope and limitations"),caveats);
     caveatSummary.append(toolIcon("back","cq-local-detail-arrow"));caveats.append(explanation);
     for(const text of [
-      words("账号采样包含其他设备，缺口及跨重置不补算。", "Account samples include other devices; gaps and resets are not inferred."),
-      words("API 等值非账单，未含附加费；写缓存时长未知时为区间。", "API equivalent is not a bill and excludes surcharges; unknown cache-write retention gives a range."),
-      words("日志可能含旧账号或导入记录。本周从本地周一开始。", "Logs may include old accounts or imports. Weeks start Monday locally.")
+      words("API 等值按公开价格估算。", "API equivalents use public prices."),
+      words("本机日志可能含旧账号或导入记录。", "Local logs may include old accounts or imported records.")
     ]) referenceText("p","",text,caveats);
-    const choose = period => {
+    const form=panel.querySelector(".cq-interval-controls");
+    const periods=[...panel.querySelectorAll("[data-period]")];
+    const custom=panel.querySelector('[data-period="custom"]');
+    panel.cqSetIntervalEditor=open=>{
+      const restoreFocus=!open && form.contains(document.activeElement);
+      form.hidden=!open;
+      custom.setAttribute("aria-expanded",String(open));
+      panel.querySelector(".cq-range-dates")?.setAttribute("aria-expanded",String(open));
+      if(restoreFocus)custom.focus({preventScroll:true});
+    };
+    panel.cqSelectPeriod=period=>{
+      panel.cqPeriod=period;
+      for(const button of periods)button.setAttribute("aria-pressed",String(button.dataset.period===period));
+      syncLocalPeriod(panel);
+    };
+    const choose = (period, range = panel.cqAppliedInterval) => {
       panel.cqCloseCalendar?.(false);
       if(period==="custom") {
-        const form=panel.querySelector(".cq-interval-controls"),open=form.hidden;
-        animateLocalLayout(panel,()=>{form.hidden=!open;panel.querySelector('[data-period="custom"]').setAttribute("aria-expanded",String(open));});
-        for(const button of panel.querySelectorAll('[data-period]'))button.setAttribute('aria-pressed',String(button.dataset.period===(open ? 'custom' : panel.cqPeriod)));syncLocalPeriod(panel);
-        if(open){panel.cqSetInterval(panel.cqAppliedInterval);form.elements.intervalStart.focus({preventScroll:true});}
+        const open=form.hidden;
+        animateLocalLayout(panel,()=>{
+          panel.cqSetIntervalEditor(open);
+          if(open)panel.cqSetInterval(range);
+        });
+        if(open)form.elements.intervalStart.focus({preventScroll:true});
         return;
       }
-      panel.cqPeriod=period;
-      for(const button of panel.querySelectorAll("[data-period]"))button.setAttribute("aria-pressed",String(button.dataset.period===period));syncLocalPeriod(panel);
-      panel.querySelector('[data-period="custom"]').setAttribute("aria-expanded","false");
-      requestLocalUsage(panel,()=>panel.querySelector(".cq-interval-controls").hidden=true);
+      panel.cqSelectPeriod(period);
+      requestLocalUsage(panel,()=>panel.cqSetIntervalEditor(false));
     };
-    for(const button of panel.querySelectorAll("[data-period]")) {
-      button.textContent={today:words("今日","Today"),week:words("本周","This week"),custom:words("自选","Custom")}[button.dataset.period];
+    panel.cqEditInterval=range=>choose("custom",range);
+    for(const button of periods) {
+      button.textContent={hour:words("近1小时","Last hour"),today:words("今日","Today"),week:words("本周","This week"),custom:words("自选","Custom")}[button.dataset.period];
+      if(button.dataset.period==="week")button.title=words("从本地周一开始","Starts Monday in local time");
+      if(button===custom)button.append(toolIcon("back","cq-custom-chevron"));
       button.onclick=()=>choose(button.dataset.period);
     }
     installLocalDetails(panel);
     popup.append(panel);
     installIntervalControls(panel);
-    const form=panel.querySelector(".cq-interval-controls");
     form.querySelector(".cq-interval-endpoints").before(form.querySelector(".cq-interval-presets"));
     const fine=document.createElement("details");fine.className="cq-interval-fine";
     const summary=document.createElement("summary");summary.textContent=words("精细调整","Fine adjustment");summary.append(toolIcon("back","cq-local-detail-arrow"));fine.append(summary);
     const fineBody=document.createElement("div");fineBody.className="cq-interval-fine-sliders";fineBody.append(...form.querySelectorAll('[type="range"]'));fine.append(fineBody);form.querySelector(".cq-interval-actions").before(fine);
-    form.addEventListener("submit",()=>{if(panel.cqPeriod==="custom"){for(const button of panel.querySelectorAll("[data-period]"))button.setAttribute("aria-pressed",String(button.dataset.period==="custom"));syncLocalPeriod(panel);}});
     installLocalCalendar(panel);
     choose("today");
     return panel;
@@ -2124,10 +2181,8 @@
       #cq-local-usage .cq-local-value-number { font-size: clamp(16px, 12cqi, 18px); }
       #cq-local-usage .cq-local-value-unit { font-size: 11px; font-weight: 500; letter-spacing: 0; }
       #cq-local-usage .cq-local-total .cq-local-value-number { font-size:24px; }
-      :is(#cq-local-usage,#cq-settings) .cq-local-estimate-bound { display: inline-flex; align-items: baseline; white-space: nowrap; }
-      :is(#cq-local-usage,#cq-settings) .cq-local-estimate-note { display: block; color: var(--cq-muted); font-size: 10px; line-height: 16px; }
-      :is(#cq-local-usage,#cq-settings) .cq-local-method-scope { color: var(--cq-muted); font-size: 10px; line-height: 16px; }
-      :is(#cq-local-usage,#cq-settings) .cq-local-method-values { margin: 8px 0 12px; }
+      #cq-settings .cq-local-method-note { margin:4px 0 8px; color:var(--cq-muted); }
+      :is(#cq-local-usage,#cq-settings) .cq-local-method-values { margin: 0 0 8px; font-variant-numeric:tabular-nums; }
       :is(#cq-local-usage,#cq-settings) .cq-local-method-values > div { display: grid; grid-template-columns: auto minmax(0,1fr); gap: 8px; align-items: baseline; padding: 4px 0; }
       :is(#cq-local-usage,#cq-settings) .cq-local-method-values dt { color: var(--cq-muted); font-size: 11px; }
       :is(#cq-local-usage,#cq-settings) .cq-local-method-values dd { margin: 0; text-align: right; font-size: 12px; font-weight: 600; overflow-wrap: anywhere; }
@@ -2223,7 +2278,7 @@
       :is(#cq-local-usage,#cq-settings) .cq-local-caveats { border-top: 1px solid var(--cq-border); }
       :is(#cq-local-usage,#cq-settings) .cq-local-caveats > summary { font-size: 11px; color: var(--cq-muted); }
       :is(#cq-local-usage,#cq-settings) .cq-local-caveats p { font-size: 10px; line-height: 16px; }
-      :is(#cq-local-usage,#cq-settings) .cq-local-status[data-cq-warning], :is(#cq-local-usage,#cq-settings) .cq-local-reference-status[data-cq-warning], :is(#cq-local-usage,#cq-settings) .cq-local-recent-account[data-cq-warning] > small:not(.cq-interval-sampled-range), :is(#cq-local-usage,#cq-settings) .cq-local-day-values > div > .cq-local-partial, :is(#cq-local-usage,#cq-settings) :is(.cq-local-partial,.cq-interval-api-coverage,.cq-local-api-note) { color: var(--cq-warning); }
+      :is(#cq-local-usage,#cq-settings) :is(.cq-local-status[data-cq-warning],.cq-local-reference-status[data-cq-warning],.cq-local-weekly-reference a[data-cq-warning],.cq-local-recent-row .cq-history-feedback) { color: var(--cq-warning); }
       @media (forced-colors: active) { #cq-local-usage .cq-local-model-track { forced-color-adjust: none; background: GrayText; } #cq-local-usage .cq-local-model-track i { background: Highlight; } #cq-local-usage .cq-local-baselines { outline: 1px solid CanvasText; } }
       #cq-local-usage summary { display: flex; align-items: center; gap: 8px; min-height: 36px; list-style: none; cursor: pointer; font-size: 12px; font-weight: 500; color: var(--cq-ink); }
       #cq-local-usage summary::-webkit-details-marker { display: none; }
@@ -2313,29 +2368,34 @@
       #cq-local-usage .cq-local-estimate-tag { position:absolute; width:1px; height:1px; overflow:hidden; clip-path:inset(50%); }
       #cq-local-usage button { min-height:23px; font-size:10.5px; }
       #cq-local-usage button:active { background:var(--cq-s5); }
-      #cq-local-usage .cq-local-periods { position:relative; display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); margin:0 12px 8px; padding:2px; border-radius:8px; background:var(--cq-s3); }
+      #cq-local-usage .cq-local-periods { --cq-period-count:4; position:relative; display:grid; grid-template-columns:repeat(var(--cq-period-count),minmax(0,1fr)); margin:0 12px 8px; padding:2px; border-radius:8px; background:var(--cq-s3); }
       #cq-local-usage .cq-local-periods button { position:relative; z-index:1; height:24px; min-height:24px; padding:0 4px; border-radius:6px; color:var(--cq-muted); font-size:11.5px; line-height:1; }
       #cq-local-usage .cq-local-periods button[aria-pressed=true] { color:var(--cq-ink); background:transparent; box-shadow:none; }
-      #cq-local-usage .cq-local-period-marker { position:absolute; top:2px; bottom:2px; left:2px; width:calc((100% - 4px)/3); border-radius:6px; background:var(--cq-solid); box-shadow:0 1px 2px #0000001f; pointer-events:none; }
+      #cq-local-usage [data-period=custom] { gap:2px; padding-inline:2px; }
+      #cq-local-usage .cq-custom-chevron { width:9px; height:9px; flex:none; transform:rotate(-90deg); }
+      #cq-local-usage [data-period=custom][aria-expanded=true] .cq-custom-chevron { transform:rotate(90deg); }
+      #cq-local-usage .cq-local-period-marker { position:absolute; top:2px; bottom:2px; left:2px; width:calc((100% - 4px)/var(--cq-period-count)); border-radius:6px; background:var(--cq-solid); box-shadow:0 1px 2px #0000001f; pointer-events:none; }
       #cq-local-usage .cq-local-result { padding:0; }
       #cq-local-usage .cq-local-recent { padding:0 12px; }
-      #cq-local-usage .cq-local-interval-range { display:flex; align-items:center; gap:6px; min-height:22px; margin:0; padding:0 0 7px; font-size:10.5px; line-height:15px; }
-      #cq-local-usage .cq-range-dates { min-width:0; overflow-wrap:anywhere; }
-      #cq-local-usage .cq-range-meta, #cq-local-usage .cq-range-loading { margin-left:auto; white-space:nowrap; }
+      #cq-local-usage .cq-local-interval-range { display:flex; align-items:center; gap:8px; min-height:32px; margin:0; padding:0 0 8px; font-size:10.5px; line-height:15px; }
+      #cq-local-usage .cq-range-dates { min-width:0; min-height:24px; margin-left:-4px; padding:3px 4px; gap:4px; color:var(--cq-muted); text-align:left; line-height:15px; overflow-wrap:anywhere; }
+      #cq-local-usage .cq-range-dates svg { width:12px; height:12px; flex:none; }
+      #cq-local-usage .cq-range-loading { white-space:nowrap; }
       #cq-local-usage :is(.cq-range-spinner,.cq-range-loading) { display:none; }
-      #cq-local-usage .cq-range-spinner { width:9px; height:9px; flex:none; border:1.4px solid var(--cq-muted); border-top-color:transparent; border-radius:50%; }
+      #cq-local-usage .cq-range-spinner { width:9px; height:9px; flex:none; margin-left:auto; border:1.4px solid var(--cq-muted); border-top-color:transparent; border-radius:50%; }
       #cq-local-usage .cq-local-result[aria-busy=true] :is(.cq-range-spinner,.cq-range-loading) { display:block; }
-      #cq-local-usage .cq-local-result[aria-busy=true] .cq-range-meta { display:none; }
       #cq-local-usage .cq-local-recent-row { display:block; padding:0; }
       #cq-local-usage .cq-local-recent-row > :last-child { text-align:left; }
-      #cq-local-usage .cq-local-recent-row > div { display:grid; grid-template-columns:minmax(64px,1fr) minmax(0,2.5fr); column-gap:8px; align-items:baseline; min-height:70px; padding:6px 0 8px; text-align:left; border-top:1px solid var(--cq-s6); }
-      #cq-local-usage .cq-local-recent-row > div:first-child { padding-top:1px; border-top:0; }
+      #cq-local-usage .cq-local-recent-row > div { display:grid; grid-template-columns:minmax(64px,1fr) minmax(0,2.5fr); gap:4px 8px; align-items:baseline; padding:8px 0; text-align:left; border-top:1px solid var(--cq-s6); }
+      #cq-local-usage .cq-local-recent-row > div:first-child { padding-top:0; border-top:0; }
       #cq-local-usage .cq-local-metric-label { margin:0; font-size:10.5px; line-height:15px; font-weight:400; }
       #cq-local-usage .cq-local-recent-row strong, #cq-local-usage .cq-local-recent-row strong[data-range], #cq-local-usage .cq-local-recent-row .cq-local-primary-estimate { display:block; grid-column:2; text-align:right; font-size:21px; font-weight:600; line-height:25.2px; letter-spacing:-.024em; margin-left:0; white-space:normal; overflow-wrap:normal; }
       #cq-local-usage .cq-local-primary-estimate > span { white-space:nowrap; }
       #cq-local-usage .cq-account-unit { margin-left:2px; font-size:11px; line-height:1; font-weight:500; color:var(--cq-muted); letter-spacing:0; }
-      #cq-local-usage .cq-local-recent-row :is(small,.cq-choose-reference,.cq-interval-coverage) { grid-column:1/-1; font-size:10.5px; line-height:15px; margin:3px 0 0; }
-      #cq-local-usage .cq-interval-coverage { display:flex; flex-wrap:wrap; column-gap:6px; row-gap:0; color:var(--cq-muted); }
+      #cq-local-usage .cq-local-recent-row :is(small,.cq-choose-reference,.cq-interval-coverage) { grid-column:1/-1; font-size:10.5px; line-height:15px; margin:0; }
+      #cq-local-usage .cq-local-log-quota strong { font-size:14px; line-height:16px; letter-spacing:0; }
+      #cq-local-usage .cq-interval-coverage { display:flex; flex-wrap:wrap; gap:0 8px; color:var(--cq-muted); }
+      #cq-local-usage .cq-log-context { justify-content:space-between; }
       #cq-local-usage .cq-interval-segments[open] { flex-basis:100%; }
       #cq-local-usage .cq-interval-segments > summary { min-height:15px; gap:3px; font-size:10.5px; line-height:15px; font-weight:400; color:var(--cq-muted); }
       #cq-local-usage .cq-interval-segments > summary::after { content:"⌄"; }
@@ -2344,8 +2404,8 @@
       #cq-local-usage .cq-interval-segment > span:first-child { overflow-wrap:anywhere; }
       #cq-local-usage .cq-interval-segment > span:last-child { white-space:nowrap; }
       #cq-local-usage .cq-choose-reference { justify-self:start; min-height:15px; padding:0; }
-      #cq-local-usage .cq-local-highlights { margin:2px 0 0; padding:0; border-top:1px solid var(--cq-s6); gap:0; }
-      #cq-local-usage .cq-local-highlights > div { min-width:0; padding:6px 12px 8px; }
+      #cq-local-usage .cq-local-highlights { margin:0; padding:0; border-top:1px solid var(--cq-s6); gap:0; }
+      #cq-local-usage .cq-local-highlights > div { min-width:0; padding:8px 12px; }
       #cq-local-usage .cq-local-highlights > div + div { border-left:1px solid var(--cq-s6); }
       #cq-local-usage .cq-local-highlights strong { margin-left:-.008em; font-size:13.5px; line-height:20.25px; font-weight:600; letter-spacing:-.015em; }
       #cq-local-usage :is(.cq-local-total,.cq-local-cost) .cq-local-value-number, #cq-local-usage strong[data-range] .cq-local-value-number { font-size:13.5px; }
@@ -2371,12 +2431,13 @@
       #cq-local-usage .cq-local-day[data-future] { pointer-events:none; cursor:default; }
       #cq-local-usage .cq-local-day[data-future] .cq-local-day-rail::after { opacity:.45; }
       #cq-local-usage .cq-local-day[data-future] .cq-local-day-label { color:var(--cq-s10); }
-      #cq-local-usage .cq-local-day-detail { display:flex; align-items:baseline; gap:6px; min-height:27px; margin:0; padding:4px 0 8px; font-size:10.5px; line-height:15px; color:var(--cq-muted); }
+      #cq-local-usage .cq-local-day-detail { display:flex; align-items:baseline; gap:8px; min-height:27px; margin:0; padding:4px 0 8px; font-size:10.5px; line-height:15px; color:var(--cq-muted); }
       #cq-local-usage .cq-local-day-date { flex:none; font-size:10.5px; line-height:15px; }
-      #cq-local-usage .cq-local-day-values, #cq-local-usage .cq-local-day-values > div { display:contents; }
+      #cq-local-usage .cq-local-day-values { flex:1; min-width:0; gap:8px; }
+      #cq-local-usage .cq-local-day-values > div { display:flex; flex-wrap:wrap; align-items:baseline; gap:0 4px; }
       #cq-local-usage .cq-local-day-values strong { font-size:10.5px; line-height:15px; color:var(--cq-ink); font-weight:600; }
-      #cq-local-usage .cq-local-day-values > div:last-child strong { margin-left:auto; text-align:right; }
-      #cq-local-usage .cq-local-day-values > div > span { position:absolute; width:1px; height:1px; overflow:hidden; clip-path:inset(50%); }
+      #cq-local-usage .cq-local-day-values > div:last-child { justify-content:flex-end; text-align:right; }
+      #cq-local-usage .cq-local-day-values > div > span { order:-1; margin:0; font-size:9.5px; line-height:15px; }
       #cq-local-usage details { border-color:var(--cq-s6); }
       #cq-local-usage summary { min-height:0; padding:8px 12px; font-size:11.5px; line-height:17.25px; font-weight:400; }
       #cq-local-usage summary:hover { background:var(--cq-hover); }
@@ -2397,12 +2458,13 @@
       #cq-local-usage .cq-local-model { padding:3px 0 4px; font-size:10.5px; line-height:15px; }
       #cq-local-usage .cq-local-model-value { font-size:10.5px; }
       #cq-local-usage .cq-local-model-track i { opacity:.45; }
-      #cq-local-usage .cq-local-foot { display:flex; align-items:center; gap:6px; min-height:30px; padding:7px 12px 8px; border-top:1px solid var(--cq-s6); color:var(--cq-muted); }
-      #cq-local-usage .cq-local-foot button { min-height:14px; padding:0; font-size:9.5px; line-height:14px; color:var(--cq-muted); }
+      #cq-local-usage .cq-local-foot { display:flex; align-items:center; gap:8px; min-height:32px; padding:4px 12px; border-top:1px solid var(--cq-s6); color:var(--cq-muted); }
+      #cq-local-usage .cq-local-foot button { min-height:24px; padding:0; font-size:10.5px; line-height:15px; color:var(--cq-muted); }
       #cq-local-usage .cq-local-refresh { gap:4px; }
       #cq-local-usage .cq-local-refresh svg { width:10px; height:10px; }
       #cq-local-usage .cq-local-source-link { margin-left:auto; text-decoration:underline; text-underline-offset:2px; }
-      #cq-local-usage .cq-local-status:not([data-cq-quiet]):not(:empty) { max-height:none; margin:0; padding:6px 12px; border-top:1px solid var(--cq-warning-border); background:var(--cq-warning-bg); font-size:10.5px; }
+      #cq-local-usage .cq-local-status:not([data-cq-quiet]):not(:empty) { max-height:none; margin:0; padding:6px 12px; border-top:1px solid var(--cq-s6); font-size:10.5px; }
+      #cq-local-usage .cq-local-status[data-cq-warning]:not([data-cq-quiet]) { border-color:var(--cq-warning-border); background:var(--cq-warning-bg); }
       #cq-local-usage .cq-local-placeholder { padding:12px; font-size:10.5px; line-height:15px; }
       #cq-local-usage .cq-local-placeholder:has(.cq-local-skeleton) { padding:0; line-height:18px; }
       #cq-local-usage .cq-local-skeleton .cq-local-interval-range { margin:0; }
@@ -2418,23 +2480,24 @@
       #cq-local-usage .cq-local-skeleton-fold i { display:block; width:30%; height:17.25px; border-radius:4px; background:var(--cq-s4); }
       #cq-local-usage .cq-local-chart-skeleton .cq-local-chart-plot { border-radius:4px; background:var(--cq-s3); }
       #cq-local-usage .cq-interval-controls { margin:0; padding:7px 12px 9px; background:var(--cq-s3); border-bottom:1px solid var(--cq-s6); }
-      #cq-local-usage .cq-interval-endpoints { grid-template-columns:minmax(0,1fr); gap:6px; }
-      #cq-local-usage .cq-interval-endpoint { display:grid; grid-template-columns:24px minmax(0,1fr) 68px 20px; align-items:center; gap:4px; }
+      #cq-local-usage .cq-interval-endpoints { grid-template-columns:minmax(0,1fr); gap:8px; }
+      #cq-local-usage .cq-interval-endpoint { display:grid; grid-template-columns:28px minmax(0,1fr) 68px 30px; align-items:center; gap:4px; }
       #cq-local-usage .cq-interval-heading { display:contents; }
-      #cq-local-usage .cq-interval-heading label { grid-column:1; grid-row:1; color:var(--cq-muted); font-size:10.5px; }
-      #cq-local-usage .cq-interval-heading button { grid-column:4; grid-row:1; width:20px; height:24px; padding:3px; }
+      #cq-local-usage .cq-interval-heading label { grid-column:1; grid-row:1; color:var(--cq-muted); font-size:11.5px; }
+      #cq-local-usage .cq-interval-heading button { grid-column:4; grid-row:1; width:30px; height:30px; padding:6px; }
       #cq-local-usage .cq-interval-endpoint > input:not([name$=Time]) { grid-column:2; grid-row:1; }
       #cq-local-usage .cq-interval-endpoint > input[name$=Time] { grid-column:3; grid-row:1; }
       #cq-local-usage .cq-interval-controls :is(input,button) { border-radius:6px; }
-      #cq-local-usage .cq-interval-controls input[type=text] { height:25px; padding:0 6px; font-size:10.5px; }
-      #cq-local-usage .cq-interval-controls [name$=Time] { font-size:10.5px; }
+      #cq-local-usage .cq-interval-controls input[type=text] { height:30px; padding:0 6px; font-size:11.5px; }
       #cq-local-usage .cq-interval-presets { border-radius:8px; background:var(--cq-s4); }
       #cq-local-usage .cq-interval-preset-marker { border-radius:6px; }
       #cq-local-usage .cq-interval-fine > summary { padding:6px 0; font-size:10.5px; }
       #cq-local-usage .cq-interval-fine .cq-local-detail-body { padding:0; }
       #cq-local-usage .cq-interval-actions { font-size:10.5px; }
-      #cq-local-usage .cq-local-calendar { left:12px; right:12px; border-radius:8px; }
-      #cq-local-usage .cq-calendar-grid button { border-radius:4px; }
+      #cq-local-usage .cq-local-calendar { left:12px; right:12px; max-height:calc(var(--cq-available-height,100dvh) - 16px); overflow:auto; scrollbar-width:none; overscroll-behavior:contain; border-radius:8px; }
+      #cq-local-usage .cq-calendar-heading button { width:28px; height:28px; }
+      #cq-local-usage .cq-calendar-grid button { height:28px; font-size:11.5px; border-radius:4px; }
+      #cq-local-usage .cq-calendar-footer button { min-height:28px; }
       #cq-settings { font-size:10.5px; line-height:15px; }
       #cq-settings header { position:relative; }
       #cq-settings .cq-settings-body { overflow-y:auto; overflow-x:hidden; max-height:min(404px,calc(var(--cq-available-height,100dvh) - 42px)); overscroll-behavior:contain; scrollbar-width:none; }
@@ -2474,6 +2537,7 @@
       #codex-quota-trigger[data-cq-alert-visible] > :is(.cq-trigger-copy,.cq-trigger-graphics) { visibility: hidden; }
       #codex-quota-trigger[data-cq-alert-visible]:not([data-cq-collapsed])::after { visibility: hidden; }
       #codex-quota-trigger[data-cq-collapsed][data-cq-alert-visible] { color: var(--cq-alert-ink); }
+      #codex-quota-trigger[data-cq-collapsed][data-cq-alert="low"][data-cq-alert-visible]::after { content:"!"; display:grid; place-items:center; box-sizing:border-box; position:absolute; inset:3px 3px auto auto; width:12px; height:12px; margin:0; border:1px solid var(--cq-alert-border); border-radius:50%; background:var(--cq-alert-surface); color:var(--cq-alert-ink); font:700 9px/1 system-ui,sans-serif; text-align:center; pointer-events:none; z-index:2; }
       #codex-quota-trigger :is(.cq-inline-alert,.cq-inline-surface)[hidden] { display: none; }
       #cq-inline-announcement { position: fixed; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; pointer-events: none; }
       @media (forced-colors: active) { #codex-quota-trigger[data-cq-alert] { --cq-alert-ink: CanvasText; --cq-alert-label: CanvasText; --cq-alert-surface: Canvas; --cq-alert-border: Highlight; } }
@@ -3424,8 +3488,10 @@
     announcement.setAttribute("role", "status");
     announcement.setAttribute("aria-atomic", "true");
     document.body.append(announcement);
-    for (const event of ["pointerenter", "pointerleave", "focusin"]) trigger.addEventListener(event, updateInlineTimer);
-    trigger.addEventListener("focusout", () => queueMicrotask(updateInlineTimer));
+    const updateAlertInteraction = () => { syncRailAlertHint(trigger); updateInlineTimer(); };
+    for (const event of ["pointerenter", "pointerleave", "focusin"]) trigger.addEventListener(event, updateAlertInteraction);
+    trigger.addEventListener("focusout", () => queueMicrotask(updateAlertInteraction));
+    trigger.addEventListener("keydown", event => { if (event.key === "Escape") hideRefreshMessage(trigger); });
     const popup = document.createElement("div");
     popup.id = "codex-quota-popover";
     popup.popover = "auto";
@@ -3717,15 +3783,16 @@
     document.querySelectorAll('.cq-turn-usage').forEach(node => node.remove());
     scheduleTurnScan();
   };
-  const turnStyleProperties = ['fontFamily','fontSize','fontWeight','lineHeight','letterSpacing','color'];
+  const turnStyleProperties = ['fontFamily','fontSize','fontWeight','fontStyle','lineHeight','letterSpacing','fontVariantNumeric','fontFeatureSettings','fontVariationSettings','color'];
   const turnLabel = (button, item, native) => {
     let label = button.nextElementSibling;
     if (!label?.classList.contains('cq-turn-usage')) {
       label = document.createElement('span');
       label.className = 'cq-turn-usage';
-      label.style.marginLeft = '8px';
+      Object.assign(label.style,{display:'inline-flex',marginLeft:'8px',maxWidth:'100%'});
       button.after(label);
     }
+    if (label.style.verticalAlign !== native.verticalAlign) label.style.verticalAlign = native.verticalAlign;
     for (const property of turnStyleProperties) if (label.style[property] !== native[property]) label.style[property] = native[property];
     const text = item?.text || words('估算中', 'Estimating');
     if (label.textContent !== text) label.textContent = text;
@@ -3735,7 +3802,16 @@
   };
   const renderTurns = () => {
     const buttons = turnButtons();
-    const styles = buttons.map(button => {const native=getComputedStyle(button);return Object.fromEntries(turnStyleProperties.map(property=>[property,native[property]]));});
+    const styles = buttons.map(button => {
+      const walker = document.createTreeWalker(button, NodeFilter.SHOW_TEXT);
+      let text = walker.nextNode();
+      while (text && !text.data.trim()) text = walker.nextNode();
+      const control = getComputedStyle(button);
+      const native = text?.parentElement && text.parentElement !== button ? getComputedStyle(text.parentElement) : control;
+      const styles = Object.fromEntries(turnStyleProperties.map(property=>[property,native[property]]));
+      styles.verticalAlign = control.verticalAlign;
+      return styles;
+    });
     const live = new Set(buttons);
     document.querySelectorAll('.cq-turn-usage').forEach(label => {
       if (!live.has(label.previousElementSibling)) label.remove();

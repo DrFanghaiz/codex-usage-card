@@ -85,6 +85,7 @@ public static class NativeHelperRegressions
     private static FileSystemWatcher LastWatcher;
     private static bool ThrowLoginError = true, LoginAvailable;
     private static int TestPort;
+    private static bool TestUseFallback;
     private static string SessionScope = "test-session";
     private static string LoginFingerprint;
     private static int SessionGeneration;
@@ -239,7 +240,11 @@ __HTTP_METHODS__
     }
     private static Task<HashSet<int>> FindListeningPortsAsync(HashSet<int> ignored)
     {
-        return Task.FromResult(new HashSet<int> { TestPort });
+        return Task.FromResult(TestUseFallback ? new HashSet<int>() : new HashSet<int> { TestPort });
+    }
+    private static HashSet<int> FindUnreportedPorts(HashSet<int> ignored)
+    {
+        return TestUseFallback ? new HashSet<int> { TestPort } : new HashSet<int>();
     }
     private static bool TryLoadLoginConfiguration()
     {
@@ -391,6 +396,7 @@ __HTTP_METHODS__
         var release = new ManualResetEventSlim();
         listener.Start();
         TestPort = ((IPEndPoint)listener.LocalEndpoint).Port;
+        TestUseFallback = mode == "fallback";
         var server = Task.Run(() =>
         {
             using (var peer = listener.AcceptTcpClient())
@@ -398,7 +404,7 @@ __HTTP_METHODS__
                 if (mode != "headers")
                 {
                     var body = mode == "body" || mode == "drip" ? "[" :
-                        "[{\"type\":\"page\",\"title\":\"Task title changed\",\"url\":\"app://-/index.html\",\"webSocketDebuggerUrl\":\"ws://127.0.0.1/test\"}]";
+                        "[{\"type\":\"page\",\"title\":\"Task title changed\",\"url\":\"app://-/index.html\",\"webSocketDebuggerUrl\":\"ws://127.0.0.1:" + TestPort + "/test\"}]";
                     if (mode == "multiple") body = body.Substring(0, body.Length - 1) + "," + body.Substring(1).Replace("/test", "/second");
                     if (mode != "body" && mode != "drip") body = body.Substring(0, body.Length - 1) +
                         ",{\"type\":\"page\",\"title\":\"Codex\",\"url\":\"app://-/index.html?initialRoute=overlay\",\"webSocketDebuggerUrl\":\"ws://127.0.0.1/overlay\"}," +
@@ -423,12 +429,12 @@ __HTTP_METHODS__
             try
             {
                 var target = discovery.GetAwaiter().GetResult();
-                Check((mode == "success" || mode == "multiple") && target[0].Title == "Task title changed", mode + ": unexpected success");
+                Check((mode == "success" || mode == "multiple" || mode == "fallback") && target[0].Title == "Task title changed", mode + ": unexpected success");
                 Check(target.Count == (mode == "multiple" ? 2 : 1), "All Codex windows must be discovered");
             }
             catch (InvalidOperationException error)
             {
-                Check(mode != "success" && mode != "multiple" && error.Message == "Codex page target is unavailable", mode + ": wrong failure");
+                Check(mode != "success" && mode != "multiple" && mode != "fallback" && error.Message == "Codex page target is unavailable", mode + ": wrong failure");
                 Check(timer.ElapsedMilliseconds >= 2500 && timer.ElapsedMilliseconds < 6500, mode + ": wrong timeout");
             }
         }
@@ -438,6 +444,7 @@ __HTTP_METHODS__
             server.GetAwaiter().GetResult();
             listener.Stop();
             release.Dispose();
+            TestUseFallback = false;
         }
     }
 
@@ -694,6 +701,15 @@ __HTTP_METHODS__
         CheckSlowBody();
         CheckDiscovery("success");
         CheckDiscovery("multiple");
+        CheckDiscovery("fallback");
+        Check(IsLocalCdpWebSocket("ws://127.0.0.1:1234/devtools/page/test", 1234) &&
+            IsLocalCdpWebSocket("ws://[::1]:1234/devtools/page/test", 1234) &&
+            !IsLocalCdpWebSocket("ws://127.0.0.1:1235/devtools/page/test", 1234) &&
+            !IsLocalCdpWebSocket("ws://localhost:1234/devtools/page/test", 1234) &&
+            !IsLocalCdpWebSocket("ws://127.0.0.2:1234/devtools/page/test", 1234) &&
+            !IsLocalCdpWebSocket("ws://user@127.0.0.1:1234/devtools/page/test", 1234) &&
+            !IsLocalCdpWebSocket("wss://127.0.0.1:1234/devtools/page/test", 1234),
+            "Only the verified loopback endpoint may serve the page WebSocket");
         CheckDiscovery("headers");
         CheckDiscovery("body");
         CheckDiscovery("drip");
@@ -798,4 +814,4 @@ __PAGE_SESSIONS__
 $harness = $harness.Replace('__BACKOFF__', $backoff).Replace('__DISCOVERY__', $discovery).Replace('__WATCHER__', $watcher).Replace('__LOGIN_WAIT__', $loginWait).Replace('__CONFIG_ROOT__', $configRoot).Replace('__CONFIG_LOADERS__', $configLoaders).Replace('__LOGIN_SELECTOR__', $loginSelector).Replace('__PAYLOAD_METHODS__', $payloadMethods).Replace('__TARGET_EVENTS__', $targetEvents).Replace('__SHARED_PAYLOAD__', $sharedPayload).Replace('__PAGE_SESSIONS__', $pageSessions).Replace('__SEND_COMMAND__', $sendCommand).Replace('__PUBLISH_METHODS__', $publishMethods).Replace('__HTTP_METHODS__', $httpMethods).Replace('__NETWORK_METHODS__', $networkMethods)
 Add-Type -TypeDefinition $harness -ReferencedAssemblies System.dll, System.Core.dll, System.Security.dll, System.Web.Extensions.dll
 [NativeHelperRegressions]::Run()
-'Native helper regressions: 30 groups passed, 0 failed (bounded shared failure backoff, absolute deadlines, credential recovery, 429/503 server cooldown, watcher cleanup, login rename boundaries, CODEX_HOME isolation and directory events, official-only login and obsolete API markers, 5 discovery cases, HTTP errors, console requests, diagnosis sanitization, invalid diagnosis, new window events, shared fetch/cache/cooldown, account change race and in-flight invalidation, strict quota number/window types, page session scheduling, console history replay, request IDs, bootstrap and reply correlation, CDP deadline, HTTP whole-body deadlines)'
+'Native helper regressions: 30 groups passed, 0 failed (bounded shared failure backoff, absolute deadlines, credential recovery, 429/503 server cooldown, watcher cleanup, login rename boundaries, CODEX_HOME isolation and directory events, official-only login and obsolete API markers, 6 discovery cases and loopback WebSocket validation, HTTP errors, console requests, diagnosis sanitization, invalid diagnosis, new window events, shared fetch/cache/cooldown, account change race and in-flight invalidation, strict quota number/window types, page session scheduling, console history replay, request IDs, bootstrap and reply correlation, CDP deadline, HTTP whole-body deadlines)'

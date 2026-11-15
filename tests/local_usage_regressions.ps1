@@ -438,6 +438,31 @@ public static class LocalUsageRegressions
             bool rejected=false;try{LocalUsage.Read(recentRoot,"2026-09-01","2026-09-01",recentNow,pair[0],pair[1]);}catch(ArgumentException){rejected=true;}
             Check(rejected,"Malformed, incomplete, unzoned, reverse, equal or future intervals cannot fall back to fixed windows");
         }
+        var quotaRoot = Dir(root,"log-quota"); var quotaSessions = Dir(quotaRoot,"sessions");
+        var quotaFile = Path.Combine(quotaSessions,"official.jsonl");
+        var quotaCopy = Path.Combine(Dir(quotaRoot,"archived_sessions"),"copy.jsonl");
+        var quotaReset = DateTimeOffset.Parse(Stamp(2,59)).ToUnixTimeSeconds();
+        Func<int,object,string,string,string> quota = (minute,used,plan,bucket) => Json.Serialize(new {
+            type="event_msg", timestamp=Stamp(2,minute), payload=new { type="token_count", info=(object)null,
+                rate_limits=new { limit_id=bucket, plan_type=plan, secondary=new { used_percent=used, window_minutes=10080, resets_at=quotaReset } } }
+        })+"\n";
+        var earliest = quota(10,12.5,"pro","codex");
+        File.WriteAllText(quotaFile,Meta("openai")+earliest+quota(14,0,null,"codex")+quota(15,32,"api","codex")+
+            quota(16,32,"pro","other")+quota(17,"50","pro","codex")+quota(18,101,"pro","codex")+
+            quota(19,20,"pro","codex").Replace(quotaReset.ToString(CultureInfo.InvariantCulture),"1")+quota(30,34,"pro","codex"));
+        File.WriteAllText(quotaCopy,Meta("openai")+earliest);
+        File.WriteAllText(Path.Combine(quotaSessions,"third-party.jsonl"),Meta("proxy")+quota(20,88,"pro","codex"));
+        Func<int,Dictionary<string,object>> quotaInterval = end => (Dictionary<string,object>)LocalUsage.Read(quotaRoot,"2026-09-02","2026-09-02",recentNow.AddDays(1),Stamp(2,10),Stamp(2,end))["interval"];
+        var observed = (Dictionary<string,object>)quotaInterval(20)["logQuota"];
+        Check((string)observed["firstAt"]==Stamp(2,10).Replace("Z","+00:00") && (string)observed["lastAt"]==Stamp(2,14).Replace("Z","+00:00") && (double)observed["latestUsedPercent"]==0,"Only verified weekly log shapes and exact interval endpoints produce independent observations");
+        Check(Total((Dictionary<string,object>)quotaInterval(20)["local"])==0 && !quotaInterval(20).ContainsKey("account"),"Quota-only logs add neither consumption nor account data");
+        File.AppendAllText(quotaFile,quota(14,1,"pro","codex"));
+        Check(((Dictionary<string,object>)quotaInterval(20)["logQuota"])["latestUsedPercent"]==null,"Conflicting observations at the latest timestamp stay unknown after incremental append");
+        File.WriteAllText(quotaFile,Meta("openai")+earliest);
+        observed = (Dictionary<string,object>)quotaInterval(20)["logQuota"];
+        Check((string)observed["firstAt"]==(string)observed["lastAt"] && (double)observed["latestUsedPercent"]==12.5,"Rewritten files invalidate cached quota observations");
+        var outsideQuota = (Dictionary<string,object>)LocalUsage.Read(quotaRoot,"2026-09-02","2026-09-02",recentNow.AddDays(1),Stamp(2,11),Stamp(2,20))["interval"];
+        Check(!outsideQuota.ContainsKey("logQuota"),"No in-range log observation remains absent");
         var turnRoot=Dir(root,"turns"); var turnSessions=Dir(turnRoot,"sessions");
         var mainFile=Path.Combine(turnSessions,"main.jsonl");var childFile=Path.Combine(turnSessions,"child.jsonl");
         var mainMeta=Json.Serialize(new {type="session_meta",payload=new {model_provider="openai",id="main-thread",timestamp=Stamp(1,0)}})+"\n";
