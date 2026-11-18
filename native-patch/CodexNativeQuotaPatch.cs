@@ -22,7 +22,7 @@ internal static class CodexNativeQuotaPatch
     private static string NativeScript;
     private static int NextCommandId;
     private const int IoDeadlineMilliseconds = 15000;
-    private const string ProductVersion = "3.1.0";
+    private const string ProductVersion = "3.1.1";
     private static volatile string SessionScope = Guid.NewGuid().ToString("N");
     private static string LoginFingerprint;
     private static int SessionGeneration;

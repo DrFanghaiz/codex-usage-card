@@ -98,6 +98,15 @@
     control.then(done);
     return control;
   };
+  const slideSelection = (marker, index, animated) => {
+    const target = `translateX(${index * 100}%)`;
+    if (animated) {
+      move(marker, {transform:[getComputedStyle(marker).transform,target]}, {duration:.22,ease:[.2,.8,.2,1]}, () => {marker.style.transform=target;});
+    } else {
+      stopMotion(marker);
+      marker.style.transform=target;
+    }
+  };
   const finishMotion = () => {
     finishLocalLayout();
     finishPaneMotion();
@@ -317,6 +326,11 @@
       button.toggleAttribute("data-cq-update",unseen);
       button.title=words("插件设置","Plugin settings")+(unseen?words(" · 有新版本"," · Update available"):"");
       button.setAttribute("aria-label",button.title);
+    }
+    const version=document.querySelector("#cq-local-usage .cq-local-version");
+    if(version) {
+      version.textContent=releaseState ? `v${releaseState.currentVersion}` : words("版本","Version");
+      version.title=words("版本与维护","Version and maintenance");
     }
     if(link) {
       link.href=available?releaseBase+"tag/v"+releaseState.latestVersion:releaseBase+"latest";
@@ -720,10 +734,13 @@
     const reveal = panel => {
       const reference = panel.querySelector(".cq-local-reference"), body = panel.querySelector(".cq-settings-body");
       const back = panel.querySelector("header button");
-      if (referenceTarget && reference) reference.open = true;
+      const tab = referenceTarget === ".cq-doctor" || referenceTarget === ".cq-release-link" || !referenceTarget && hasNewRelease() &&
+        document.querySelector(".cq-settings-button[data-cq-update]") ? "tools" : referenceTarget ? "reference" : "alerts";
+      panel.cqShowSettings(tab);
+      if (tab === "reference" && referenceTarget === ":scope > summary" && reference) reference.open = true;
       animatePane(host, panel, true);
       syncReleaseUI();
-      const target = referenceTarget && reference?.querySelector(referenceTarget);
+      const target = referenceTarget && (referenceTarget === ":scope > summary" ? reference?.querySelector(referenceTarget) : panel.querySelector(referenceTarget));
       body.scrollTop = 0;
       if (target) body.scrollTop = target.getBoundingClientRect().top - body.getBoundingClientRect().top - 8;
       (target || back).focus({preventScroll: true});
@@ -736,11 +753,12 @@
       <div class="cq-tools"><button type="button" class="cq-doctor"></button><button type="button" class="cq-copy"></button><a class="cq-release-link" target="_blank" rel="noopener noreferrer" href="https://github.com/DrFanghaiz/codex-usage-card/releases/latest"><span></span><span></span></a></div>
       <p class="cq-settings-feedback" role="status"></p>
       <pre id="cq-diagnosis" role="status"></pre></form>`;
-    panel.querySelector("h2").textContent = words("插件设置", "Plugin settings");
+    panel.querySelector("h2").textContent = words("设置", "Settings");
     const back = panel.querySelector("header button");
     back.title = words("返回统计", "Back to statistics");
     back.setAttribute("aria-label", back.title);
     back.append(toolIcon("back", "cq-back-icon"));
+    panel.querySelector("header").prepend(back);
     const feedback = panel.querySelector(".cq-settings-feedback");
     if (!navigator.locks || !globalThis.__codexQuotaSessionScope) feedback.textContent = words("提醒等待兼容的 Helper 与浏览器连接。", "Alerts require a compatible helper and browser connection.");
     const save = () => {
@@ -839,10 +857,35 @@
       animatePane(host, panel, false);
       opener.focus({preventScroll: true});
     };
-    const reference=host.querySelector(".cq-local-reference");
-    if(reference){reference.hidden=false;panel.querySelector(".cq-options").after(reference);}
-    const body=document.createElement('div');body.className='cq-settings-body';
-    body.append(...[...panel.querySelector('form').children].filter(node=>node.tagName!=='HEADER'));panel.querySelector('form').append(body);
+    const form=panel.querySelector("form"), reference=host.querySelector(".cq-reference-pane");
+    const tabs=document.createElement("div"), body=document.createElement("div");
+    tabs.className="cq-settings-tabs";tabs.setAttribute("role","group");tabs.setAttribute("aria-label",words("设置分组","Settings sections"));
+    body.className="cq-settings-body";
+    const tools=document.createElement("section");
+    tools.append(panel.querySelector(".cq-tools"),panel.querySelector("pre"));
+    const choices=[
+      ["alerts",words("提醒","Alerts"),panel.querySelector(".cq-options")],
+      ["reference",words("参考","Reference"),reference],
+      ["tools",words("维护","Tools"),tools],
+    ];
+    const marker=document.createElement("i");marker.setAttribute("aria-hidden","true");tabs.append(marker);
+    panel.cqShowSettings=active=>{
+      for(const [key,,area] of choices)if(area)area.hidden=key!==active;
+      const index=choices.findIndex(([key])=>key===active);
+      slideSelection(marker,index,!panel.hidden);
+      for(const button of tabs.querySelectorAll("button"))button.setAttribute("aria-pressed",String(button.dataset.settings===active));
+      body.scrollTop=0;
+    };
+    for(const [key,label,area] of choices) {
+      if(!area)continue;
+      const button=document.createElement("button");button.type="button";button.dataset.settings=key;button.textContent=label;
+      button.onclick=()=>{
+        if(button.getAttribute("aria-pressed")==="true")return;
+        animateLocalLayout(panel,()=>panel.cqShowSettings(key));syncReleaseUI();
+      };
+      tabs.append(button);body.append(area);
+    }
+    body.append(feedback);form.append(tabs,body);
     installLocalDetails(panel);
     panel.hidden = true;
     popup.append(panel);
@@ -961,7 +1004,14 @@
     state.popup.scrollTop=state.scroll;
     positionPopover();
   };
-  const localBlocks = panel => [...panel.children].flatMap(node => node.matches(".cq-local-result") && !node.querySelector(".cq-local-page") ? [...node.children] : [node]);
+  const localBlocks = panel => [...(panel.id === "cq-settings" ? panel.querySelector("form") : panel).children]
+    .flatMap(node => node.matches(".cq-local-body,.cq-settings-body") ? [...node.children] : [node])
+    .flatMap(node => node.matches(".cq-local-result") ? [...node.children] : [node]);
+  const verticalClip = popup => {
+    const clip = getComputedStyle(popup).clipPath;
+    const edges = /^inset\(([^)]*?)(?: round|\))/.exec(clip)?.[1].split(" ").map(parseFloat);
+    return {top:edges?.[0] || 0,bottom:edges?.[2] ?? edges?.[0] ?? 0};
+  };
   const localDetailBodies = panel => {
     for (const details of panel.querySelectorAll("details")) {
       if (details.querySelector(":scope > .cq-local-detail-body")) continue;
@@ -976,44 +1026,63 @@
       return;
     }
     const popup = panel.parentElement;
-    const enabled = !panel.hidden && !paneMotion && !sharedPopover && popup?.matches(":popover-open") && !reducedMotion.matches && document.visibilityState === "visible";
-    const oldBox = popup.getBoundingClientRect(), clip = parseFloat(getComputedStyle(popup).clipPath.match(/^inset\(([-\d.]+)px/)?.[1] || 0);
+    const enabled = !panel.hidden && !paneMotion && popup?.matches(":popover-open") && !reducedMotion.matches && document.visibilityState === "visible";
+    if (!enabled) {finishLocalLayout();change();localDetailBodies(panel);positionPopover();return;}
+    const oldBox = popup.getBoundingClientRect(), clip = verticalClip(popup);
     const before = new Map(localBlocks(panel).filter(node=>node.getClientRects().length && !node.hasAttribute("data-cq-quiet"))
       .map(node => [node.tagName + node.className, node.getBoundingClientRect()]));
     const arrows = new Map([...panel.querySelectorAll(".cq-local-detail-arrow")].map(node => [node,getComputedStyle(node).transform]));
-    const bodies = [...panel.querySelectorAll("details[open] > .cq-local-detail-body"),...(localLayout?.ghosts || [])].map(visible => ({node:visible.cqSource || visible,box:visible.getBoundingClientRect(),copy:visible.cloneNode(true),opacity:getComputedStyle(visible).opacity,clipPath:getComputedStyle(visible).clipPath}));
+    const bodies = [...panel.querySelectorAll("details[open] > .cq-local-detail-body"),...(localLayout?.ghosts || [])]
+      .filter(body=>body.getClientRects().length)
+      .map(visible => {
+        const css=getComputedStyle(visible);
+        return {node:visible.cqSource || visible,box:visible.getBoundingClientRect(),copy:visible.cloneNode(true),opacity:css.opacity,clipPath:css.clipPath,padding:css.padding};
+      });
     finishLocalLayout();
     change();localDetailBodies(panel);positionPopover();
-    if (!enabled || !panel.isConnected) return;
+    if (!panel.isConnected) return;
     const end = popup.getBoundingClientRect(), targets = new Map(localBlocks(panel).map(node=>[node,node.getBoundingClientRect()]));
     const panelBox = panel.getBoundingClientRect(), css = getComputedStyle(popup);
-    const state = {popup,scroll:popup.scrollTop,animations:[],ghosts:[],styles:[[popup,["height","overflow"]],[panel,["position","left","top","width"]]]
+    const scale = end.width/parseFloat(css.width);
+    const oldTop = oldBox.top + clip.top*scale, oldBottom = oldBox.bottom - clip.bottom*scale;
+    const state = {popup,scroll:popup.scrollTop,animations:[],ghosts:[],styles:[[popup,["height","top","overflow"]],[panel,["position","left","top","width"]]]
       .map(([node,names])=>[node,names.map(name=>[name,node.style.getPropertyValue(name),node.style.getPropertyPriority(name)])])};
-    popup.style.height = Math.max(oldBox.height - clip,end.height) + "px";
-    popup.style.overflow = "clip";positionPopover();
-    const box = popup.getBoundingClientRect(), from = oldBox.top + clip - box.top, to = end.top - box.top;
-    Object.assign(panel.style,{position:"absolute",left:css.paddingLeft,top:(parseFloat(css.paddingTop)-state.scroll)+"px",width:panelBox.width+"px"});
+    const canvasTop=Math.min(oldTop,end.top), canvasBottom=Math.max(oldBottom,end.bottom);
+    popup.style.height = (canvasBottom-canvasTop)/scale + "px";
+    popup.style.top = canvasTop/scale + "px";
+    popup.style.overflow = "clip";
+    const box = popup.getBoundingClientRect(), from = (oldTop-box.top)/scale, to = (end.top-box.top)/scale;
+    Object.assign(panel.style,{position:"absolute",left:css.paddingLeft,top:(parseFloat(css.paddingTop)-state.scroll)+"px",width:panelBox.width/scale+"px"});
     localLayout = state;
     const run = (node,frames) => {
       const animation = node.animate(frames,{duration:220,easing:"cubic-bezier(.2,.8,.2,1)",fill:"both"});
       state.animations.push(animation);return animation;
     };
-    const clock = run(popup,{clipPath:[`inset(${Math.max(0,from)}px 0 0 round ${css.borderTopLeftRadius})`,`inset(${Math.max(0,to)}px 0 0 round ${css.borderTopLeftRadius})`]});
-    run(panel,{transform:[`translateY(${from}px)`,`translateY(${to}px)`]});
+    const inset = (top, bottom) => `inset(${Math.max(0,top)}px 0 ${Math.max(0,(box.bottom-bottom)/scale)}px 0 round ${css.borderTopLeftRadius})`;
+    const clock = run(popup,{clipPath:[inset(from,oldBottom),inset(to,end.bottom)]});
+    if (Math.abs(from-to)>.05)run(panel,{transform:[`translateY(${from}px)`,`translateY(${to}px)`]});
     for (const [node, target] of targets) {
       const old = before.get(node.tagName + node.className);
-      if (old) run(node,{transform:[`translateY(${old.top-target.top-oldBox.top-clip+end.top}px)`,"translateY(0px)"]});
+      if (old && target.height) {
+        const offset=(old.top-target.top-oldTop+end.top)/scale;
+        if (Math.abs(offset)>.05)run(node,{transform:[`translateY(${offset}px)`,"translateY(0px)"]});
+      }
       else if (target.height && !node.hasAttribute("data-cq-quiet")) run(node,{opacity:[.4,1],clipPath:["inset(0 0 100% 0)","inset(0)"]});
     }
-    for (const [arrow, transform] of arrows) if (arrow.isConnected) run(arrow,{transform:[transform,getComputedStyle(arrow).transform]});
-    for (const {node,box:bodyBox,copy,opacity,clipPath} of bodies) if (node.isConnected && !node.parentElement.open && !node.closest(".cq-local-page")?.inert) {
+    for (const [arrow, transform] of arrows) if (arrow.isConnected) {
+      const target=getComputedStyle(arrow).transform;
+      if (transform!==target)run(arrow,{transform:[transform,target]});
+    }
+    for (const {node,box:bodyBox,copy,opacity,clipPath,padding} of bodies) if (node.isConnected && !node.parentElement.open &&
+        !node.parentElement.parentElement.closest("details:not([open])") && !node.closest(".cq-local-page")?.inert) {
       copy.setAttribute("aria-hidden","true");copy.inert=true;copy.cqSource=node;
       copy.className=node.className+" "+node.parentElement.className;
-      Object.assign(copy.style,{position:"absolute",left:(bodyBox.left-panelBox.left)+"px",top:(bodyBox.top-oldBox.top-clip-parseFloat(css.paddingTop)+state.scroll)+"px",width:bodyBox.width+"px",pointerEvents:"none",margin:"0",padding:"0",border:"0"});
-      panel.append(copy);state.ghosts.push(copy);
+      const scroller=node.closest(".cq-local-body,.cq-settings-body") || panel, area=scroller.getBoundingClientRect();
+      Object.assign(copy.style,{position:"absolute",left:(bodyBox.left-area.left)/scale+"px",top:((bodyBox.top-area.top)/scale+scroller.scrollTop)+"px",width:bodyBox.width/scale+"px",pointerEvents:"none",margin:"0",padding,boxSizing:"border-box",border:"0"});
+      scroller.append(copy);state.ghosts.push(copy);
       run(copy,{opacity:[opacity,0],clipPath:[clipPath==="none"?"inset(0)":clipPath,"inset(0 0 100% 0)"]});
     }
-    for (const body of panel.querySelectorAll("details[open] > .cq-local-detail-body")) if (!body.closest(".cq-local-page")?.inert) {
+    for (const body of panel.querySelectorAll("details[open] > .cq-local-detail-body")) if (body.getClientRects().length && !body.closest(".cq-local-page")?.inert) {
       const prior = bodies.find(item=>item.node===body);
       if (!prior || Number(prior.opacity)<1 || prior.clipPath!=="none") run(body,{opacity:[prior?.opacity || .4,1],clipPath:[prior?.clipPath || "inset(0 0 100% 0)","inset(0)"]});
     }
@@ -1029,10 +1098,15 @@
     panel.addEventListener("toggle", () => {if (!paneMotion && !localLayout) positionPopover();},true);
     localDetailBodies(panel);
   };
-  const localBarSnapshots = root => [...root.querySelectorAll(".cq-local-day")].map(day=>{
-    const bar = day.querySelector('.cq-local-day-bar[aria-hidden="true"]') || day.querySelector(".cq-local-day-bar");
-    return {height:bar.getBoundingClientRect().height,opacity:Number(getComputedStyle(bar).opacity),copy:bar.cloneNode(true)};
-  });
+  const localBarSnapshots = root => {
+    const days=root.querySelectorAll(".cq-local-day");
+    if (!days.length) return [];
+    const scale=root.getBoundingClientRect().width/parseFloat(getComputedStyle(root).width) || 1;
+    return [...days].map(day=>{
+      const bar=day.querySelector('.cq-local-day-bar[aria-hidden="true"]') || day.querySelector(".cq-local-day-bar");
+      return {height:bar.getBoundingClientRect().height/scale,opacity:Number(getComputedStyle(bar).opacity),copy:bar.cloneNode(true)};
+    });
+  };
   const localShortStamp = value => {
     const date=new Date(value),day=localDate(date);
     return `${date.getFullYear()===new Date().getFullYear() ? day.slice(5) : day} ${String(date.getHours()).padStart(2,"0")}:${String(date.getMinutes()).padStart(2,"0")}`;
@@ -1040,10 +1114,8 @@
   const syncLocalPeriod = panel => {
     const selected=panel.querySelector('[data-period][aria-pressed="true"]'),marker=panel.querySelector('.cq-local-period-marker');
     if(!selected || !marker)return;
-    const from=getComputedStyle(marker).left;stopMotion(marker);
-    const index=[...panel.querySelectorAll('[data-period]')].indexOf(selected),target=`calc(2px + ${index} * ((100% - 4px) / var(--cq-period-count)))`;
-    marker.style.left=target;const to=getComputedStyle(marker).left;
-    if(from!==to)move(marker,{left:[from,to]},{duration:.24,ease:[.2,.8,.2,1]},()=>marker.style.left=target);
+    const index=[...panel.querySelectorAll('[data-period]')].indexOf(selected);
+    slideSelection(marker,index,Boolean(panel.closest(":popover-open")));
   };
   const showLocalPlaceholder = (panel, loading, errorCode) => {
     const result=panel.querySelector(".cq-local-result");result.replaceChildren();
@@ -1051,24 +1123,22 @@
     if(loading) {
       placeholder.setAttribute("aria-label",words("正在读取本机日志…","Reading local logs…"));
       const skeleton=document.createElement("div");skeleton.className="cq-local-skeleton";skeleton.setAttribute("aria-hidden","true");
-      skeleton.innerHTML='<section class="cq-local-recent"><p class="cq-local-interval-range"><i></i></p><div class="cq-local-recent-row"><div><span class="cq-local-metric-label">&nbsp;</span><strong>&nbsp;</strong></div><div><span class="cq-local-metric-label">&nbsp;</span><strong>&nbsp;</strong><small>&nbsp;</small></div></div></section><div class="cq-local-highlights"><div><span class="cq-local-metric-label">&nbsp;</span><strong><span class="cq-local-value-number">&nbsp;</span><span class="cq-local-value-unit">&nbsp;</span></strong></div><div><span class="cq-local-metric-label">&nbsp;</span><strong><span class="cq-local-value-number">&nbsp;</span><span class="cq-local-value-unit">&nbsp;</span></strong></div></div>';
-      if(panel.cqPeriod==="week") {
-        const chart=document.createElement("section");chart.className="cq-local-daily cq-local-chart-skeleton";
-        chart.innerHTML='<div class="cq-local-chart-heading">&nbsp;</div><div class="cq-local-chart-plot"></div><div class="cq-local-day-detail">&nbsp;</div>';skeleton.append(chart);
-      }
-      for(let i=0;i<2;i++){const fold=document.createElement("div");fold.className="cq-local-skeleton-fold";fold.innerHTML='<i></i>';skeleton.append(fold);}
+      const reading='<span class="cq-local-metric-label">&nbsp;</span><strong>&nbsp;</strong>';
+      skeleton.innerHTML=`<section class="cq-local-recent"><div class="cq-local-recent-row"><div class="cq-local-recent-local">${reading}</div><div class="cq-local-recent-account">${reading}</div></div></section>
+        <i class="cq-local-skeleton-meta"></i>
+        ${panel.cqPeriod==="week" ? '<i class="cq-local-skeleton-chart"></i>' : panel.cqPeriod!=="hour" ? '<i class="cq-local-skeleton-mix"></i>' : ""}`;
       placeholder.append(skeleton);
     } else {
       const label=document.createElement("p");label.textContent=words("本机用量暂不可用","Local usage unavailable");
       const reason=document.createElement("p");reason.className="cq-local-failure-reason";
       reason.textContent=errorCode==="TIMEOUT" ? words("读取超时，请重试或运行自检。","Reading timed out. Retry or run diagnosis.") : words("未能读取统计结果，请重试或运行自检。","Usage could not be read. Retry or run diagnosis.");
       const retry=document.createElement("button");retry.type="button";retry.textContent=words("重试","Retry");retry.onclick=()=>requestLocalUsage(panel);
-      const diagnosis=document.createElement("button");diagnosis.type="button";diagnosis.textContent=words("运行自检","Run diagnosis");diagnosis.onclick=()=>{openSettings(diagnosis);document.querySelector('#cq-settings .cq-doctor').click();};
+      const diagnosis=document.createElement("button");diagnosis.type="button";diagnosis.textContent=words("运行自检","Run diagnosis");diagnosis.onclick=()=>{openSettings(diagnosis,".cq-doctor");document.querySelector('#cq-settings .cq-doctor').click();};
       placeholder.append(label,reason,retry,diagnosis);
     }
     result.append(placeholder);
   };
-  const renderLocalComposition = (data,chart,addText) => {
+  const renderLocalComposition = (data,chart,addText,compact=false) => {
     chart.classList.add("cq-local-composition");
     if(!data.eventCount){addText("p","cq-local-day-note",data.partial?words("暂不可用","Unavailable"):words("无记录","No records"),chart);return;}
     const values=[["input",words("非缓存输入","Uncached input"),data.models.reduce((sum,row)=>sum+row.inputTokens-row.cachedInputTokens,0)],
@@ -1079,14 +1149,18 @@
     const list=addText("dl","cq-local-composition-values","",chart);
     for(const [kind,label,value] of values) {
       const segment=addText("i","","",track);segment.dataset.kind=kind;segment.style.flexGrow=String(value);segment.hidden=!value;segment.title=`${label} ${numberText(value)} token`;
-      const row=addText("div","","",list);row.dataset.compositionKind=kind;addText("dt","",label,row);addText("dd","",compactLocalTokens(value).text,row).title=segment.title;
-      row.setAttribute("aria-label",`${segment.title}${total ? ` · ${words("占总 token","of total tokens")} ${localPercent(value/total*100)}%` : ""}`);
+      const row=addText("div","","",list);row.dataset.compositionKind=kind;
+      const share=total ? value/total*100 : null;
+      const compactShare=share===null ? "—" : share>0 && share<1 ? "<1%" : share>99 && share<100 ? ">99%" : `${Math.round(share)}%`;
+      addText("dt","",compact && kind!=="output" ? kind==="input" ? words("非缓存","Uncached") : words("缓存","Cached") : label,row);
+      addText("dd","",compact ? compactShare : compactLocalTokens(value).text,row).title=segment.title;
+      row.setAttribute("aria-label",`${segment.title}${share!==null ? ` · ${words("占总 token","of total tokens")} ${localPercent(share)}%` : ""}`);
     }
   };
-  const renderLocalDaily = (data, result, addText, previousBars = []) => {
-    const weekly=result.closest('#cq-local-usage').cqPeriod==="week";
+  const renderLocalDaily = (data, group, addText, previousBars = []) => {
+    const weekly=group.closest('#cq-local-usage').cqPeriod==="week";
     if(data.start===data.end && !weekly)return;
-    const chart = addText("section", "cq-local-daily", "", result);
+    const chart = addText("section", "cq-local-daily", "", group);
     chart.setAttribute("aria-label", words("每日 token 用量", "Daily token usage"));
     const heading = addText("div", "cq-local-chart-heading", "", chart);
     addText("span", "cq-local-chart-title", words("每日", "Daily"), heading);
@@ -1103,6 +1177,7 @@
     const plot = addText("div", "cq-local-chart-plot", "", chart);
     plot.setAttribute("role","group");plot.setAttribute("aria-label",words("按日期选择用量", "Select a usage date"));
     const selection = addText("span", "cq-local-day-selection", "", plot);selection.setAttribute("aria-hidden","true");
+    plot.after(detail);
     const legend = addText("div", "cq-local-chart-legend", "", chart);
     for (const [kind,label] of [["input",words("非缓存", "Uncached")],["cache",words("缓存", "Cached")],["output",words("输出", "Output")]]) {
       const item = addText("span", "", label, legend);item.dataset.kind = kind;
@@ -1117,9 +1192,12 @@
       const button = plot.querySelector(`button[data-date="${selected}"]`);
       if(!button)return;
       const box = button.getBoundingClientRect(), area = plot.getBoundingClientRect();
+      const scale = area.width/parseFloat(getComputedStyle(plot).width);
+      if (!scale) return;
+      const width = Math.min(24,box.width/scale);
       const current = getComputedStyle(selection).transform;
-      stopMotion(selection);selection.style.width = Math.min(24,box.width)+"px";
-      const target = `translateX(${box.left-area.left+(box.width-Math.min(24,box.width))/2}px)`;
+      stopMotion(selection);selection.style.width = width+"px";
+      const target = `translateX(${(box.left-area.left+box.width/2)/scale-width/2}px)`;
       if (animated) move(selection,{transform:[current,target]},{duration:.2,ease:[.2,.8,.2,1]});else selection.style.transform=target;
     };
     const showDay = date => {
@@ -1203,7 +1281,8 @@
         };
       }
       // Measure only after every column exists, avoiding a layout flush per bar.
-      const heights=bars.map(({bar})=>bar.getBoundingClientRect().height);
+      const scale=plot.getBoundingClientRect().height/parseFloat(getComputedStyle(plot).height) || 1;
+      const heights=bars.map(({bar})=>bar.getBoundingClientRect().height/scale);
       bars.forEach(({bar,slot},index)=>{
         if (!heights[index]) return;
         bar.style.transform=`scaleY(${(oldBars[slot]?.height || 0)/heights[index]})`;bar.style.opacity=String(oldBars[slot]?.opacity ?? 1);
@@ -1228,10 +1307,11 @@
     next.onclick = () => {pageEnd=Math.min(last,pageEnd+count);renderPage();};
     chart.cqRenderPage=renderPage;
     chart.cqResize=()=>{
+      if(!group.getClientRects().length)return;
       const width=chart.getBoundingClientRect().width;
       if (!width || width===chartWidth) return;
-      const nextCount=chart.clientWidth-16>=168 ? 7 : 5;
-      if (nextCount!==count) {
+      const nextCount=weekly || chart.clientWidth-16>=168 ? 7 : 5;
+      if (!chartWidth || nextCount!==count) {
         const focusedDate=plot.contains(document.activeElement) ? document.activeElement.dataset.date : null;
         const selectedDay=localDayIndex(selected);
         if (selectedDay<pageEnd-nextCount+1) pageEnd=Math.min(last,selectedDay+nextCount-1);
@@ -1241,7 +1321,7 @@
       positionSelection(false);
     };
     heading.append(legend);chart.append(detail);
-    renderPage();
+    chart.cqResize();
   };
   const closeLocalUsage = () => {
     const popup = document.getElementById("codex-quota-popover");
@@ -1269,7 +1349,7 @@
   const requestLocalUsage = (panel, change = () => {}, saveReferencePlan = false) => {
     if(panel.cqPeriod!=="custom") {
       const end=new Date(),start=new Date(end);
-      if(panel.cqPeriod==="hour")start.setTime(end.getTime()-3600000);
+      if(panel.cqPeriod==="hour")start.setTime(end.getTime()-600000);
       else {
         start.setHours(0,0,0,0);
         if(panel.cqPeriod==="week")start.setDate(start.getDate()-(start.getDay()+6)%7);
@@ -1314,6 +1394,7 @@
     const data=reply?.interval?.local && {...reply.interval.local,reference:reply.reference,interval:reply.interval};
     const valid = reply && !reply.errorCode && reply.start===range?.start && reply.end===range?.end && data && data.start===range.start && data.end===range.end &&
       reply.interval.start===range.intervalStart && reply.interval.end===range.intervalEnd &&
+      releaseDate(reply.interval.start) && releaseDate(reply.interval.end) && Date.parse(reply.interval.start)<Date.parse(reply.interval.end) &&
       validLocalModels(data.models) &&
       Number.isSafeInteger(data.eventCount) && data.eventCount >= 0 && typeof data.partial === "boolean" &&
       validLocalIssues(data.issues) && validLocalDaily(data);
@@ -1329,13 +1410,15 @@
       });
       return;
     }
+    const foldStates = new Map([...result.querySelectorAll("details")].map(node=>[node.className,node.open]));
     const previousBars = localBarSnapshots(result);
     stopLocalMotions(result);
     result.dataset.loaded = "true";
+    result.dataset.today = panel.cqPeriod === "today" ? data.end : "";
     const settings=document.getElementById("cq-settings");
     animateLocalLayout(settings && !settings.hidden ? settings : panel, () => {
     panel.querySelector(".cq-local-estimate-tag").textContent="";
-    const reference=document.querySelector("#codex-quota-popover .cq-local-reference");
+    const reference=document.querySelector("#codex-quota-popover .cq-reference-pane");
     reference.querySelector(".cq-local-estimate-methods")?.remove();
     reference.querySelectorAll(".cq-local-excluded").forEach(node=>node.remove());
     {
@@ -1360,17 +1443,17 @@
         if(localApiBaselines.has(model)){row.dataset.dual="";const api=document.createElement('dd');api.textContent=moneyText(localApiBaselines.get(model));api.title=words('每周 API 等值参考','Weekly API-equivalent reference');row.append(api);}
         table.append(row);
       }
-      const select=weekly.querySelector("select");select.hidden=source.planName!=="pro";select.value=localReferencePlan;
-      const note=weekly.querySelector(".cq-local-reference-status");
+      const select=reference.querySelector("select");select.closest("label").hidden=source.planName!=="pro";select.value=localReferencePlan;
+      const note=reference.querySelector(".cq-local-reference-status");
       const referenceFailed=source.status==='stale' || Boolean(source.referenceCheckFailed);
       note.textContent=reply.referencePlanSaveError ? words("套餐保存失败，请重新选择", "Could not save tier. Choose it again.")
         :!validReference || source.status==="unavailable" ? words("参考数据暂不可用", "References unavailable") : "";
       note.toggleAttribute('data-cq-warning',Boolean(note.textContent));
-      const link=weekly.querySelector("a");link.href="https://modeldial.com/subscriptions?period=week&view=insights";
+      const link=reference.querySelector(".cq-modeldial-link");
       link.toggleAttribute("data-cq-warning",referenceFailed);
       const checked=releaseDate(source.lastSuccessAt) ? new Date(source.lastSuccessAt).toLocaleDateString() : "";
       const snapshot=source.status==="snapshot" && /^\d{4}-\d\d-\d\d$/.test(source.referenceSnapshotAt || "") ? source.referenceSnapshotAt : "";
-      link.textContent=["ModelDial",referenceFailed ? words("更新失败","Update failed") : "",
+      link.lastElementChild.textContent=[referenceFailed ? words("更新失败","Update failed") : "",
         checked ? words(`${referenceFailed ? "上次核对" : "已核对"} ${checked}`,`${referenceFailed ? "Last checked" : "Checked"} ${checked}`)
           : snapshot ? words(`参考快照 ${snapshot}`,`Snapshot ${snapshot}`) : ""].filter(Boolean).join(" · ");
       link.title=[releaseDate(source.lastSuccessAt) ? words(`上次成功 ${new Date(source.lastSuccessAt).toLocaleString()}`, `Last success ${new Date(source.lastSuccessAt).toLocaleString()}`) : "",referenceFailed && releaseDate(source.lastAttemptAt) ? words(`上次尝试 ${new Date(source.lastAttemptAt).toLocaleString()}`, `Last attempt ${new Date(source.lastAttemptAt).toLocaleString()}`) : "",releaseDate(source.nextCheckAt) ? words(`下次检查 ${new Date(source.nextCheckAt).toLocaleString()}`, `Next check ${new Date(source.nextCheckAt).toLocaleString()}`) : ""].filter(Boolean).join(" · ");
@@ -1386,148 +1469,117 @@
     const issues = data.issues || [];
     const addText = (tag, className, text, parent = result) => {const node = document.createElement(tag); node.className = className; node.textContent = text; parent.append(node); return node;};
     const recent = addText("section", "cq-local-recent", "");
-    recent.setAttribute("aria-label",words("区间周额度消耗", "Interval weekly consumption"));
+
+    recent.setAttribute("aria-label",words("区间额度摘要", "Interval quota summary"));
     const row = data.interval;
-    const historyErrors={HISTORY_WRITE_FAILED:words("历史保存失败", "History could not be saved"),HISTORY_READ_FAILED:words("历史暂不可读", "History could not be read"),HISTORY_CORRUPT:words("历史记录损坏", "History contains damaged records")};
-    const crossReset = row?.account?.crossReset === true;
-    const segments = row?.account?.segments;
-    let validSegments = true;
-    if (crossReset && (row.account.usedPercent !== null || Array.isArray(segments) && segments.length > 0)) {
-      validSegments = (row.account.status === 'partial' && row.account.usedPercent !== null || row.account.status === 'reset' && row.account.usedPercent === null && row.account.resetAdjusted === true) && row.account.fullWindow !== true && Array.isArray(segments) && segments.length > 0;
-      let previousEnd = Date.parse(row.start), sum = 0;
-      for (const segment of validSegments ? segments : []) {
-        const start = Date.parse(segment?.startAt), end = Date.parse(segment?.endAt);
-        if (!releaseDate(segment?.startAt) || !releaseDate(segment?.endAt) || start < previousEnd || start >= end || end > Date.parse(row.end) ||
-            !Number.isFinite(segment?.usedPercent) || segment.usedPercent < 0 || segment.usedPercent > 100) { validSegments = false; break; }
-        previousEnd = end; sum += segment.usedPercent;
-      }
-      validSegments = validSegments && Date.parse(segments[0].startAt) === Date.parse(row.account.sampledStartAt) &&
-        Date.parse(segments[segments.length-1].endAt) === Date.parse(row.account.sampledEndAt) &&
-        (row.account.usedPercent === null || Math.abs(sum - row.account.usedPercent) <= 1e-8 * Math.max(1, sum));
-    }
-    const validInterval = row && releaseDate(row.start) && releaseDate(row.end) && Date.parse(row.start)<Date.parse(row.end) &&
-      validLocalModels(row.local?.models) && Number.isSafeInteger(row.local.eventCount) && row.local.eventCount>=0 &&
-      typeof row.local.partial==="boolean" && row.account &&
-      ["ok","partial","insufficient_history","reset","counter_decreased","unavailable"].includes(row.account.status) &&
-      (row.account.hasGaps==null || typeof row.account.hasGaps==="boolean") &&
-      (row.account.crossReset==null || typeof row.account.crossReset==="boolean") &&
-      (row.account.resetAdjusted==null || typeof row.account.resetAdjusted==="boolean" && (!row.account.resetAdjusted || crossReset)) &&
-      (row.account.historyError==null || Object.hasOwn(historyErrors,row.account.historyError)) &&
-      (row.account.usedPercent===null || Number.isFinite(row.account.usedPercent) && row.account.usedPercent>=0 && (crossReset || row.account.usedPercent<=100)) && validSegments &&
-      (!["ok","partial"].includes(row.account.status) || row.account.usedPercent!==null && releaseDate(row.account.sampledStartAt) && releaseDate(row.account.sampledEndAt) &&
-        Date.parse(row.account.sampledStartAt)>=Date.parse(row.start) && Date.parse(row.account.sampledStartAt)<Date.parse(row.account.sampledEndAt) && Date.parse(row.account.sampledEndAt)<=Date.parse(row.end));
-    const intervalEstimate=validInterval ? estimate : null;
     let partialShown=false;
-    if (validInterval) {
-      const stamp=value=>new Date(value).toLocaleString(navigator.language,{year:"numeric",month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit",second:"2-digit",hour12:false});
-      const intervalStamp=(start,end)=>new Date(start).toDateString()===new Date(end).toDateString()
-        ? `${stamp(start)} — ${new Date(end).toLocaleTimeString(navigator.language,{hour:"2-digit",minute:"2-digit",second:"2-digit",hour12:false})}`
-        : `${stamp(start)} — ${stamp(end)}`;
-      const intervalLabel=addText("p","cq-local-interval-range","",recent);
-      const dateText=`${localShortStamp(row.start)} — ${localShortStamp(row.end)}`;
-      const editRange=addText("button","cq-range-dates","",intervalLabel);
-      editRange.type="button";
-      editRange.setAttribute("aria-label",words(`编辑查询时间：${dateText}`, `Edit time range: ${dateText}`));
-      editRange.setAttribute("aria-controls","cq-interval-controls");
-      editRange.setAttribute("aria-expanded",panel.querySelector('[data-period="custom"]').getAttribute("aria-expanded"));
-      editRange.append(toolIcon("calendar",""),document.createTextNode(dateText));
-      editRange.onclick=()=>panel.cqEditInterval({intervalStart:row.start,intervalEnd:row.end});
-      addText("i","cq-range-spinner","",intervalLabel).setAttribute("aria-hidden","true");
-      addText("span","cq-range-loading",words("正在读取","Reading"),intervalLabel);
-      intervalLabel.title=`${row.start} — ${row.end}`;
-      const foot=panel.querySelector('.cq-local-result-stamp');
-      const updated=new Date();foot.textContent=words(`更新于 ${updated.toLocaleTimeString(navigator.language,{hour:'2-digit',minute:'2-digit',hour12:false})}`,`Updated ${updated.toLocaleTimeString(navigator.language,{hour:'2-digit',minute:'2-digit',hour12:false})}`);
-      foot.title=`${intervalLabel.title} · ${updated.toLocaleString(navigator.language,{hour12:false})}`;
-      const values=addText("div","cq-local-recent-row","",recent);
-      const local=addText("div","cq-local-recent-local","",values);
-      addText("span","cq-local-metric-label",words("本机额度估算", "Local quota estimate"),local);
-      const percent=value=>`${value>0 && value<.01 ? "<0.01" : new Intl.NumberFormat(navigator.language,{minimumFractionDigits:1,maximumFractionDigits:2}).format(value)}%`;
-      const intervalValue=addText("strong","cq-local-primary-estimate","",local);
-      if(intervalEstimate.range) {
-        const [low,high]=intervalEstimate.range.map(localPercent);
-        addText("span","",`≈ ${low}${low===high ? "%" : "–"}`,intervalValue);
-        if(low!==high){intervalValue.append(document.createElement("wbr"));addText("span","",`${high}%`,intervalValue);}
-      } else intervalValue.textContent="—";
-      intervalValue.toggleAttribute("data-range",Boolean(intervalEstimate.range && intervalEstimate.range[0]!==intervalEstimate.range[1]));
-      if(!intervalEstimate.range) {
-        if(row.local.eventCount && data.reference?.status==="needs_plan") {
-          const choose=addText("button","cq-choose-reference",words("选择参考套餐","Choose reference tier"),local);choose.type="button";
-          choose.onclick=()=>openSettings(choose,"select");
-        } else {
-          partialShown=!row.local.eventCount && row.local.partial;
-          addText("small",partialShown ? "cq-local-partial" : "",row.local.eventCount ? words("无可比基准","No comparable reference")
-            : partialShown ? words("统计不完整","Incomplete") : words("无记录","No records"),local);
-        }
-      } else if(intervalEstimate.exemptOnly)addText("small","",words("自动审核不占周额度","Automatic review uses no weekly quota"),local);
-      else if(row.local.partial || intervalEstimate.partial) {
-        const count=row.local.models.length;
-        const note=intervalEstimate.covered<count
-          ? words(`${intervalEstimate.covered} / ${count} 个模型可估算`,`${intervalEstimate.covered} / ${count} models estimated`) +
-            (row.local.partial ? words(" · 日志不完整"," · Incomplete logs") : "")
-          : words("统计不完整","Incomplete");
-        addText("small","cq-local-partial",note,local);
-        partialShown=row.local.partial;
-      }
-      const account=addText("div","cq-local-recent-account","",values);
-      addText("span","cq-local-metric-label",crossReset ? words("账号已采样变化", "Sampled account change") : words("账号额度变化", "Account quota change"),account);
-      const actual=["ok","partial"].includes(row.account.status) && row.account.usedPercent!==null;
-      const measured=addText("strong","",actual ? `+${percent(row.account.usedPercent).replace("%","")}` : "—",account);
-      if(actual)addText("span","cq-account-unit",words("百分点","pp"),measured);
-      if(actual)measured.title=crossReset ? words("周额度已采样分段变化之和；未推算重置附近缺口，包含其他设备", "Sum of sampled weekly changes; reset gaps are not inferred and other devices are included") : words("官方周额度百分点变化，包含其他设备", "Official weekly percentage-point change, including other devices");
-      const states={insufficient_history:words("该区间采样不足", "Insufficient interval samples"),reset:crossReset ? row.account.resetAdjusted ? words("重置时间变化 · 无法累计", "Reset time changed · cannot combine") : words("跨周期采样不足", "Insufficient cross-cycle samples") : words("跨重置周期", "Reset crossed"),counter_decreased:words("额度已校正", "Counter corrected"),unavailable:historyErrors[row.account.historyError] || words("历史暂不可用", "History unavailable")};
-      if(!actual)addText("small",row.account.historyError ? "cq-history-feedback" : "",states[row.account.status],account);
-      else if(row.account.resetAdjusted || row.account.hasGaps || !crossReset && row.account.status==="partial") {
-        const notes=[row.account.resetAdjusted ? words("重置时间变化","Reset time changed") : "",
-          row.account.hasGaps ? words("采样有间断","Sampling gaps") : !crossReset && row.account.status==="partial" ? words("部分采样","Partial sampling") : ""];
-        addText("small",row.account.hasGaps ? "cq-history-gap" : "",notes.filter(Boolean).join(" · "),account);
-      }
-      if(actual || crossReset && row.account.status === "reset" && Array.isArray(segments) && segments.length > 0) {
-        const coverage=addText("div","cq-interval-coverage","",account);
-        const sampleStart=localShortStamp(row.account.sampledStartAt),sampleEnd=localShortStamp(row.account.sampledEndAt);
-        const sameDay=new Date(row.account.sampledStartAt).toDateString()===new Date(row.account.sampledEndAt).toDateString();
-        if(crossReset) {
-          const details=addText("details","cq-interval-segments","",coverage);
-          addText("summary","cq-interval-sampled-range",words(`跨周期 · ${segments.length} 段`,`Across cycles · ${segments.length} segments`),details);
-          for(const segment of segments) {
-            const line=addText("div","cq-interval-segment","",details);
-            addText("span","",intervalStamp(segment.startAt,segment.endAt),line);
-            addText("span","",`+${localPercent(segment.usedPercent)} ${words("百分点","pp")}`,line);
-          }
-        } else if(row.account.status==="partial" || row.account.hasGaps ||
-            Date.parse(row.account.sampledStartAt)!==Date.parse(row.start) || Date.parse(row.account.sampledEndAt)!==Date.parse(row.end)) {
-          const range=addText("span",row.account.status==="partial" ? "cq-interval-sampled-range" : "",words(`采样 ${sampleStart} → ${sameDay ? sampleEnd.split(' ').at(-1) : sampleEnd}`,`Samples ${sampleStart} → ${sameDay ? sampleEnd.split(' ').at(-1) : sampleEnd}`),coverage);
-          range.title=intervalStamp(row.account.sampledStartAt,row.account.sampledEndAt);
-        }
-        addText("span","",words("含其他设备","Includes other devices"),coverage);
-      }
-      if(row.account.historyError && row.account.status!=="unavailable")addText("small","cq-history-feedback",historyErrors[row.account.historyError],account);
-      if(releaseDate(row.account.coverageStartAt) && releaseDate(row.account.coverageEndAt))
-        account.title=words(`已有账号采样：${stamp(row.account.coverageStartAt)} — ${stamp(row.account.coverageEndAt)}`,`Available account samples: ${stamp(row.account.coverageStartAt)} — ${stamp(row.account.coverageEndAt)}`);
-      const observed = row.logQuota;
-      if (observed && releaseDate(observed.firstAt) && releaseDate(observed.lastAt) &&
-          Date.parse(row.start) <= Date.parse(observed.firstAt) && Date.parse(observed.firstAt) <= Date.parse(observed.lastAt) &&
-          Date.parse(observed.lastAt) <= Date.parse(row.end) &&
-          (observed.latestUsedPercent === null || Number.isFinite(observed.latestUsedPercent) && observed.latestUsedPercent >= 0 && observed.latestUsedPercent <= 100)) {
-        const logQuota = addText("div", "cq-local-log-quota", "", values);
-        addText("span", "cq-local-metric-label", words("日志周额度", "Weekly quota from logs"), logQuota);
-        const used = observed.latestUsedPercent;
-        addText("strong", "", used === null ? "—" : words(`已用 ${localPercent(used)}%`, `${localPercent(used)}% used`), logQuota);
-        const context=addText("div","cq-interval-coverage cq-log-context","",logQuota);
-        addText("span", "", used === null ? words("读数不一致 · 账号未核验", "Conflicting readings · account unverified") : words("账号未核验", "Account unverified"), context);
-        const first = localShortStamp(observed.firstAt), last = localShortStamp(observed.lastAt);
-        const exactTime = intervalStamp(observed.firstAt, observed.lastAt);
-        const span = Date.parse(observed.firstAt) === Date.parse(observed.lastAt) ? last : first === last ? exactTime : `${first} — ${last}`;
-        addText("span", "", words(`日志时间 ${span}`, `Log times ${span}`), context).title = exactTime;
-      }
-    } else addText("p","cq-local-page-note",words("区间读数暂不可用", "Interval readings unavailable"),recent);
-    const highlights = addText("div", "cq-local-highlights", "");
-    const tokenRow=addText("div","cq-local-total","",highlights);
-    addText("span","cq-local-metric-label",words("总 token","Total tokens"),tokenRow);
-    const totalValue=addText("strong","","",tokenRow), total=compactLocalTokens(totals.tokens);
-    addText("span","cq-local-value-number",total.number,totalValue);
-    if(total.unit)addText("span","cq-local-value-unit",total.unit,totalValue);
-    totalValue.title=`${numberText(totals.tokens)} token`;
-    if(!data.eventCount){totalValue.textContent=data.partial ? words("暂不可用","Unavailable") : words("无记录","No records");totalValue.title=totalValue.textContent;}
+    const stamp=value=>new Date(value).toLocaleString(navigator.language,{year:"numeric",month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit",second:"2-digit",hour12:false});
+    const intervalStamp=(start,end)=>new Date(start).toDateString()===new Date(end).toDateString()
+      ? `${stamp(start)} — ${new Date(end).toLocaleTimeString(navigator.language,{hour:"2-digit",minute:"2-digit",second:"2-digit",hour12:false})}`
+      : `${stamp(start)} — ${stamp(end)}`;
+    const intervalLabel=addText("p","cq-local-interval-range","",recent);
+    const startText=localShortStamp(row.start), endText=localShortStamp(row.end);
+    const dateText=data.start===data.end ? `${startText}–${endText.split(" ").at(-1)}` : `${startText} — ${endText}`;
+    const editRange=addText("button","cq-range-dates","",intervalLabel);
+    editRange.type="button";
+    editRange.setAttribute("aria-label",words(`编辑查询时间：${dateText}`, `Edit time range: ${dateText}`));
+    editRange.setAttribute("aria-controls","cq-interval-controls");
+    editRange.setAttribute("aria-expanded",panel.querySelector('[data-period="custom"]').getAttribute("aria-expanded"));
+    editRange.textContent={
+      hour:words("近 10 分钟 · 本机估算","Last 10 minutes · Estimate"),
+      today:words("今日 · 本机估算","Today · Estimate"),
+      week:words("本周 · 本机估算","This week · Estimate"),
+      custom:words("自选 · 本机估算","Custom · Estimate"),
+    }[panel.cqPeriod];
+    editRange.onclick=()=>panel.cqEditInterval({intervalStart:row.start,intervalEnd:row.end});
+    addText("i","cq-range-spinner","",intervalLabel).setAttribute("aria-hidden","true");
+    addText("span","cq-range-loading",words("正在读取","Reading"),intervalLabel);
+    intervalLabel.title=`${row.start} — ${row.end}`;
+    const foot=panel.querySelector('.cq-local-result-stamp');
+    const updated=new Date(), time=updated.toLocaleTimeString(navigator.language,{hour:"2-digit",minute:"2-digit",hour12:false});
+    foot.textContent=words(`${time} 更新`,`Updated ${time}`);
+    foot.title=`${intervalLabel.title} · ${updated.toLocaleString(navigator.language,{hour12:false})}`;
+    const values=addText("div","cq-local-recent-row","",recent);
+    const local=addText("div","cq-local-recent-local","",values);
+    local.append(intervalLabel);
+    const intervalValue=addText("strong","cq-local-primary-estimate","",local);
+    if(estimate.range) {
+      const [low,high]=estimate.range.map(localPercent);
+      addText("span","",`${low}${low===high ? "%" : "–"}`,intervalValue);
+      if(low!==high){intervalValue.append(document.createElement("wbr"));addText("span","",`${high}%`,intervalValue);}
+    } else {
+      intervalValue.textContent=!row.local.eventCount ? row.local.partial ? words("暂不可用","Unavailable") : words("无记录","No records") : "—";
+      intervalValue.toggleAttribute("data-unavailable",!row.local.eventCount);
+      partialShown=!row.local.eventCount && row.local.partial;
+    }
+    intervalValue.toggleAttribute("data-range",Boolean(estimate.range && estimate.range[0]!==estimate.range[1]));
+    if(!estimate.range) {
+      if(row.local.eventCount && data.reference?.status==="needs_plan") {
+        const choose=addText("button","cq-choose-reference",words("选择参考套餐","Choose reference tier"),local);choose.type="button";
+        choose.onclick=()=>openSettings(choose,"select");
+      } else if(row.local.eventCount) addText("small","",words("无可比基准","No comparable reference"),local);
+    } else if(estimate.exemptOnly)addText("small","",words("自动审核不占周额度","Automatic review uses no weekly quota"),local);
+    else if(row.local.partial || estimate.partial) {
+      const count=row.local.models.length;
+      const note=estimate.covered<count
+        ? words(`${estimate.covered} / ${count} 个模型可估算`,`${estimate.covered} / ${count} models estimated`) +
+          (row.local.partial ? words(" · 日志不完整"," · Incomplete logs") : "")
+        : words("统计不完整","Incomplete");
+      addText("small","cq-local-partial",note,local);
+      partialShown=row.local.partial;
+    }
+    const account = row.account, used = account?.usedPercent;
+    const sampledStart = Date.parse(account?.sampledStartAt), sampledEnd = Date.parse(account?.sampledEndAt);
+    let accountAvailable = ["ok","partial"].includes(account?.status) && Number.isFinite(used) && used >= 0 &&
+      releaseDate(account.sampledStartAt) && releaseDate(account.sampledEndAt) &&
+      sampledStart >= Date.parse(row.start) && sampledStart < sampledEnd && sampledEnd <= Date.parse(row.end);
+    if (accountAvailable && account.crossReset === true) {
+      const segments = account.segments;
+      let previousEnd = sampledStart, sum = 0;
+      accountAvailable = account.status === "partial" && account.fullWindow !== true && Array.isArray(segments) && segments.length > 0 &&
+        Date.parse(segments[0]?.startAt) === sampledStart && segments.every(segment => {
+          const start = Date.parse(segment?.startAt), end = Date.parse(segment?.endAt), amount = segment?.usedPercent;
+          if (!releaseDate(segment?.startAt) || !releaseDate(segment?.endAt) || start < previousEnd || start >= end || end > sampledEnd ||
+              !Number.isFinite(amount) || amount < 0 || amount > 100) return false;
+          previousEnd = end;
+          sum += amount;
+          return true;
+        }) && previousEnd === sampledEnd && Math.abs(sum - used) <= 1e-8 * Math.max(1, sum);
+    } else accountAvailable = accountAvailable && used <= 100;
+
+    const accountRow=addText("div","cq-local-recent-account","",values);
+    const accountLabel=addText("span","cq-local-metric-label",accountAvailable ? words("账号","Account") : "",accountRow);
+    accountLabel.hidden=!accountAvailable;
+    const measured=addText("strong","",accountAvailable ? `${used>0 ? "+" : ""}${localPercent(used)}` : "",accountRow);
+    if (accountAvailable) {
+      if (account.status==="partial" || account.hasGaps)addText("span","cq-account-partial",words("部分","Partial"),accountLabel);
+      addText("span","cq-account-unit",words("百分点","pp"),measured);
+      measured.title=words("账号采样变化，含其他设备","Account sample change, including other devices");
+      measured.dataset.cqMeasured="";
+      addText("span","cq-account-devices",words("含其他设备","Includes other devices"),accountRow);
+    } else {
+      const reason=account?.status==="insufficient_history" ? words("采样不足","Insufficient samples") : words("暂不可用","Unavailable");
+      measured.textContent=reason;
+      measured.title=reason;
+      measured.setAttribute("aria-label",reason);
+    }
+    let logQuota;
+    const observed = row.logQuota;
+    if (observed && releaseDate(observed.firstAt) && releaseDate(observed.lastAt) &&
+        Date.parse(row.start) <= Date.parse(observed.firstAt) && Date.parse(observed.firstAt) <= Date.parse(observed.lastAt) &&
+        Date.parse(observed.lastAt) <= Date.parse(row.end) &&
+        (observed.latestUsedPercent === null || Number.isFinite(observed.latestUsedPercent) && observed.latestUsedPercent >= 0 && observed.latestUsedPercent <= 100)) {
+      logQuota = addText("div", "cq-local-log-quota", "", recent);
+      addText("span", "cq-local-metric-label", words("日志记录", "Log observation"), logQuota);
+      const used = observed.latestUsedPercent;
+      addText("strong", "", used === null ? "—" : `${localPercent(used)}%`, logQuota);
+      const context=addText("div","cq-interval-coverage cq-log-context","",logQuota);
+      addText("span", "", used === null ? words("读数不一致 · 账号未核验", "Conflicting readings · account unverified") : words("账号未核验", "Account unverified"), context);
+      const first = localShortStamp(observed.firstAt), last = localShortStamp(observed.lastAt);
+      const exactTime = intervalStamp(observed.firstAt, observed.lastAt);
+      const span = Date.parse(observed.firstAt) === Date.parse(observed.lastAt) ? last : first === last ? exactTime : `${first} — ${last}`;
+      addText("span", "", span, context).title = exactTime;
+    }
     const methods=addText('details','cq-local-estimate-methods','');methods.hidden=!estimate.range;
     const methodsSummary=addText('summary','',words('估算明细','Estimate details'),methods);methodsSummary.append(toolIcon('back','cq-local-detail-arrow'));
     const methodValues=addText('dl','cq-local-method-values','',methods);
@@ -1536,57 +1588,71 @@
     }
     if(estimate.proxy)addText("p","cq-local-method-note",words("部分模型按 API 等值间接估算","Some models use API-equivalent estimates"),methods);
     if(estimate.exemptOnly)addText("p","cq-local-method-note",words("自动审核不占周额度","Automatic review uses no weekly quota"),methods);
-    const costRow = addText("div", "cq-local-cost", "", highlights);
-    addText("span", "cq-local-metric-label", unpriced || priced.some(item=>item.row.cacheWriteKnown===false) ? words("部分 API 等值", "Partial API equivalent") : words("API 等值", "API equivalent"), costRow);
-    const costValue = addText("strong", "", "", costRow);
-    if (priced.length && data.eventCount) {
-      addText("span", "cq-local-value-unit", "≈ ", costValue);
-      const amount = value => {
-        const part = addText("span", "cq-local-price-part", "", costValue);
-        part.toggleAttribute("data-long", moneyText(value).length > 7);
-        addText("span", "cq-local-value-unit", value > 0 && value < .01 ? "<$" : "$", part);
-        addText("span", "cq-local-value-number", new Intl.NumberFormat(navigator.language,{minimumFractionDigits:2,maximumFractionDigits:2}).format(value > 0 && value < .01 ? .01 : value), part);
-      };
-      amount(cost[0]);
-      if (cost[1] > cost[0]) {costValue.dataset.range = "";addText("span", "cq-local-value-unit", " – ", costValue);amount(cost[1]);}
-      costValue.title = `${moneyText(cost[0])}${cost[1] > cost[0] ? ` – ${moneyText(cost[1])}` : ""} USD`;
-    } else {costValue.textContent = words("未计价", "Not priced");costValue.dataset.unavailable = "";}
-    renderLocalDaily(data,result,addText,previousBars);
-    const usageDetails = addText("details", "cq-local-usage-details", "");
-    const usageSummary = addText("summary", "", "", usageDetails);
-    addText("span", "", words("消耗构成", "Usage composition"), usageSummary);
-    usageSummary.append(toolIcon("back", "cq-local-detail-arrow"));
-    const usageGroup = addText("div", "cq-local-usage-group", "", usageDetails);
-    renderLocalComposition(data,usageGroup,addText);
-    const cacheRate = totals.input ? totals.cache / totals.input * 100 : null;
-    const cache = addText("div", "cq-local-cache", "", usageGroup);
-    const cacheLabel = addText("div", "cq-local-cache-label", "", cache);
-    addText("span", "", words("缓存命中", "Cache hit rate"), cacheLabel);
-    addText("span", "", cacheRate === null ? "—" : `${new Intl.NumberFormat(navigator.language,{maximumFractionDigits:1}).format(cacheRate)}%`, cacheLabel);
-    const track = addText("div", "cq-local-cache-track", "", cache);
-    track.setAttribute("role", cacheRate === null ? "img" : "meter");track.setAttribute("aria-label", words("输入 token 缓存命中率", "Input token cache hit rate"));
-    const cacheDetail=words(`缓存输入 ${numberText(totals.cache)} token；非缓存输入 ${numberText(totals.input-totals.cache)} token`, `Cached input ${numberText(totals.cache)} tokens; uncached input ${numberText(totals.input-totals.cache)} tokens`);
-    track.title=cacheDetail;track.setAttribute("aria-valuetext",cacheDetail);
-    if (cacheRate !== null) {track.setAttribute("aria-valuemin","0");track.setAttribute("aria-valuemax","100");track.setAttribute("aria-valuenow",String(cacheRate));}
-    else track.setAttribute("aria-label", words("缓存命中率暂不可用，无输入记录", "Cache hit rate unavailable; no input records"));
-    const cacheFill = addText("i", "", "", track);cacheFill.style.width = (cacheRate || 0) + "%";cacheFill.hidden = !cacheRate;
-    const breakdown = addText("details", "cq-local-models", "");
-    const modelSummary = addText("summary", "", "", breakdown);
-    addText("span", "", words("按模型查看", "Usage by model"), modelSummary);
-    modelSummary.append(toolIcon("back", "cq-local-detail-arrow"));
-    for (const row of [...data.models].sort((a,b)=>b.totalTokens-a.totalTokens || a.model.localeCompare(b.model))) {
-      const line = addText("div", "cq-local-model", "", breakdown);
-      const name=row.model === "unknown" ? words("未知模型", "Unknown model") : row.model.replace(/^gpt-/, "GPT-");
-      addText("span", "cq-local-model-name", name, line).title=name;
-      const amount=addText("strong", "cq-local-model-value", compactLocalTokens(row.totalTokens).text, line);
-      amount.title=`${numberText(row.totalTokens)} token`;amount.setAttribute("aria-label",amount.title);
-      const share=totals.tokens ? row.totalTokens/totals.tokens*100 : null;
-      const meter=addText("div", "cq-local-model-track", "", line);
-      meter.setAttribute("role",share === null ? "img" : "meter");
-      meter.setAttribute("aria-label",`${name} · ${words("占本机区间 token", "Share of local range tokens")}`);
-      if(share!==null){meter.setAttribute("aria-valuemin","0");meter.setAttribute("aria-valuemax","100");meter.setAttribute("aria-valuenow",String(share));}
-      const fill=addText("i", "", "", meter);fill.hidden=!share;fill.style.width=(share || 0)+"%";
-      meter.title=share===null ? words("无已知占比", "Share unavailable") : words(`占本机 token ${localPercent(share)}%`, `${localPercent(share)}% of local tokens`);
+    if (data.eventCount) {
+      const usageDetails = addText("details", "cq-local-usage-details", "", result);
+      usageDetails.open=foldStates.get("cq-local-usage-details") ?? false;
+      const highlights = addText("summary", "cq-local-highlights", "", usageDetails);
+      highlights.title=words("查看用量明细","View usage details");
+      const tokenRow=addText("div","cq-local-total","",highlights);
+      addText("span","cq-local-metric-label",words("总 token","Total tokens"),tokenRow);
+      const totalValue=addText("strong","","",tokenRow), total=compactLocalTokens(totals.tokens);
+      addText("span","cq-local-value-number",total.number,totalValue);
+      if(total.unit)addText("span","cq-local-value-unit",total.unit,totalValue);
+      totalValue.title=`${numberText(totals.tokens)} token`;
+      const costRow = addText("div", "cq-local-cost", "", highlights);
+      const partialCost=unpriced || priced.some(item=>item.row.cacheWriteKnown===false);
+      addText("span", "cq-local-metric-label", partialCost ? words("部分 API 等值", "Partial API equivalent") : words("API 等值", "API equivalent"), costRow);
+      const costValue = addText("strong", "", "", costRow);
+      if (priced.length) {
+        addText("span", "cq-local-value-unit", "≈ ", costValue);
+        const amount = value => {
+          const part = addText("span", "cq-local-price-part", "", costValue);
+          addText("span", "cq-local-value-unit", value > 0 && value < .01 ? "<$" : "$", part);
+          addText("span", "cq-local-value-number", new Intl.NumberFormat(navigator.language,{minimumFractionDigits:2,maximumFractionDigits:2}).format(value > 0 && value < .01 ? .01 : value), part);
+        };
+        amount(cost[0]);
+        if (cost[1] > cost[0]) {costValue.dataset.range = "";addText("span", "cq-local-value-unit", " – ", costValue);amount(cost[1]);}
+        costValue.title = `${moneyText(cost[0])}${cost[1] > cost[0] ? ` – ${moneyText(cost[1])}` : ""} USD`;
+        if(partialCost)addText("span","cq-local-value-unit",words("（部分）"," (partial)"),costRow).setAttribute("aria-hidden","true");
+      } else {costValue.textContent = words("未计价", "Not priced");costValue.dataset.unavailable = "";}
+      const hasDaily=panel.cqPeriod==="week" || panel.cqPeriod==="custom" && data.start!==data.end;
+      const usageGroup = addText("div", "cq-local-usage-group", "", usageDetails);
+      renderLocalComposition(data,usageGroup,addText);
+      if(!hasDaily && panel.cqPeriod!=="hour" && totals.tokens>0)
+        renderLocalComposition(data,addText("section","cq-local-mix","",result),addText,true);
+      if(hasDaily)renderLocalDaily(data,result,addText,previousBars);
+      if(logQuota)usageDetails.append(logQuota);
+      const cacheRate = totals.input ? totals.cache / totals.input * 100 : null;
+      const cache = addText("div", "cq-local-cache", "", usageGroup);
+      const cacheLabel = addText("div", "cq-local-cache-label", "", cache);
+      addText("span", "", words("缓存命中", "Cache hit rate"), cacheLabel);
+      addText("span", "", cacheRate === null ? "—" : `${new Intl.NumberFormat(navigator.language,{maximumFractionDigits:1}).format(cacheRate)}%`, cacheLabel);
+      const track = addText("div", "cq-local-cache-track", "", cache);
+      track.setAttribute("role", cacheRate === null ? "img" : "meter");track.setAttribute("aria-label", words("输入 token 缓存命中率", "Input token cache hit rate"));
+      const cacheDetail=words(`缓存输入 ${numberText(totals.cache)} token；非缓存输入 ${numberText(totals.input-totals.cache)} token`, `Cached input ${numberText(totals.cache)} tokens; uncached input ${numberText(totals.input-totals.cache)} tokens`);
+      track.title=cacheDetail;track.setAttribute("aria-valuetext",cacheDetail);
+      if (cacheRate !== null) {track.setAttribute("aria-valuemin","0");track.setAttribute("aria-valuemax","100");track.setAttribute("aria-valuenow",String(cacheRate));}
+      else track.setAttribute("aria-label", words("缓存命中率暂不可用，无输入记录", "Cache hit rate unavailable; no input records"));
+      const cacheFill = addText("i", "", "", track);cacheFill.style.width = (cacheRate || 0) + "%";cacheFill.hidden = !cacheRate;
+      const breakdown = addText("details", "cq-local-models", "", usageDetails);
+      breakdown.open=foldStates.get("cq-local-models") ?? false;
+      const modelSummary = addText("summary", "", "", breakdown);
+      addText("span", "", words("按模型查看", "Usage by model"), modelSummary);
+      modelSummary.append(toolIcon("back", "cq-local-detail-arrow"));
+      for (const row of [...data.models].sort((a,b)=>b.totalTokens-a.totalTokens || a.model.localeCompare(b.model))) {
+        const line = addText("div", "cq-local-model", "", breakdown);
+        const name=row.model === "unknown" ? words("未知模型", "Unknown model") : row.model.replace(/^gpt-/, "GPT-");
+        addText("span", "cq-local-model-name", name, line).title=name;
+        const amount=addText("strong", "cq-local-model-value", compactLocalTokens(row.totalTokens).text, line);
+        amount.title=`${numberText(row.totalTokens)} token`;amount.setAttribute("aria-label",amount.title);
+        const share=totals.tokens ? row.totalTokens/totals.tokens*100 : null;
+        const meter=addText("div", "cq-local-model-track", "", line);
+        meter.setAttribute("role",share === null ? "img" : "meter");
+        meter.setAttribute("aria-label",`${name} · ${words("占本机区间 token", "Share of local range tokens")}`);
+        if(share!==null){meter.setAttribute("aria-valuemin","0");meter.setAttribute("aria-valuemax","100");meter.setAttribute("aria-valuenow",String(share));}
+        const fill=addText("i", "", "", meter);fill.hidden=!share;fill.style.width=(share || 0)+"%";
+        meter.title=share===null ? words("无已知占比", "Share unavailable") : words(`占本机 token ${localPercent(share)}%`, `${localPercent(share)}% of local tokens`);
+      }
     }
     // Reference coverage never changes which recorded tokens are counted.
     if(excluded && localUsageBaselines.size) addText("p","cq-local-excluded",words(`${compactLocalTokens(excluded).text} token 无周参考`,`${compactLocalTokens(excluded).text} tokens without weekly references`),reference.querySelector(".cq-local-weekly-reference"));
@@ -1598,16 +1664,16 @@
     status.toggleAttribute("data-cq-quiet", partialShown || !data.partial);
     status.removeAttribute("data-cq-warning");
     if (issues.length) {
-      const details = addText("details", "cq-local-issues", "");
+      const details = addText("details", "cq-local-issues", "", result);
       const summary = addText("summary", "", words("统计说明", "Coverage details"), details);
       summary.append(toolIcon("back", "cq-local-detail-arrow"));
       for (const issue of issues) addText("p", "", `${localIssueLabels[issue.code]}: ${numberText(issue.count)}${issue.missingTokens ? ` · ${numberText(issue.missingTokens)} token` : ""}${issue.dateUnknown ? words("（日期未知）", " (date unknown)") : ""}`, details);
     }
-    reference.querySelector(".cq-local-reference-plan").after(methods);
+    reference.querySelector(".cq-local-weekly-reference").after(methods);
     });
   };
   const installLocalCalendar = panel => {
-    let form=panel.querySelector("form");const popup=panel.parentElement;
+    let form=panel.querySelector("form");
     const calendar=document.createElement("div");calendar.className="cq-local-calendar";calendar.hidden=true;
     calendar.setAttribute("role","dialog");calendar.setAttribute("aria-labelledby","cq-calendar-title");
     calendar.innerHTML='<div class="cq-calendar-heading"><button type="button" data-month="-1"></button><strong id="cq-calendar-title" aria-live="polite"></strong><button type="button" data-month="1"></button></div><div class="cq-calendar-grid" role="grid" aria-labelledby="cq-calendar-title"></div><div class="cq-calendar-footer"><button type="button" data-today></button><button type="button" data-close></button></div>';
@@ -1618,17 +1684,11 @@
     const monthShift=(index,delta)=>{const date=new Date(index*86400000);return Date.UTC(date.getUTCFullYear(),date.getUTCMonth()+delta,1)/86400000;};
     const close = (focus=true) => {
       if(calendar.hidden)return;
-      calendar.hidden=true;stopLocalMotions(calendar);
+      animateLocalLayout(panel,()=>{calendar.hidden=true;});
       for(const button of form.querySelectorAll("[data-date-field]"))button.setAttribute("aria-expanded","false");
       if(focus)active?.focus({preventScroll:true});
     };
     panel.cqCloseCalendar=close;
-    panel.cqPositionCalendar=()=>{
-      if(calendar.hidden)return;
-      const field=(active.closest('.cq-interval-endpoint') ? active : active.closest("label")).getBoundingClientRect(),area=form.getBoundingClientRect(),box=popup.getBoundingClientRect();
-      const top=Math.max(box.top+8,Math.min(field.bottom+4,box.bottom-32-calendar.offsetHeight));
-      calendar.style.top=(top-area.top)+"px";
-    };
     const select=index=>{
       active.value=localDayKey(index);active.dispatchEvent(new Event("input",{bubbles:true}));active.dispatchEvent(new Event("change",{bubbles:true}));close();
     };
@@ -1668,7 +1728,6 @@
           line.append(button);
         }
       }
-      panel.cqPositionCalendar();
       if(focus)grid.querySelector(`button[data-date="${localDayKey(focusDay)}"]`)?.focus({preventScroll:true});
     };
     for(const button of calendar.querySelectorAll("[data-month]")){
@@ -1686,10 +1745,13 @@
       const open=()=>{
         const input=button.closest('form').elements[button.dataset.dateField];
         if(!calendar.hidden && active===input){close();return;}
-        close(false);form=input.form;form.append(calendar);active=input;const [min,max]=bounds(), value=localDayIndex(input.value);
+        form=input.form;active=input;const [min,max]=bounds(), value=localDayIndex(input.value);
         focusDay=Math.max(min,Math.min(max,Number.isFinite(value)?value:max));month=monthStart(focusDay);
-        calendar.hidden=false;button.setAttribute("aria-expanded","true");draw(true);
-        move(calendar,{opacity:[.6,1]},{duration:.12},()=>calendar.style.removeProperty("opacity"));
+        animateLocalLayout(panel,()=>{
+          for(const other of form.querySelectorAll("[data-date-field]"))other.setAttribute("aria-expanded","false");
+          input.closest(".cq-interval-endpoint").after(calendar);calendar.hidden=false;button.setAttribute("aria-expanded","true");draw(true);
+        });
+        calendar.scrollIntoView({block:"nearest",behavior:"instant"});
       };
       button.onclick=open;
       button.closest('form').elements[button.dataset.dateField].onkeydown=event=>{if(event.key==='ArrowDown'){event.preventDefault();open();}};
@@ -1721,20 +1783,12 @@
     const presets=form.querySelector('.cq-interval-presets'), marker=document.createElement('span');
     marker.className='cq-interval-preset-marker';marker.hidden=true;marker.setAttribute('aria-hidden','true');presets.append(marker);
     presets.setAttribute('aria-label',words('快捷时长','Quick duration'));
-    let selectedPreset=-1, markerTarget='';
-    const positionPreset=(animated=false)=>{
-      const target=presets.querySelector('[aria-pressed="true"]');
-      if(!target || !presets.getClientRects().length){stopMotion(marker);marker.hidden=true;return;}
-      const area=presets.getBoundingClientRect(),box=target.getBoundingClientRect(),scale=area.width/presets.offsetWidth;
-      const width=box.width/scale+'px',transform=`translateX(${(box.left-area.left)/scale}px)`;
-      if(!marker.hidden && marker.style.width===width && markerTarget===transform)return;
-      const current=getComputedStyle(marker).transform, shown=!marker.hidden;stopMotion(marker);marker.hidden=false;marker.style.width=width;markerTarget=transform;
-      if(animated && shown)move(marker,{transform:[current,transform]},{duration:.2,ease:[.2,.8,.2,1]});else marker.style.transform=transform;
-    };
-    form.cqPositionPresets=()=>positionPreset();
-    const presetButtons=[5,10,30,60].map((minutes,index)=>{
-      const button=document.createElement('button');button.type='button';button.dataset.intervalMinutes=String(minutes);button.textContent=minutes===60?'1h':minutes+'min';
-      button.setAttribute('aria-pressed','false');button.setAttribute('aria-label',minutes===60?words('最近一小时','Last hour'):words(`最近 ${minutes} 分钟`,`Last ${minutes} minutes`));
+    let selectedPreset=-1;
+    const durations=[30,60,180,300];
+    const presetButtons=durations.map((minutes,index)=>{
+      const button=document.createElement('button');button.type='button';button.dataset.intervalMinutes=String(minutes);
+      button.textContent=minutes===30 ? words("30分","30 min") : words(`${minutes/60}小时`,`${minutes/60} hr`);
+      button.setAttribute('aria-pressed','false');button.setAttribute('aria-label',words(`最近 ${minutes} 分钟`,`Last ${minutes} minutes`));
       button.onclick=()=>{panel.cqCloseCalendar?.(false);const end=new Date(Math.floor(Date.now()/1000)*1000);set(0,new Date(end.getTime()-minutes*60000));set(1,end);sync();};
       button.onkeydown=event=>{let next=index;if(event.key==='ArrowLeft')next=Math.max(0,index-1);else if(event.key==='ArrowRight')next=Math.min(3,index+1);else if(event.key==='Home')next=0;else if(event.key==='End')next=3;else return;event.preventDefault();presetButtons[next].focus({preventScroll:true});presetButtons[next].click();};
       presets.append(button);return button;
@@ -1755,8 +1809,15 @@
       sliders.forEach((slider,index)=>slider.setAttribute("aria-valuetext",format(new Date(values[index]*1000))));
       const seconds=values[1]-values[0];
       form.querySelector("output").textContent=new Intl.NumberFormat(navigator.language,{maximumFractionDigits:2}).format(seconds>=3600 ? seconds/3600 : seconds/60)+ (seconds>=3600 ? words(" 小时", " h") : words(" 分钟", " min"));
-      const next=[300,600,1800,3600].indexOf(seconds);
-      if(next!==selectedPreset){selectedPreset=next;presetButtons.forEach((button,index)=>button.setAttribute('aria-pressed',String(index===next)));positionPreset(true);}
+      const next=durations.indexOf(seconds/60);
+      if(next!==selectedPreset){
+        const animate=!marker.hidden;
+        selectedPreset=next;
+        presetButtons.forEach((button,index)=>button.setAttribute('aria-pressed',String(index===next)));
+        marker.hidden=next<0;
+        if(marker.hidden)stopMotion(marker);
+        else slideSelection(marker,next,animate);
+      }
     };
     const sync=(dates=read())=>{
       if(!dates)return;
@@ -1796,19 +1857,21 @@
       <div class="cq-local-periods" role="group"><span class="cq-local-period-marker" aria-hidden="true"></span><button type="button" data-period="hour"></button><button type="button" data-period="today"></button><button type="button" data-period="week"></button><button type="button" data-period="custom" aria-controls="cq-interval-controls" aria-expanded="false"></button></div>
       <form id="cq-interval-controls" class="cq-interval-controls" hidden><div class="cq-interval-endpoints"><div class="cq-interval-endpoint"><div class="cq-interval-heading"><label for="cq-interval-start-date"></label><button type="button" data-date-field="intervalStart"></button></div><input id="cq-interval-start-date" name="intervalStart" type="text" placeholder="YYYY-MM-DD" autocomplete="off" inputmode="numeric" required><input name="intervalStartTime" type="text" placeholder="HH:mm:ss" autocomplete="off" inputmode="numeric" required><input type="range" name="fromSlider" step="1"></div><div class="cq-interval-endpoint"><div class="cq-interval-heading"><label for="cq-interval-end-date"></label><button type="button" data-date-field="intervalEnd"></button></div><input id="cq-interval-end-date" name="intervalEnd" type="text" placeholder="YYYY-MM-DD" autocomplete="off" inputmode="numeric" required><input name="intervalEndTime" type="text" placeholder="HH:mm:ss" autocomplete="off" inputmode="numeric" required><input type="range" name="toSlider" step="1"></div></div><div class="cq-interval-presets" role="group"></div><div class="cq-interval-actions"><output></output><button type="submit"></button></div></form>
       <div class="cq-local-result" role="region" aria-busy="false"></div><p class="cq-local-status" role="status"></p>
-      <footer class="cq-local-foot"><button type="button" class="cq-local-refresh"><span class="cq-local-result-stamp"></span></button><button type="button" class="cq-local-source-link"></button></footer>
-      <details class="cq-local-reference" hidden><summary></summary><p></p></details>`;
+      <footer class="cq-local-foot"><span class="cq-local-result-stamp"></span><button type="button" class="cq-local-version"></button></footer>
+      <section class="cq-reference-pane" hidden><div class="cq-reference-links"></div><p class="cq-local-reference-status" role="status"></p><details class="cq-local-reference"><summary></summary><p></p></details></section>`;
+    const body=document.createElement("div");body.className="cq-local-body";
+    body.append(panel.querySelector("form"),panel.querySelector(".cq-local-result"),panel.querySelector(".cq-local-status"));
+    panel.querySelector(".cq-local-periods").after(body);
     panel.querySelector("h2").textContent = words("本机用量", "Local usage");
     const tag = document.createElement("span");tag.className = "cq-local-estimate-tag";tag.textContent = "";
     panel.querySelector("h2").after(tag);
-    const glyph=quotaShell.trigger.querySelector('.cq-trigger-icon').cloneNode(true);glyph.removeAttribute('class');glyph.classList.add('cq-local-title-icon');panel.querySelector('header').prepend(glyph);
-    const refresh = panel.querySelector('.cq-local-refresh');
-    refresh.title = words("刷新本机日志", "Refresh local logs"); refresh.setAttribute("aria-label",refresh.title);
-    refresh.prepend(toolIcon("refresh", "")); refresh.onclick = () => requestLocalUsage(panel);
-    const source=panel.querySelector('.cq-local-source-link');source.textContent=words("口径说明","About estimates");source.onclick=()=>openSettings(source,":scope > summary");
+    const refresh = document.createElement("button");refresh.type="button";refresh.className="cq-local-refresh";
+    refresh.title = words("刷新本机日志", "Refresh local logs");refresh.setAttribute("aria-label",refresh.title);
+    refresh.append(toolIcon("refresh", ""));refresh.onclick=()=>requestLocalUsage(panel);
+    const version=panel.querySelector(".cq-local-version");version.onclick=()=>openSettings(version,".cq-release-link");
     const settings = document.createElement("button"); settings.type = "button"; settings.className = "cq-settings-button";
     settings.append(toolIcon("settings", "")); settings.onclick = () => openSettings(settings);
-    panel.querySelector('header').append(settings); syncReleaseUI();
+    panel.querySelector('header').append(settings,refresh); syncReleaseUI();
     panel.querySelector(".cq-local-result").setAttribute("aria-label", words("用量统计结果", "Usage statistics results"));
     panel.querySelector("summary").textContent = words("口径与来源", "Scope and sources");
     panel.querySelector("summary").append(toolIcon("back", "cq-local-detail-arrow"));
@@ -1822,8 +1885,10 @@
     referenceText("strong","",words("周额度参考", "Weekly reference"),weeklyHeading);
     referenceText("span","","token",weeklyHeading);
     const baselineTable=referenceText("dl","cq-local-baselines","",weeklyReference);
-    const planChoice=referenceText("select","cq-local-reference-plan","",weeklyReference);
-    planChoice.hidden=true;planChoice.setAttribute("aria-label",words("Pro 参考套餐", "Pro reference tier"));
+    const links=panel.querySelector(".cq-reference-links"), planRow=referenceText("label","",words("参考套餐","Reference tier"),links);
+    planRow.hidden=true;
+    const planChoice=referenceText("select","cq-local-reference-plan","",planRow);
+    planChoice.setAttribute("aria-label",words("Pro 参考套餐", "Pro reference tier"));
     for(const [value,label] of [["",words("选择 Pro 套餐", "Choose Pro tier")],["pro100","Pro $100"],["pro200","Pro $200 · 20x"],["pro500","Pro $500"]]) {
       const option=document.createElement("option");option.value=value;option.textContent=label;planChoice.append(option);
     }
@@ -1834,10 +1899,13 @@
       globalThis.__codexQuotaReferencePlan=localReferencePlan;
       requestLocalUsage(panel,()=>{},true);
     };
-    referenceText("p","cq-local-reference-status","",weeklyReference);
-    const apiReference=referenceText("section","cq-local-reference-section cq-local-api-reference","");
-    for (const [parent,label,url] of [[weeklyReference,"ModelDial","https://modeldial.com/subscriptions?period=week&view=insights"],[apiReference,words("OpenAI 价格 · 2026.10.30", "OpenAI pricing · 2026.10.30"),"https://developers.openai.com/api/docs/pricing"]]) {
-      const link=referenceText("a","",label,parent);link.href=url;link.target="_blank";link.rel="noopener noreferrer";
+    referenceText("section","cq-local-reference-section cq-local-api-reference","");
+    for (const [className,label,status,url] of [
+      ["cq-modeldial-link","ModelDial","","https://modeldial.com/subscriptions?period=week&view=insights"],
+      ["",words("OpenAI 价格","OpenAI pricing"),"2026.10.30","https://developers.openai.com/api/docs/pricing"],
+    ]) {
+      const link=referenceText("a",className,"",links);link.href=url;link.target="_blank";link.rel="noopener noreferrer";
+      referenceText("span","",label,link);referenceText("span","",status,link);
     }
     const caveats=referenceText("details","cq-local-caveats","");
     const caveatSummary=referenceText("summary","",words("口径与限制", "Scope and limitations"),caveats);
@@ -1877,18 +1945,18 @@
     };
     panel.cqEditInterval=range=>choose("custom",range);
     for(const button of periods) {
-      button.textContent={hour:words("近1小时","Last hour"),today:words("今日","Today"),week:words("本周","This week"),custom:words("自选","Custom")}[button.dataset.period];
+      button.textContent={hour:words("10分钟","10 min"),today:words("今日","Today"),week:words("本周","Week"),custom:words("自选","Custom")}[button.dataset.period];
       if(button.dataset.period==="week")button.title=words("从本地周一开始","Starts Monday in local time");
-      if(button===custom)button.append(toolIcon("back","cq-custom-chevron"));
       button.onclick=()=>choose(button.dataset.period);
     }
     installLocalDetails(panel);
-    popup.append(panel);
+    popup.append(panel);syncReleaseUI();
     installIntervalControls(panel);
-    form.querySelector(".cq-interval-endpoints").before(form.querySelector(".cq-interval-presets"));
+    const endpoints=form.querySelector(".cq-interval-endpoints");
+    endpoints.before(form.querySelector(".cq-interval-presets"));endpoints.append(form.querySelector(".cq-interval-actions"));
     const fine=document.createElement("details");fine.className="cq-interval-fine";
     const summary=document.createElement("summary");summary.textContent=words("精细调整","Fine adjustment");summary.append(toolIcon("back","cq-local-detail-arrow"));fine.append(summary);
-    const fineBody=document.createElement("div");fineBody.className="cq-interval-fine-sliders";fineBody.append(...form.querySelectorAll('[type="range"]'));fine.append(fineBody);form.querySelector(".cq-interval-actions").before(fine);
+    const fineBody=document.createElement("div");fineBody.className="cq-interval-fine-sliders";fineBody.append(...form.querySelectorAll('[type="range"]'));fine.append(fineBody);endpoints.after(fine);
     installLocalCalendar(panel);
     choose("today");
     return panel;
@@ -2159,21 +2227,14 @@
       #cq-local-usage .cq-interval-coverage { display: grid; gap: 4px; margin: 12px 0 0; color: var(--cq-muted); font-size: 10px; line-height: 16px; }
       #cq-local-usage .cq-local-recent-row strong { display: block; font-size: 16px; font-weight: 600; line-height: 24px; }
       #cq-local-usage .cq-local-recent-row strong { overflow-wrap: anywhere; }
-      #cq-local-usage .cq-local-recent-row strong[data-range] { font-size: 14px; }
       #cq-local-usage .cq-local-recent-row small { display: block; margin-top: 4px; font-size: 10px; line-height: 16px; color: var(--cq-muted); overflow-wrap: anywhere; }
-      #cq-local-usage .cq-local-recent .cq-local-page-note { font-size: 11px; margin: 16px 0 8px; }
       :is(#cq-local-usage,#cq-settings) .cq-local-reference-plan { display: block; width: 100%; margin: 8px 0; min-height: 28px; border: 1px solid var(--cq-border); border-radius: 6px; padding: 4px 8px; background: var(--cq-solid); color: var(--cq-ink); font: inherit; font-size: 12px; }
       #cq-local-usage select:focus-visible { outline: 2px solid var(--cq-ink); outline-offset: 2px; }
       :is(#cq-local-usage,#cq-settings) .cq-local-reference-status:empty { display: none; }
       #cq-local-usage .cq-local-result { container-type:inline-size; position:relative; overflow:visible; padding:0 16px 0 8px; }
-      #cq-local-usage .cq-local-page-note { color: var(--cq-muted); font-size: 11px; line-height: 20px; margin: 24px 0; }
       #cq-local-usage .cq-local-placeholder { padding-top: 24px; color: var(--cq-muted); font-size: 11px; line-height: 20px; }
       #cq-local-usage .cq-local-placeholder p { margin: 16px 0 8px; }
       #cq-local-usage .cq-local-placeholder button { background: var(--cq-hover); }
-      #cq-local-usage .cq-local-skeleton { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
-      #cq-local-usage .cq-local-skeleton i { display: block; height: 32px; border-radius: 4px; background: color-mix(in srgb,var(--cq-ink) 7%,transparent); }
-      #cq-local-usage .cq-local-skeleton i:nth-child(n+3) { height: 16px; }
-      #cq-local-usage .cq-local-skeleton i:last-child { grid-column: 1/-1; width: 72%; }
       #cq-local-usage .cq-local-range-label { margin: 16px 0; color: var(--cq-muted); font-size: 12px; line-height: 16px; }
       #cq-local-usage .cq-local-highlights { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr); gap: 16px; margin: 0 0 20px; }
       #cq-local-usage .cq-local-metric-label { display: block; color: var(--cq-muted); font-size: 12px; line-height: 16px; margin-bottom: 6px; }
@@ -2187,8 +2248,6 @@
       :is(#cq-local-usage,#cq-settings) .cq-local-method-values dt { color: var(--cq-muted); font-size: 11px; }
       :is(#cq-local-usage,#cq-settings) .cq-local-method-values dd { margin: 0; text-align: right; font-size: 12px; font-weight: 600; overflow-wrap: anywhere; }
       #cq-local-usage .cq-local-price-part { display: inline-flex; align-items: baseline; white-space: nowrap; }
-      #cq-local-usage .cq-local-price-part[data-long] .cq-local-value-number { font-size: 16px; }
-      #cq-local-usage strong[data-range] .cq-local-value-number { font-size: 16px; }
       #cq-local-usage strong[data-unavailable] { font-size: 13px; font-weight: 500; letter-spacing: 0; }
       #cq-local-usage .cq-local-usage-group { padding: 12px; margin-bottom: 16px; border-radius: var(--radius-sm,6px); background: color-mix(in srgb,var(--cq-ink) 3%,transparent); }
       #cq-local-usage .cq-local-usage-details { border-top: 1px solid var(--cq-border); }
@@ -2278,7 +2337,7 @@
       :is(#cq-local-usage,#cq-settings) .cq-local-caveats { border-top: 1px solid var(--cq-border); }
       :is(#cq-local-usage,#cq-settings) .cq-local-caveats > summary { font-size: 11px; color: var(--cq-muted); }
       :is(#cq-local-usage,#cq-settings) .cq-local-caveats p { font-size: 10px; line-height: 16px; }
-      :is(#cq-local-usage,#cq-settings) :is(.cq-local-status[data-cq-warning],.cq-local-reference-status[data-cq-warning],.cq-local-weekly-reference a[data-cq-warning],.cq-local-recent-row .cq-history-feedback) { color: var(--cq-warning); }
+      :is(#cq-local-usage,#cq-settings) :is(.cq-local-status[data-cq-warning],.cq-local-reference-status[data-cq-warning],.cq-local-weekly-reference a[data-cq-warning]) { color: var(--cq-warning); }
       @media (forced-colors: active) { #cq-local-usage .cq-local-model-track { forced-color-adjust: none; background: GrayText; } #cq-local-usage .cq-local-model-track i { background: Highlight; } #cq-local-usage .cq-local-baselines { outline: 1px solid CanvasText; } }
       #cq-local-usage summary { display: flex; align-items: center; gap: 8px; min-height: 36px; list-style: none; cursor: pointer; font-size: 12px; font-weight: 500; color: var(--cq-ink); }
       #cq-local-usage summary::-webkit-details-marker { display: none; }
@@ -2316,10 +2375,11 @@
       #cq-local-usage .cq-local-recent { padding-top:0; }
       #cq-local-usage .cq-local-recent-row { column-gap:12px; padding:4px 0 12px; }
       #cq-local-usage .cq-local-recent-row strong { font-size:24px; line-height:32px; font-weight:650; letter-spacing:-.025em; white-space:nowrap; }
-      #cq-local-usage .cq-local-recent-row strong[data-range] { font-size:16px; }
       #cq-local-usage .cq-local-recent-row .cq-local-primary-estimate { display:flex; flex-wrap:wrap; white-space:normal; line-height:24px; }
       #cq-local-usage .cq-local-primary-estimate > span { white-space:nowrap; }
-      #cq-local-usage .cq-account-unit { margin-left:3px; font-size:10px; font-weight:500; letter-spacing:0; }
+      #cq-local-usage .cq-local-recent-row > .cq-local-recent-account { grid-template-columns:minmax(0,1fr) auto; }
+      #cq-local-usage .cq-account-partial { margin-left:4px; white-space:nowrap; font-size:10px; }
+      #cq-local-usage .cq-account-unit { margin-left:2px; font-size:11px; line-height:1; font-weight:500; color:var(--cq-muted); letter-spacing:0; }
       #cq-local-usage .cq-local-highlights { padding:12px 0; border-top:1px solid var(--cq-border); margin:0; gap:12px; }
       #cq-local-usage .cq-local-total .cq-local-value-number, #cq-local-usage .cq-local-cost .cq-local-value-number { font-size:16px; }
       #cq-local-usage .cq-local-highlights strong { line-height:24px; }
@@ -2348,69 +2408,86 @@
         --cq-s7:#cfceca; --cq-s8:#bcbbb5; --cq-s9:#8d8d86; --cq-s10:#82827c; --cq-s11:#63635e; --cq-s12:#21201c;
         --cq-solid:var(--cq-s2); --cq-ink:var(--cq-s12); --cq-muted:var(--cq-s11); --cq-border:var(--cq-s7); --cq-hover:var(--cq-s4); --cq-track:var(--cq-s3);
         --cq-warning:#ce2c31; --cq-warning-bg:#feebec; --cq-warning-border:#f4a9aa; --cq-fill:var(--cq-s12);
-        padding:0; border:1px solid var(--cq-s8); background:var(--cq-solid); backdrop-filter:none;
+        --cq-pane-height:calc(var(--cq-available-height,calc(100dvh - 24px)) - 2px);
+        --cq-selection:var(--cq-s1);
+        --cq-account-ink:#237a39; --cq-switch-on:#34c759;
+        padding:0; border:1px solid transparent; border-radius:22px; background:var(--cq-solid); backdrop-filter:none; overflow:hidden;
+        box-shadow:0 1px 1px #0000000a,0 12px 32px -18px #00000040;
       }
       #codex-quota-popover[data-cq-dark] {
+        --cq-account-ink:#30d158; --cq-switch-on:#30d158; --cq-selection:var(--cq-s5);
         --cq-s1:#111110; --cq-s2:#191918; --cq-s3:#222221; --cq-s4:#2a2a28; --cq-s5:#31312e; --cq-s6:#3b3a37;
         --cq-s7:#494844; --cq-s8:#62605b; --cq-s9:#6f6d66; --cq-s10:#7c7b74; --cq-s11:#b5b3ad; --cq-s12:#eeeeec;
         --cq-warning:#ff9592; --cq-warning-bg:#3b1219; --cq-warning-border:#8c333a;
         --cq-solid:var(--cq-s2); --cq-ink:var(--cq-s12); --cq-muted:var(--cq-s11); --cq-border:var(--cq-s7); --cq-hover:var(--cq-s4); --cq-track:var(--cq-s3); --cq-fill:var(--cq-s12);
       }
       #cq-local-usage, #cq-local-usage[data-cq-dark] { --cq-solid:inherit; --cq-ink:inherit; --cq-muted:inherit; --cq-border:inherit; --cq-hover:inherit; --cq-track:inherit; --cq-warning:inherit; --cq-fill:inherit; }
-      #cq-local-usage { --cq-chart-input:#d8dce0; --cq-chart-cache:#30a46c; --cq-chart-output:#0d74ce; font-size:12px; line-height:1.5; }
+      :is(#cq-local-usage,#cq-settings) { --cq-grid-margin:12px; }
+      #cq-local-usage { --cq-grid-gutter:8px; --cq-space-tight:8px; --cq-space-item:12px; --cq-chart-input:#d8dce0; --cq-chart-cache:#30a46c; --cq-chart-output:#0d74ce; font-size:11px; line-height:1.5; }
       #codex-quota-popover[data-cq-dark] #cq-local-usage { --cq-chart-input:#4a5058; --cq-chart-cache:#30a46c; --cq-chart-output:#70b8ff; }
       :is(#cq-local-usage,#cq-settings) { caret-color:var(--cq-ink); }
       :is(#cq-local-usage,#cq-settings) ::selection { color:var(--cq-solid); background:var(--cq-ink); }
-      :is(#cq-local-usage,#cq-settings) header { gap:7px; min-height:40px; margin:0; padding:10px 12px 8px; }
-      :is(#cq-local-usage,#cq-settings) h2 { font-size:12px; font-weight:600; letter-spacing:-.008em; line-height:18px; }
-      #cq-local-usage .cq-local-title-icon { width:17px; height:17px; flex:none; color:var(--cq-muted); }
-      #cq-local-usage header .cq-settings-button { width:22px; height:22px; margin-left:auto; padding:4px; border-radius:6px; }
+      :is(#cq-local-usage,#cq-settings) header { flex:none; min-height:28px; gap:4px; margin:0; padding:0 var(--cq-grid-margin); justify-content:flex-start; }
+      :is(#cq-local-usage,#cq-settings) h2 { font-size:12px; font-weight:600; letter-spacing:-.01em; line-height:16px; }
+      #cq-local-usage header :is(.cq-settings-button,.cq-local-refresh), #cq-settings header button { width:28px; height:28px; min-height:28px; padding:4px; border-radius:8px; color:var(--cq-muted); }
+      #cq-local-usage header .cq-settings-button { margin-left:auto; }
+      #cq-local-usage header .cq-local-refresh svg { width:16px; height:16px; }
       #cq-local-usage .cq-local-estimate-tag { position:absolute; width:1px; height:1px; overflow:hidden; clip-path:inset(50%); }
       #cq-local-usage button { min-height:23px; font-size:10.5px; }
       #cq-local-usage button:active { background:var(--cq-s5); }
-      #cq-local-usage .cq-local-periods { --cq-period-count:4; position:relative; display:grid; grid-template-columns:repeat(var(--cq-period-count),minmax(0,1fr)); margin:0 12px 8px; padding:2px; border-radius:8px; background:var(--cq-s3); }
-      #cq-local-usage .cq-local-periods button { position:relative; z-index:1; height:24px; min-height:24px; padding:0 4px; border-radius:6px; color:var(--cq-muted); font-size:11.5px; line-height:1; }
-      #cq-local-usage .cq-local-periods button[aria-pressed=true] { color:var(--cq-ink); background:transparent; box-shadow:none; }
+      #cq-local-usage :is(.cq-local-periods,.cq-interval-presets), #cq-settings .cq-settings-tabs { --cq-period-count:4; --cq-segment-inset:2px; position:relative; display:grid; grid-template-columns:repeat(var(--cq-period-count),minmax(0,1fr)); flex:none; margin:8px var(--cq-grid-margin) 0; padding:var(--cq-segment-inset); border-radius:9px; background:var(--cq-track); }
+      #cq-settings .cq-settings-tabs { --cq-period-count:3; }
+      #cq-local-usage :is(.cq-local-periods,.cq-interval-presets) button, #cq-settings .cq-settings-tabs button { position:relative; z-index:1; height:24px; min-height:24px; min-width:0; padding:0 2px; border-radius:7px; color:var(--cq-ink); font-size:11px; font-weight:500; line-height:1; background:transparent; }
+      #cq-local-usage :is(.cq-local-periods,.cq-interval-presets) button[aria-pressed=true], #cq-settings .cq-settings-tabs button[aria-pressed=true] { font-weight:600; background:transparent; box-shadow:none; }
       #cq-local-usage [data-period=custom] { gap:2px; padding-inline:2px; }
-      #cq-local-usage .cq-custom-chevron { width:9px; height:9px; flex:none; transform:rotate(-90deg); }
-      #cq-local-usage [data-period=custom][aria-expanded=true] .cq-custom-chevron { transform:rotate(90deg); }
-      #cq-local-usage .cq-local-period-marker { position:absolute; top:2px; bottom:2px; left:2px; width:calc((100% - 4px)/var(--cq-period-count)); border-radius:6px; background:var(--cq-solid); box-shadow:0 1px 2px #0000001f; pointer-events:none; }
-      #cq-local-usage .cq-local-result { padding:0; }
-      #cq-local-usage .cq-local-recent { padding:0 12px; }
-      #cq-local-usage .cq-local-interval-range { display:flex; align-items:center; gap:8px; min-height:32px; margin:0; padding:0 0 8px; font-size:10.5px; line-height:15px; }
-      #cq-local-usage .cq-range-dates { min-width:0; min-height:24px; margin-left:-4px; padding:3px 4px; gap:4px; color:var(--cq-muted); text-align:left; line-height:15px; overflow-wrap:anywhere; }
-      #cq-local-usage .cq-range-dates svg { width:12px; height:12px; flex:none; }
+      #cq-local-usage :is(.cq-local-period-marker,.cq-interval-preset-marker), #cq-settings .cq-settings-tabs i { position:absolute; top:var(--cq-segment-inset); bottom:var(--cq-segment-inset); left:var(--cq-segment-inset); width:calc((100% - 2 * var(--cq-segment-inset))/var(--cq-period-count)); border-radius:7px; background:var(--cq-selection); box-shadow:0 1px 2px #0000001f; pointer-events:none; }
+      :is(#cq-local-usage,#cq-settings) { display:flex; flex-direction:column; max-height:var(--cq-pane-height); min-height:0; padding:12px 0; }
+      #cq-local-usage > :is(header,.cq-local-periods,.cq-local-foot) { flex:none; }
+      #cq-local-usage .cq-local-body, #cq-settings .cq-settings-body { position:relative; min-height:0; overflow-y:auto; overflow-x:hidden; overscroll-behavior:contain; scrollbar-width:none; }
+      #cq-local-usage .cq-local-body::-webkit-scrollbar, #cq-settings .cq-settings-body::-webkit-scrollbar { width:0; height:0; }
+      #cq-local-usage .cq-local-result { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); column-gap:var(--cq-grid-gutter); padding:0 var(--cq-grid-margin); }
+      #cq-local-usage .cq-local-result > * { grid-column:1/-1; min-width:0; }
+      #cq-local-usage .cq-local-recent { padding:16px 0 0; }
+      #cq-local-usage .cq-local-interval-range { display:flex; align-items:center; gap:8px; margin:0; font-size:11px; line-height:15px; }
+      #cq-local-usage .cq-range-dates { min-width:0; min-height:16px; padding:0 2px; margin-left:-2px; color:var(--cq-muted); font:inherit; text-align:left; overflow-wrap:anywhere; }
       #cq-local-usage .cq-range-loading { white-space:nowrap; }
       #cq-local-usage :is(.cq-range-spinner,.cq-range-loading) { display:none; }
       #cq-local-usage .cq-range-spinner { width:9px; height:9px; flex:none; margin-left:auto; border:1.4px solid var(--cq-muted); border-top-color:transparent; border-radius:50%; }
       #cq-local-usage .cq-local-result[aria-busy=true] :is(.cq-range-spinner,.cq-range-loading) { display:block; }
-      #cq-local-usage .cq-local-recent-row { display:block; padding:0; }
-      #cq-local-usage .cq-local-recent-row > :last-child { text-align:left; }
-      #cq-local-usage .cq-local-recent-row > div { display:grid; grid-template-columns:minmax(64px,1fr) minmax(0,2.5fr); gap:4px 8px; align-items:baseline; padding:8px 0; text-align:left; border-top:1px solid var(--cq-s6); }
-      #cq-local-usage .cq-local-recent-row > div:first-child { padding-top:0; border-top:0; }
-      #cq-local-usage .cq-local-metric-label { margin:0; font-size:10.5px; line-height:15px; font-weight:400; }
-      #cq-local-usage .cq-local-recent-row strong, #cq-local-usage .cq-local-recent-row strong[data-range], #cq-local-usage .cq-local-recent-row .cq-local-primary-estimate { display:block; grid-column:2; text-align:right; font-size:21px; font-weight:600; line-height:25.2px; letter-spacing:-.024em; margin-left:0; white-space:normal; overflow-wrap:normal; }
+      #cq-local-usage .cq-local-recent-row, #cq-local-usage .cq-local-recent-row > div { display:block; padding:0; text-align:left; }
+      #cq-local-usage .cq-local-recent-row .cq-local-primary-estimate { display:block; max-width:100%; margin:2px 0 0; text-align:left; font-size:26px; font-weight:700; line-height:1.1; letter-spacing:-.022em; white-space:normal; overflow-wrap:anywhere; }
       #cq-local-usage .cq-local-primary-estimate > span { white-space:nowrap; }
-      #cq-local-usage .cq-account-unit { margin-left:2px; font-size:11px; line-height:1; font-weight:500; color:var(--cq-muted); letter-spacing:0; }
-      #cq-local-usage .cq-local-recent-row :is(small,.cq-choose-reference,.cq-interval-coverage) { grid-column:1/-1; font-size:10.5px; line-height:15px; margin:0; }
-      #cq-local-usage .cq-local-log-quota strong { font-size:14px; line-height:16px; letter-spacing:0; }
-      #cq-local-usage .cq-interval-coverage { display:flex; flex-wrap:wrap; gap:0 8px; color:var(--cq-muted); }
-      #cq-local-usage .cq-log-context { justify-content:space-between; }
-      #cq-local-usage .cq-interval-segments[open] { flex-basis:100%; }
-      #cq-local-usage .cq-interval-segments > summary { min-height:15px; gap:3px; font-size:10.5px; line-height:15px; font-weight:400; color:var(--cq-muted); }
-      #cq-local-usage .cq-interval-segments > summary::after { content:"⌄"; }
-      #cq-local-usage .cq-interval-segments[open] > summary::after { transform:rotate(180deg); }
-      #cq-local-usage .cq-interval-segment { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:8px; padding-top:4px; font-size:10px; line-height:15px; font-variant-numeric:tabular-nums; }
-      #cq-local-usage .cq-interval-segment > span:first-child { overflow-wrap:anywhere; }
-      #cq-local-usage .cq-interval-segment > span:last-child { white-space:nowrap; }
-      #cq-local-usage .cq-choose-reference { justify-self:start; min-height:15px; padding:0; }
-      #cq-local-usage .cq-local-highlights { margin:0; padding:0; border-top:1px solid var(--cq-s6); gap:0; }
-      #cq-local-usage .cq-local-highlights > div { min-width:0; padding:8px 12px; }
-      #cq-local-usage .cq-local-highlights > div + div { border-left:1px solid var(--cq-s6); }
-      #cq-local-usage .cq-local-highlights strong { margin-left:-.008em; font-size:13.5px; line-height:20.25px; font-weight:600; letter-spacing:-.015em; }
-      #cq-local-usage :is(.cq-local-total,.cq-local-cost) .cq-local-value-number, #cq-local-usage strong[data-range] .cq-local-value-number { font-size:13.5px; }
-      #cq-local-usage .cq-local-value-unit { font-size:9.5px; }
-      #cq-local-usage .cq-local-daily { margin:0; padding:8px 12px 0; border-top:1px solid var(--cq-s6); border-radius:0; background:transparent; }
+      #cq-local-usage .cq-local-recent-row .cq-local-primary-estimate[data-unavailable] { font-size:16px; font-weight:600; color:var(--cq-muted); }
+      #cq-local-usage .cq-local-recent-local small, #cq-local-usage .cq-choose-reference { margin:3px 0 0; padding:0; font-size:10.5px; line-height:15px; }
+      #cq-local-usage .cq-local-recent-row > .cq-local-recent-account { display:flex; align-items:baseline; flex-wrap:wrap; gap:0 4px; margin:4px 0 0; color:var(--cq-muted); }
+      #cq-local-usage .cq-local-recent-account .cq-local-metric-label { display:inline; margin:0; font:inherit; }
+      #cq-local-usage .cq-local-recent-row .cq-local-recent-account strong { display:inline; margin:0; font:inherit; letter-spacing:0; }
+      #cq-local-usage .cq-account-devices { font-size:10.5px; }
+      #cq-local-usage .cq-local-recent-account strong[data-cq-measured] { color:var(--cq-account-ink); font-weight:600; }
+      #cq-local-usage .cq-account-unit { margin-left:4px; color:inherit; font-size:inherit; }
+      #cq-local-usage .cq-local-log-quota { display:flex; flex-wrap:wrap; gap:0 4px; margin-top:8px; color:var(--cq-muted); font-size:11px; line-height:16px; }
+      #cq-local-usage .cq-local-log-quota :is(strong,.cq-local-metric-label) { margin:0; font:inherit; }
+      #cq-local-usage .cq-local-log-quota .cq-log-context { display:contents; }
+      #cq-local-usage .cq-log-context > span::before { content:" · "; }
+      #cq-local-usage .cq-local-result > .cq-local-usage-details { margin:0; border:0; }
+      #cq-local-usage .cq-local-highlights { display:flex; align-items:baseline; flex-wrap:wrap; gap:0 4px; margin:2px 0 0; padding:0; border:0; color:var(--cq-muted); font-size:11px; line-height:15px; }
+      #cq-local-usage .cq-local-highlights > div { min-width:0; }
+      #cq-local-usage .cq-local-highlights > :not(:first-child)::before { content:"·"; margin-right:4px; }
+      #cq-local-usage .cq-local-highlights .cq-local-metric-label { position:absolute; width:1px; height:1px; overflow:hidden; clip-path:inset(50%); }
+      #cq-local-usage .cq-local-highlights :is(strong,.cq-local-value-unit,.cq-local-value-number) { display:inline; margin:0; color:inherit; font:inherit; }
+      #cq-local-usage .cq-local-highlights .cq-local-price-part { display:inline; }
+      #cq-local-usage .cq-local-highlights:hover { text-decoration:underline dotted; text-underline-offset:2px; }
+      #cq-local-usage .cq-local-highlights:focus-visible { outline-offset:0; border-radius:4px; }
+      #cq-local-usage .cq-local-usage-details > .cq-local-detail-body { padding-top:8px; }
+      #cq-local-usage .cq-local-mix { margin-top:12px; }
+      #cq-local-usage .cq-local-mix .cq-local-composition-track { height:8px; margin:0; border-radius:99px; }
+      #cq-local-usage .cq-local-mix .cq-local-composition-values { display:flex; flex-wrap:wrap; gap:2px 8px; margin:6px 0 0; }
+      #cq-local-usage .cq-local-mix .cq-local-composition-values > div { display:flex; gap:3px; padding:0; }
+      #cq-local-usage .cq-local-mix .cq-local-composition-values :is(dt,dd) { color:var(--cq-muted); font-size:10.5px; font-weight:400; line-height:15px; }
+      #cq-local-usage .cq-local-mix .cq-local-composition-values dt { gap:4px; }
+      #cq-local-usage .cq-local-mix .cq-local-composition-values dt::before { border-radius:50%; }
+      #cq-local-usage .cq-local-daily { margin:12px 0 0; padding:0; border:0; border-radius:0; background:transparent; }
+      #cq-local-usage .cq-local-chart-heading:has(.cq-local-chart-nav[hidden]), #cq-local-usage .cq-local-daily[data-week] .cq-local-chart-legend { display:none; }
       #cq-local-usage .cq-local-chart-heading { justify-content:flex-start; gap:6px; margin-bottom:7px; min-height:15px; font-size:10.5px; line-height:15px; color:var(--cq-muted); }
       #cq-local-usage .cq-local-chart-nav { order:3; gap:0; }
       #cq-local-usage .cq-local-chart-nav button { width:18px; min-height:18px; height:18px; padding:3px; }
@@ -2421,105 +2498,112 @@
       #cq-local-usage .cq-local-chart-plot { height:64px; margin:0; background:none; }
       #cq-local-usage .cq-local-day { height:64px; min-height:64px; padding:0 4px; border-radius:4px; }
       #cq-local-usage .cq-local-day-rail { height:46px; }
-      #cq-local-usage .cq-local-day-rail::after { content:""; position:absolute; bottom:0; left:0; right:0; height:1px; background:var(--cq-s6); }
-      #cq-local-usage .cq-local-day-bar { width:100%; border-radius:4px; z-index:1; }
+      #cq-local-usage .cq-local-day-rail::after { content:none; }
+      #cq-local-usage .cq-local-day-bar { width:min(14px,100%); border-radius:4px; z-index:1; }
       #cq-local-usage .cq-local-day-bar:not(:has([data-kind=cache]:not([hidden]))) [data-kind=input] { box-shadow:inset 0 0 0 1px var(--cq-border); }
       #cq-local-usage .cq-local-day[aria-pressed=true] .cq-local-day-bar { outline-color:color-mix(in srgb,var(--cq-ink) 58%,transparent); outline-offset:1px; }
-      #cq-local-usage .cq-local-day-selection { height:46px; background:transparent; }
+      #cq-local-usage .cq-local-day-selection { height:64px; background:color-mix(in srgb,var(--cq-ink) 5%,transparent); }
       #cq-local-usage .cq-local-day-label { height:18px; line-height:18px; font-size:9px; }
       #cq-local-usage .cq-local-day[data-no-record] .cq-local-day-rail::before { content:""; position:absolute; bottom:0; left:0; right:0; height:2px; background:repeating-linear-gradient(90deg,var(--cq-muted) 0 2px,transparent 2px 4px); opacity:.6; }
       #cq-local-usage .cq-local-day[data-future] { pointer-events:none; cursor:default; }
       #cq-local-usage .cq-local-day[data-future] .cq-local-day-rail::after { opacity:.45; }
       #cq-local-usage .cq-local-day[data-future] .cq-local-day-label { color:var(--cq-s10); }
-      #cq-local-usage .cq-local-day-detail { display:flex; align-items:baseline; gap:8px; min-height:27px; margin:0; padding:4px 0 8px; font-size:10.5px; line-height:15px; color:var(--cq-muted); }
-      #cq-local-usage .cq-local-day-date { flex:none; font-size:10.5px; line-height:15px; }
-      #cq-local-usage .cq-local-day-values { flex:1; min-width:0; gap:8px; }
+      #cq-local-usage .cq-local-day-detail { display:flex; align-items:baseline; flex-wrap:wrap; gap:4px; min-height:16px; margin:8px 0 0; padding:0; font-size:11px; line-height:16px; color:var(--cq-muted); }
+      #cq-local-usage .cq-local-day-date { flex:none; font:inherit; }
+      #cq-local-usage .cq-local-day-values { display:flex; flex-wrap:wrap; min-width:0; gap:0 4px; }
+      #cq-local-usage .cq-local-day-values > div + div::before { content:"·"; order:-2; }
       #cq-local-usage .cq-local-day-values > div { display:flex; flex-wrap:wrap; align-items:baseline; gap:0 4px; }
-      #cq-local-usage .cq-local-day-values strong { font-size:10.5px; line-height:15px; color:var(--cq-ink); font-weight:600; }
+      #cq-local-usage .cq-local-day-values strong { font:inherit; color:var(--cq-ink); font-weight:600; }
       #cq-local-usage .cq-local-day-values > div:last-child { justify-content:flex-end; text-align:right; }
-      #cq-local-usage .cq-local-day-values > div > span { order:-1; margin:0; font-size:9.5px; line-height:15px; }
+      #cq-local-usage .cq-local-day-values > div > span:not(.cq-local-partial) { position:absolute; width:1px; height:1px; overflow:hidden; clip-path:inset(50%); }
+      #cq-local-usage .cq-local-day-values > div > span.cq-local-partial { order:-1; margin:0; font-size:10px; }
       #cq-local-usage details { border-color:var(--cq-s6); }
-      #cq-local-usage summary { min-height:0; padding:8px 12px; font-size:11.5px; line-height:17.25px; font-weight:400; }
+      #cq-local-usage summary { min-height:0; padding:var(--cq-space-tight) 0; font-size:11.5px; line-height:17.25px; font-weight:400; }
       #cq-local-usage summary:hover { background:var(--cq-hover); }
       #cq-local-usage .cq-local-detail-arrow { transform:rotate(270deg); }
       #cq-local-usage details[open] > summary .cq-local-detail-arrow { transform:rotate(90deg); }
-      #cq-local-usage .cq-local-detail-body { padding:1px 12px 9px; }
+      #cq-local-usage .cq-local-detail-body { padding:0 0 var(--cq-space-tight); }
+      #cq-local-usage :is(.cq-local-result,.cq-local-skeleton) > details { margin:var(--cq-space-tight) 0 0; border-top:1px solid var(--cq-s6); }
+      #cq-local-usage :is(.cq-local-result,.cq-local-skeleton) > details + details { margin-top:0; }
       #cq-local-usage .cq-local-usage-group { padding:0; }
       #cq-local-usage .cq-local-composition-track { height:7px; gap:0; border-radius:4px; margin:4px 0 8px; }
       #cq-local-usage .cq-local-composition-track i { border-radius:0; }
       #cq-local-usage .cq-local-composition-track i[data-kind=input] { box-shadow:inset 0 0 0 1px var(--cq-border); }
-      #cq-local-usage .cq-local-composition-values > div { padding:2px 0; }
+      #cq-local-usage .cq-local-composition-values > div { padding:var(--cq-space-tight) 0; }
       #cq-local-usage .cq-local-composition-values :is(dt,dd) { font-size:10.5px; line-height:15px; }
       #cq-local-usage .cq-local-composition-values dd { color:var(--cq-ink); font-weight:600; }
       #cq-local-usage .cq-local-composition-values dt::before { border-radius:1px; box-shadow:0 0 0 1px color-mix(in srgb,var(--cq-ink) 14%,transparent); transform:translateY(.5px); }
       #cq-local-usage .cq-local-cache { margin-top:5px; padding-top:5px; border-top:1px dotted var(--cq-border); }
       #cq-local-usage .cq-local-cache-label { margin-bottom:4px; font-size:10.5px; line-height:15px; }
-      #cq-local-usage .cq-local-cache-track i { background:var(--cq-muted); }
+      #cq-local-usage .cq-local-cache-track i { background:var(--cq-chart-cache); }
       #cq-local-usage .cq-local-model { padding:3px 0 4px; font-size:10.5px; line-height:15px; }
       #cq-local-usage .cq-local-model-value { font-size:10.5px; }
-      #cq-local-usage .cq-local-model-track i { opacity:.45; }
-      #cq-local-usage .cq-local-foot { display:flex; align-items:center; gap:8px; min-height:32px; padding:4px 12px; border-top:1px solid var(--cq-s6); color:var(--cq-muted); }
-      #cq-local-usage .cq-local-foot button { min-height:24px; padding:0; font-size:10.5px; line-height:15px; color:var(--cq-muted); }
-      #cq-local-usage .cq-local-refresh { gap:4px; }
-      #cq-local-usage .cq-local-refresh svg { width:10px; height:10px; }
-      #cq-local-usage .cq-local-source-link { margin-left:auto; text-decoration:underline; text-underline-offset:2px; }
-      #cq-local-usage .cq-local-status:not([data-cq-quiet]):not(:empty) { max-height:none; margin:0; padding:6px 12px; border-top:1px solid var(--cq-s6); font-size:10.5px; }
+      #cq-local-usage .cq-local-model-track i { opacity:1; }
+      #cq-local-usage .cq-local-foot { display:flex; align-items:baseline; justify-content:space-between; margin:8px var(--cq-grid-margin) 0; padding:6px 0 0; border-top:1px solid var(--cq-s6); font-size:10.5px; line-height:15px; color:var(--cq-muted); }
+      #cq-local-usage .cq-local-foot button { min-height:16px; padding:0; font:inherit; color:inherit; }
+      #cq-local-usage .cq-local-status:not([data-cq-quiet]):not(:empty) { max-height:none; margin:0; padding:var(--cq-space-tight) var(--cq-grid-margin); border-top:1px solid var(--cq-s6); font-size:10.5px; }
       #cq-local-usage .cq-local-status[data-cq-warning]:not([data-cq-quiet]) { border-color:var(--cq-warning-border); background:var(--cq-warning-bg); }
-      #cq-local-usage .cq-local-placeholder { padding:12px; font-size:10.5px; line-height:15px; }
+      #cq-local-usage .cq-local-placeholder { padding:var(--cq-space-item) 0; font-size:10.5px; line-height:15px; }
       #cq-local-usage .cq-local-placeholder:has(.cq-local-skeleton) { padding:0; line-height:18px; }
-      #cq-local-usage .cq-local-skeleton .cq-local-interval-range { margin:0; }
       #cq-local-usage .cq-local-failure-reason { color:var(--cq-warning); }
       #cq-local-usage .cq-local-skeleton { display:block; }
-      #cq-local-usage .cq-local-skeleton :is(.cq-local-metric-label,strong,small) { display:block; width:52%; background:var(--cq-s4); border-radius:4px; color:transparent; }
-      #cq-local-usage .cq-local-skeleton strong { width:64%; }
-      #cq-local-usage .cq-local-skeleton .cq-local-recent-row strong { justify-self:end; }
-      #cq-local-usage .cq-local-skeleton .cq-local-highlights strong { display:flex; align-items:baseline; }
-      #cq-local-usage .cq-local-skeleton small { width:45%; }
-      #cq-local-usage .cq-local-skeleton .cq-local-interval-range i { display:block; width:76%; height:15px; background:var(--cq-s4); border-radius:4px; }
-      #cq-local-usage .cq-local-skeleton-fold { height:34.25px; padding:8px 12px; border-top:1px solid var(--cq-s6); }
-      #cq-local-usage .cq-local-skeleton-fold i { display:block; width:30%; height:17.25px; border-radius:4px; background:var(--cq-s4); }
-      #cq-local-usage .cq-local-chart-skeleton .cq-local-chart-plot { border-radius:4px; background:var(--cq-s3); }
-      #cq-local-usage .cq-interval-controls { margin:0; padding:7px 12px 9px; background:var(--cq-s3); border-bottom:1px solid var(--cq-s6); }
-      #cq-local-usage .cq-interval-endpoints { grid-template-columns:minmax(0,1fr); gap:8px; }
-      #cq-local-usage .cq-interval-endpoint { display:grid; grid-template-columns:28px minmax(0,1fr) 68px 30px; align-items:center; gap:4px; }
+      #cq-local-usage .cq-local-skeleton :is(.cq-local-metric-label,strong,i) { display:block; width:52%; height:12px; margin:0; background:var(--cq-s4); border-radius:4px; color:transparent; }
+      #cq-local-usage .cq-local-skeleton .cq-local-recent-local strong { width:72%; height:29px; margin:4px 0; }
+      #cq-local-usage .cq-local-skeleton .cq-local-recent-account strong { width:36%; }
+      #cq-local-usage .cq-local-skeleton .cq-local-skeleton-meta { width:68%; margin-top:6px; }
+      #cq-local-usage .cq-local-skeleton .cq-local-skeleton-mix { width:100%; margin-top:12px; }
+      #cq-local-usage .cq-local-skeleton .cq-local-skeleton-chart { width:100%; height:72px; margin-top:12px; }
+      #cq-local-usage .cq-interval-controls { margin:12px var(--cq-grid-margin) 0; padding:0; background:transparent; border:0; }
+      #cq-local-usage .cq-interval-endpoints { grid-template-columns:auto minmax(0,1.5fr) minmax(0,1fr) 28px; gap:0 4px; margin-top:8px; border-radius:10px; background:var(--cq-track); }
+      #cq-local-usage .cq-interval-endpoints > * { grid-column:1/-1; }
+      #cq-local-usage .cq-interval-endpoint { display:grid; grid-template-columns:subgrid; align-items:center; min-height:32px; padding:0 8px; }
+      #cq-local-usage .cq-interval-endpoint + .cq-interval-endpoint { border-top:1px solid var(--cq-s6); }
       #cq-local-usage .cq-interval-heading { display:contents; }
-      #cq-local-usage .cq-interval-heading label { grid-column:1; grid-row:1; color:var(--cq-muted); font-size:11.5px; }
-      #cq-local-usage .cq-interval-heading button { grid-column:4; grid-row:1; width:30px; height:30px; padding:6px; }
+      #cq-local-usage .cq-interval-heading label { grid-column:1; grid-row:1; font-size:11px; }
+      #cq-local-usage .cq-interval-heading button { grid-column:4; grid-row:1; width:28px; height:28px; padding:4px; color:var(--cq-muted); }
       #cq-local-usage .cq-interval-endpoint > input:not([name$=Time]) { grid-column:2; grid-row:1; }
       #cq-local-usage .cq-interval-endpoint > input[name$=Time] { grid-column:3; grid-row:1; }
-      #cq-local-usage .cq-interval-controls :is(input,button) { border-radius:6px; }
-      #cq-local-usage .cq-interval-controls input[type=text] { height:30px; padding:0 6px; font-size:11.5px; }
-      #cq-local-usage .cq-interval-presets { border-radius:8px; background:var(--cq-s4); }
-      #cq-local-usage .cq-interval-preset-marker { border-radius:6px; }
+      #cq-local-usage .cq-interval-controls input[type=text] { height:28px; border:0; padding:0; background:transparent; color:var(--cq-muted); font-size:11.5px; text-align:right; }
+      #cq-local-usage .cq-interval-presets { margin:0; }
       #cq-local-usage .cq-interval-fine > summary { padding:6px 0; font-size:10.5px; }
       #cq-local-usage .cq-interval-fine .cq-local-detail-body { padding:0; }
-      #cq-local-usage .cq-interval-actions { font-size:10.5px; }
-      #cq-local-usage .cq-local-calendar { left:12px; right:12px; max-height:calc(var(--cq-available-height,100dvh) - 16px); overflow:auto; scrollbar-width:none; overscroll-behavior:contain; border-radius:8px; }
+      #cq-local-usage .cq-interval-actions { min-height:32px; margin:0; padding:0 8px; border-top:1px solid var(--cq-s6); font-size:11px; }
+      #cq-local-usage .cq-interval-actions button:hover { background:var(--cq-hover); }
+      #cq-local-usage .cq-interval-actions button { min-width:0; padding:2px; color:var(--cq-ink); background:transparent; font-size:11px; font-weight:600; }
+      #cq-local-usage .cq-local-calendar { position:static; inset:auto; grid-column:1/-1; width:100%; margin-top:var(--cq-space-tight); max-height:none; padding:8px; border-radius:8px; box-shadow:none; }
       #cq-local-usage .cq-calendar-heading button { width:28px; height:28px; }
       #cq-local-usage .cq-calendar-grid button { height:28px; font-size:11.5px; border-radius:4px; }
       #cq-local-usage .cq-calendar-footer button { min-height:28px; }
-      #cq-settings { font-size:10.5px; line-height:15px; }
-      #cq-settings header { position:relative; }
-      #cq-settings .cq-settings-body { overflow-y:auto; overflow-x:hidden; max-height:min(404px,calc(var(--cq-available-height,100dvh) - 42px)); overscroll-behavior:contain; scrollbar-width:none; }
-      #cq-settings .cq-settings-body::-webkit-scrollbar { width:0; height:0; }
-      #cq-settings .cq-local-reference { margin:0 12px; }
-      #cq-settings .cq-local-reference summary { min-height:0; padding:8px 0; font-size:10.5px; line-height:15px; }
-      #cq-settings .cq-local-reference-section { margin:6px 0 12px; font-size:10.5px; }
-      #cq-settings .cq-local-reference-plan { font-size:10.5px; border-radius:6px; }
-      #cq-settings .cq-options { padding:8px 12px; }
-      #cq-settings .cq-setting-row { padding:6px 0; font-size:10.5px; line-height:15px; }
-      #cq-settings h3 { font-size:10.5px; line-height:15px; margin-bottom:4px; }
-      #cq-settings .cq-option-group + .cq-option-group { padding-top:8px; }
-      #cq-settings :is(.cq-tools,.cq-settings-feedback,pre) { margin-right:12px; margin-left:12px; font-size:10.5px; line-height:15px; }
-      #cq-settings .cq-tools { margin-top:0; padding-top:6px; padding-bottom:8px; }
-      #cq-settings .cq-switch-track { background:var(--cq-s7); }
-      #cq-settings .cq-switch-track::after { transform:translateY(.5px); }
-      #cq-settings .cq-switch input:checked + .cq-switch-track::after { transform:translate(12px,.5px); }
+      #cq-settings { font-size:11px; line-height:16px; }
+      #cq-settings form { display:flex; flex-direction:column; min-height:0; }
+      #cq-settings .cq-settings-body { padding:12px var(--cq-grid-margin) 0; }
+      #cq-settings .cq-reference-pane > .cq-local-reference { margin:8px 0 0; border:0; }
+      #cq-settings .cq-local-reference summary { min-height:28px; padding:4px 0; font-size:11px; line-height:16px; }
+      #cq-settings .cq-local-reference-section { margin:6px 0 12px; font-size:11px; }
+      #cq-settings .cq-local-reference-plan { width:auto; min-width:0; max-width:63%; margin:0; padding:0; border:0; background:transparent; color:var(--cq-muted); font-size:11px; }
+      #cq-settings .cq-reference-links > * { display:flex; align-items:center; justify-content:space-between; gap:8px; color:var(--cq-ink); text-decoration:none; }
+      #cq-settings .cq-reference-links a > span:last-child { color:var(--cq-muted); font-size:11px; text-align:right; }
+      #cq-settings .cq-reference-links a[data-cq-warning] > span:last-child, #cq-settings .cq-local-reference-status[data-cq-warning] { color:var(--cq-warning); }
+      #cq-settings .cq-options { padding:0; }
+      #cq-settings :is(.cq-alert-options,.cq-tools,.cq-reference-links) { margin:0; padding:0; border:0; border-radius:10px; background:var(--cq-track); }
+      #cq-settings .cq-tools { display:block; }
+      #cq-settings :is(.cq-setting-row,.cq-tools button,.cq-tools a,.cq-reference-links > *) { min-height:32px; width:100%; padding:0 8px; font-size:11px; line-height:16px; }
+      #cq-settings .cq-tools :is(button,a) { text-align:left; }
+      #cq-settings :is(.cq-alert-options,.cq-tools,.cq-reference-links) > :not([hidden]) ~ :not([hidden]) { border-top:1px solid var(--cq-s6); }
+      #cq-settings :is(.cq-settings-feedback,pre) { margin:8px 2px 0; font-size:11px; }
+      #cq-settings .cq-settings-feedback:empty { display:none; }
+      #cq-settings .cq-switch, #cq-settings .cq-switch-track { width:40px; height:24px; }
+      #cq-settings .cq-switch-track { background:var(--cq-s5); }
+      #cq-settings .cq-switch-track::after { width:20px; height:20px; }
+      #cq-settings .cq-switch input:checked + .cq-switch-track { background:var(--cq-switch-on); }
+      #cq-settings .cq-switch input:checked + .cq-switch-track::after { transform:translateX(16px); }
       @media (forced-colors:active) {
         #codex-quota-popover, #codex-quota-popover[data-cq-dark] { --cq-solid:Canvas; --cq-ink:CanvasText; --cq-muted:CanvasText; --cq-border:ButtonBorder; --cq-hover:ButtonFace; --cq-track:GrayText; --cq-warning:CanvasText; --cq-fill:Highlight; }
         #codex-quota-popover { --cq-s3:Canvas; --cq-s4:ButtonFace; --cq-s5:ButtonFace; --cq-s6:ButtonBorder; --cq-s7:ButtonBorder; --cq-s8:ButtonBorder; --cq-s10:GrayText; --cq-s11:CanvasText; --cq-s12:CanvasText; }
-        #cq-local-usage .cq-local-period-marker { background:Highlight; }
-        #cq-local-usage .cq-local-periods button[aria-pressed=true] { color:HighlightText; forced-color-adjust:none; }
+        #codex-quota-popover { border-color:ButtonBorder; }
+        #cq-local-usage .cq-local-recent-account strong[data-cq-measured] { color:CanvasText; }
+        #cq-local-usage :is(.cq-local-period-marker,.cq-interval-preset-marker), #cq-settings .cq-settings-tabs i { background:Highlight; }
+        #cq-local-usage :is(.cq-local-periods,.cq-interval-presets) button[aria-pressed=true], #cq-settings .cq-settings-tabs button[aria-pressed=true] { color:HighlightText; forced-color-adjust:none; }
       }
       #codex-quota-trigger { position: relative; gap: 8px; font-variant-numeric: tabular-nums; --cq-alert-ink: #b42318; --cq-alert-label: #8f453e; --cq-alert-surface: #fbe4e1; --cq-alert-border: #dca29b; }
       #codex-quota-trigger[data-cq-dark] { --cq-alert-ink: #ff958c; --cq-alert-label: #e0aaa4; --cq-alert-surface: #4a2929; --cq-alert-border: #965654; }
@@ -3182,7 +3266,7 @@
   const columnSelector = ".sidebar-navigation";
   const railSelector = 'nav[data-app-navigation-rail="true"]';
   let anchors = null;
-  let nativeMenuWidth = null;
+  let profileMenuWidth = 228;
   let quotaShell = null;
   let nativeSnapshot = null;
   const clipsOverflow = value => /^(hidden|clip|scroll|auto)$/.test(value);
@@ -3218,27 +3302,29 @@
     const rail = [...document.querySelectorAll(railSelector)].find(visible);
     if (!rail) return null;
     const stack = rail.querySelector(':scope > div.relative.shrink-0.w-9 > div.flex.items-center.flex-col');
-    const profile = [...(stack?.querySelectorAll('.sidebar-item button') || [])].filter(visible);
-    if (profile.length !== 1) return null;
-    const avatar = [...profile[0].querySelectorAll('img.rounded-full, span.rounded-full, svg')].find(visible);
+    const profiles = [...(stack?.querySelectorAll('.sidebar-item button') || [])].filter(visible);
+    if (profiles.length !== 1) return null;
+    const [profile] = profiles;
+    const avatar = [...profile.querySelectorAll('img.rounded-full, span.rounded-full, svg')].find(visible);
     if (!avatar) return null;
     // The native meter's SVG contract is independent of language and generated classes.
     const official = [...stack.querySelectorAll('button[aria-haspopup="menu"]')].find(button =>
-      button !== profile[0] && button.id !== "codex-quota-trigger" && visible(button) &&
+      button !== profile && button.id !== "codex-quota-trigger" && visible(button) &&
       Boolean(button.querySelector('svg path[pathLength="100"]')));
-    const menu=official && document.getElementById(official.getAttribute('aria-controls'));
-    if(menu?.getAttribute('role')==='menu' && menu.getAttribute('aria-labelledby')===official.id) {
-      const box=visibleRect(menu),buttonBox=official.getBoundingClientRect();
-      if(box)nativeMenuWidth=box.width/(buttonBox.width/official.offsetWidth);
+    if (profile.getAttribute("aria-expanded") === "true") {
+      const menu = document.getElementById(profile.getAttribute("aria-controls"));
+      if (menu?.matches('[role="menu"]') && menu.getAttribute("aria-labelledby") === profile.id && menu.offsetWidth > 0) {
+        // Layout width excludes scaling from the host menu's entrance animation.
+        profileMenuWidth = menu.offsetWidth;
+      }
     }
     return {rail, avatar, stack, official, column: null};
   };
   const positionPopover = () => {
     const popup = quotaShell?.popup, trigger = quotaShell?.trigger;
-    if (sharedPopover || paneMotion || localLayout || !popup?.matches(":popover-open") || !visible(trigger)) { syncInlineAlert(); return; }
+    if (paneMotion || localLayout || !popup?.matches(":popover-open") || !visible(trigger)) { syncInlineAlert(); return; }
     const rect = trigger.getBoundingClientRect();
-    // Until the native menu has appeared, retain the installed host's spacing-based size.
-    popup.style.width = nativeMenuWidth ? nativeMenuWidth+"px" : "calc(var(--spacing, 4px) * 65)";
+    popup.style.width = profileMenuWidth + "px";
     popup.style.maxWidth = "none";
     const cssWidth = parseFloat(getComputedStyle(popup).width);
     // Client rectangles include CSS zoom; fixed-position styles use unscaled CSS units.
@@ -3249,13 +3335,11 @@
     const bottom = Math.min(innerHeight - 12,rect.bottom);
     popup.style.maxHeight = Math.max(0,(innerHeight - 24)/scale) + "px";
     popup.style.setProperty('--cq-available-height',Math.max(0,(innerHeight - 24)/scale)+"px");
-    const preferred = rect.right + cssWidth/65 * anchorScale;
+    const preferred = rect.right + 4 * anchorScale;
     popup.style.left = Math.max(12,Math.min(innerWidth - width - 12,preferred))/scale + "px";
     popup.style.top = Math.max(12,bottom - popup.getBoundingClientRect().height)/scale + "px";
     popup.querySelector('#cq-local-usage:not([hidden]) .cq-local-daily')?.cqResize?.();
     popup.style.setProperty("--cq-control-right","8px");
-    document.getElementById("cq-local-usage")?.cqPositionCalendar?.();
-    popup.querySelector('.cq-interval-controls')?.cqPositionPresets?.();
     syncReleaseUI(); syncInlineAlert();
   };
   const finishSharedPopover = () => {
@@ -3320,7 +3404,7 @@
   };
   const animatePopover = (open) => {
     const {popup,trigger}=quotaShell;
-    if(paneMotion) {animatePane(paneMotion.host,paneMotion.panel,paneMotion.settings,open);return;}
+    if(paneMotion) {animatePane(paneMotion.host,paneMotion.panel,!open && paneMotion.settings,open);return;}
     finishLocalLayout();
     if(reducedMotion.matches || document.visibilityState!=="visible" || !visible(trigger)) {finishSharedPopover();return;}
     if(!sharedPopover) {
@@ -3346,7 +3430,7 @@
     }
     state.host.hidden = state.open && state.settings;
     if (!state.host.hidden) {
-      const reference=state.panel.querySelector(".cq-local-reference");if(reference){reference.hidden=true;state.host.append(reference);}
+      const reference=state.panel.querySelector(".cq-reference-pane");if(reference){reference.hidden=true;state.host.append(reference);}
       state.panel.remove();
     }
     trigger.toggleAttribute("data-cq-replaced", state.open && !trigger.hasAttribute("data-cq-collapsed"));
@@ -3358,20 +3442,22 @@
   };
   const animatePane = (host, panel, settings, open = quotaShell.popup.matches(":popover-open"), change) => {
     const {popup, trigger, collapse} = quotaShell;
-    let presentation = {}, heightVelocity = 0;
+    let presentation = {}, presentationTop, heightVelocity = 0;
     if (change && paneMotion) {
       const previous=paneMotion, elapsed=Number(previous.animations?.[0]?.currentTime || 0);
       presentation=previous.frameAt(previous.generator.next(elapsed).value);
+      presentationTop=previous.box.top+presentation.top*previous.scale;
       heightVelocity=previous.generator.velocity(elapsed)*previous.heightDelta;
       finishPaneMotion();
       change();
     } else if (localLayout) {
-      const box=popup.getBoundingClientRect(), clip=parseFloat(getComputedStyle(popup).clipPath.match(/^inset\(([-\d.]+)px/)?.[1] || 0);
-      presentation.height=box.height-clip;
+      const box=popup.getBoundingClientRect(), clip=verticalClip(popup), scale=box.width/parseFloat(getComputedStyle(popup).width);
+      presentationTop=box.top+clip.top*scale;
+      presentation.height=box.height/scale-clip.top-clip.bottom;
     }
     finishLocalLayout();
     if (!paneMotion) {
-      const material = sharedPopover?.rail ? getComputedStyle(popup) : null;
+      const material = sharedPopover ? getComputedStyle(popup) : null;
       const matrix = material && new DOMMatrixReadOnly(material.transform);
       if (material) Object.assign(presentation,{opacity: Number(material.opacity), x: matrix.m41, y: matrix.m42});
       settlePopoverMotion();
@@ -3381,15 +3467,22 @@
         positionPopover();
         return {box: popup.getBoundingClientRect(), content: (value ? panel : host).getBoundingClientRect()};
       });
-      popup.style.height = Math.max(...rects.map(rect => rect.box.height),presentation.height || 0) + "px";
-      positionPopover();
+      const scale=rects[0].box.width/parseFloat(getComputedStyle(popup).width);
+      const canvasTop=Math.min(...rects.map(rect=>rect.box.top),presentationTop ?? Infinity);
+      const canvasBottom=Math.max(...rects.map(rect=>rect.box.bottom),presentationTop===undefined ? -Infinity : presentationTop+presentation.height*scale);
+      popup.style.height = (canvasBottom-canvasTop)/scale + "px";
+      popup.style.top = canvasTop/scale + "px";
       const box = popup.getBoundingClientRect(), css = getComputedStyle(popup);
       for (const [index, node] of [host, panel].entries()) {
         node.hidden = false;
-        Object.assign(node.style, {position: "absolute", left: css.paddingLeft, top: css.paddingTop, width: rects[index].content.width + "px"});
+        Object.assign(node.style, {position: "absolute", left: css.paddingLeft, top: css.paddingTop, width: rects[index].content.width/scale + "px"});
       }
-      const endpoint = value => ({height: rects[Number(value)].box.height, quota: Number(!value), settings: Number(value), shift: Number(value), arrow: 180, opacity: 1, x: 0, y: 0});
-      paneMotion = {host, panel, box, radius: css.borderTopLeftRadius, endpoint, current: {...endpoint(Boolean(initial)), ...presentation}, initial: 0,
+      const endpoint = value => {
+        const rect=rects[Number(value)].box;
+        return {top:(rect.top-box.top)/scale,height:rect.height/scale,quota:Number(!value),settings:Number(value),shift:Number(value),arrow:180,opacity:1,x:0,y:0};
+      };
+      if(presentationTop!==undefined)presentation.top=(presentationTop-box.top)/scale;
+      paneMotion = {host, panel, box, scale, radius: css.borderTopLeftRadius, endpoint, current: {...endpoint(Boolean(initial)), ...presentation}, initial: 0,
         settings, open, column: anchors?.column};
       popup.setAttribute("data-cq-pane", "");
     }
@@ -3398,8 +3491,8 @@
     const from = state.frameAt ? state.frameAt(state.generator.next(elapsed).value) : state.current;
     const rail = trigger.hasAttribute("data-cq-collapsed");
     const to = open ? state.endpoint(settings) : rail
-      ? {...from, opacity: 0, x: Math.max(12 - state.box.left, -6)}
-      : {...from, height: trigger.getBoundingClientRect().height, quota: 0, settings: 0, arrow: 0};
+      ? {...from, opacity: 0, x: Math.max((12-state.box.left)/state.scale,-6)}
+      : {...from, height: trigger.getBoundingClientRect().height/state.scale, quota: 0, settings: 0, arrow: 0};
     // Carry the visible edge's velocity when retargeting, including mid-pane close/reopen.
     const distance = to.height - from.height;
     state.velocity = state.generator ? state.generator.velocity(elapsed) * (distance ? state.heightDelta / distance
@@ -3412,8 +3505,8 @@
     state.open = open;
     state.frameAt = progress => Object.fromEntries(Object.keys(from).map(key => [key, from[key] + (to[key] - from[key]) * progress]));
     state.framesAt = progress => {
-      const frame = state.frameAt(progress), y = state.box.height - frame.height;
-      return [[popup, {clipPath: `inset(${Math.max(0, y)}px 0px 0px 0px round ${state.radius})`, opacity: Math.max(0, Math.min(1, frame.opacity)), transform: `translate(${frame.x}px, ${frame.y}px)`}],
+      const frame = state.frameAt(progress), y = frame.top, bottom = state.box.height/state.scale-y-frame.height;
+      return [[popup, {clipPath: `inset(${Math.max(0,y)}px 0 ${Math.max(0,bottom)}px 0 round ${state.radius})`, opacity: Math.max(0, Math.min(1, frame.opacity)), transform: `translate(${frame.x}px, ${frame.y}px)`}],
         [host, {transform: `translate(${-8 * frame.shift}px, ${y}px)`, opacity: Math.max(0, frame.quota)}],
         [panel, {transform: `translate(${8 * (1 - frame.shift)}px, ${y}px)`, opacity: Math.max(0, frame.settings)}],
         [collapse.firstElementChild, {transform: `rotate(${frame.arrow}deg)`}]];
@@ -3551,13 +3644,33 @@
         if (!sharedPopover && !paneMotion) settlePopoverMotion();
         openingPending = true;
         popup.toggleAttribute("data-cq-opening", !sharedPopover && !paneMotion && !reducedMotion.matches && document.visibilityState === "visible");
+        const existing = popup.querySelector("#cq-local-usage");
         if (!sharedPopover && !paneMotion) {
-          const settings=document.getElementById("cq-settings"), reference=settings?.querySelector(".cq-local-reference");
+          const settings=document.getElementById("cq-settings"), reference=settings?.querySelector(".cq-reference-pane");
           if(reference){reference.hidden=true;document.getElementById("cq-local-usage").append(reference);}
           settings?.remove();
           const panel=openLocalUsage(trigger); if(panel)panel.hidden=false;
-          positionPopover();
         }
+        if (existing) {
+          const today = localDate(new Date());
+          const result = existing.querySelector(".cq-local-result");
+          if (existing.cqPeriod !== "today" || localDate(new Date(existing.cqAppliedInterval.intervalEnd)) !== today ||
+              result.dataset.loaded && result.dataset.today !== today) {
+            existing.cqSelectPeriod("today");
+            requestLocalUsage(existing, () => {
+              existing.cqSetIntervalEditor(false);
+              delete result.dataset.loaded;
+              const stamp = existing.querySelector(".cq-local-result-stamp");
+              stamp.textContent = "";
+              stamp.removeAttribute("title");
+            });
+          } else {
+            existing.cqCloseCalendar(false);
+            existing.cqSetIntervalEditor(false);
+          }
+          existing.querySelector(".cq-local-body").scrollTop = 0;
+        }
+        positionPopover();
         queueMicrotask(startOpen);
       } else {
         openingPending = false;
@@ -3708,7 +3821,7 @@
       })) schedule();
     });
     observer.observe(document.documentElement, {childList: true, subtree: true, attributes: true, attributeOldValue: true,
-      attributeFilter: ["value", "class", "style", "hidden", "inert", "data-theme", "data-color-theme", "data-state", "aria-haspopup", "aria-description"]});
+      attributeFilter: ["value", "class", "style", "hidden", "inert", "data-theme", "data-color-theme", "data-state", "aria-haspopup", "aria-expanded", "aria-description"]});
     observer.observe(document.head, {childList: true, subtree: true, characterData: true, characterDataOldValue: true,
       attributes: true, attributeOldValue: true, attributeFilter: ["href", "media", "rel", "disabled"]});
     const onGeometryChange = () => { settlePopoverMotion(); schedule(); };

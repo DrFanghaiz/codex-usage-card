@@ -13,9 +13,9 @@ nav[data-app-navigation-rail]{width:51px;display:flex;flex-direction:column;alig
 .rail-top{flex:1}.w-9{width:36px}.flex{display:flex}.flex-col{flex-direction:column}.items-center{align-items:center}.rail-stack{gap:8px}.profile{width:100%}
 .sidebar-item button,#help{display:grid;place-items:center;width:36px;height:36px;padding:0;border:0;background:transparent}.rounded-full{display:block;width:24px;height:24px;border-radius:50%;background:#afbeb0}
 .sidebar-navigation{position:relative;display:flex;flex-direction:column;width:238px;min-width:0;min-height:0;overflow:hidden;background:#f1eee4;flex:none}.contents{display:contents}.sidebar-navigation nav{display:flex;flex:1;min-height:0;flex-direction:column;padding:8px}.sidebar-navigation [data-app-action-sidebar-scroll]{flex:1;min-height:0;overflow:auto}.list-item{height:31px}main{flex:1;min-width:0}
-#native-menu{position:fixed;inset:auto;width:calc(var(--spacing)*65);left:60px;top:100px;margin:0;padding:16px;background:var(--color-surface-elevated-secondary);color:var(--color-text)}
+#native-menu,#profile-menu{position:fixed;inset:auto;width:260px;left:60px;top:100px;margin:0;padding:16px;background:var(--color-surface-elevated-secondary);color:var(--color-text)}#profile-menu{width:228px}
 [hidden]{display:none!important}@media(max-width:400px){.sidebar-navigation{width:220px}}
-</style></head><body><nav data-app-navigation-rail="true"><div class="rail-top"><button id="collapse">折叠</button><button id="menu-trigger" popovertarget="native-menu">菜单</button></div><div class="relative shrink-0 w-9"><div class="flex items-center flex-col rail-stack"><div class="flex items-center flex-col"><button id="help" type="button" aria-label="用量" aria-haspopup="menu" aria-controls="native-menu" aria-description="每周用量：剩余72%" popovertarget="native-menu"><svg viewBox="0 0 28 28"><path pathLength="100" d="M14 2a12 12 0 1 1 0 24a12 12 0 1 1 0-24" fill="none" stroke="currentColor"></path></svg></button></div><div class="flex profile"><div class="sidebar-item"><div><button id="profile"><span><span id="avatar" class="rounded-full"></span></span></button></div></div></div></div></div></nav><div class="sidebar-navigation"><div class="contents"><nav role="navigation"><div>项目</div><div data-app-action-sidebar-scroll>${Array.from({length:80},(_,i)=>`<div class="list-item">项目 ${i}</div>`).join('')}</div></nav><div class="absolute inset-x-0 bottom-0 z-20"></div></div></div><main id="chat"><button id="outside">正文</button></main><div id="native-menu" role="menu" aria-labelledby="help" popover="auto">原生菜单</div><script>document.getElementById('collapse').onclick=()=>document.querySelector('.sidebar-navigation').hidden=!document.querySelector('.sidebar-navigation').hidden;</script></body></html>`;
+</style></head><body><nav data-app-navigation-rail="true"><div class="rail-top"><button id="collapse">折叠</button><button id="menu-trigger" popovertarget="native-menu">菜单</button></div><div class="relative shrink-0 w-9"><div class="flex items-center flex-col rail-stack"><div class="flex items-center flex-col"><button id="help" type="button" aria-label="用量" aria-haspopup="menu" aria-controls="native-menu" aria-description="每周用量：剩余72%" popovertarget="native-menu"><svg viewBox="0 0 28 28"><path pathLength="100" d="M14 2a12 12 0 1 1 0 24a12 12 0 1 1 0-24" fill="none" stroke="currentColor"></path></svg></button></div><div class="flex profile"><div class="sidebar-item"><div><button id="profile" type="button" aria-haspopup="menu" aria-controls="profile-menu" aria-expanded="false" popovertarget="profile-menu"><span><span id="avatar" class="rounded-full"></span></span></button></div></div></div></div></div></nav><div class="sidebar-navigation"><div class="contents"><nav role="navigation"><div>项目</div><div data-app-action-sidebar-scroll>${Array.from({length:80},(_,i)=>`<div class="list-item">项目 ${i}</div>`).join('')}</div></nav><div class="absolute inset-x-0 bottom-0 z-20"></div></div></div><main id="chat"><button id="outside">正文</button></main><div id="native-menu" role="menu" aria-labelledby="help" popover="auto">原生菜单</div><div id="profile-menu" role="menu" aria-labelledby="profile" popover="auto">头像菜单</div><script>document.getElementById("profile-menu").addEventListener("beforetoggle",event=>document.getElementById("profile").setAttribute("aria-expanded",String(event.newState==="open")));document.getElementById('collapse').onclick=()=>document.querySelector('.sidebar-navigation').hidden=!document.querySelector('.sidebar-navigation').hidden;</script></body></html>`;
 const officialPayload = () => ({planName:'plus',windows:[{label:'5h',usedPercent:28,resetAt:Date.now()/1000+9000},{label:'Weekly',usedPercent:63,resetAt:Date.now()/1000+302400}]});
 let browser;
 before(async()=>{browser=await chromium.launch({headless:true,channel:'msedge'});});
@@ -69,7 +69,7 @@ async function updateLocalUsage(page,data,id){await page.evaluate(({data,id})=>_
 async function fillInterval(form,start,end){for(const [name,value]of[['intervalStart',start],['intervalEnd',end]]){const [date,time]=value.split(/[ T]/);await form.locator(`[name=${name}]`).fill(date);await form.locator(`[name=${name}Time]`).fill(time);}}
 async function applyCustom(page,start='2026-10-01 00:00:00',end='2026-10-14 23:59:59'){await page.locator('[data-period=custom]').click();const form=page.locator('.cq-interval-controls');await fillInterval(form,start,end);await form.locator('[type=submit]').click();await settle(page);return localUsageRequest(page);}
 async function customDailyRange(page){await showLocalUsage(page);return applyCustom(page);}
-async function openReferences(page){await page.locator('.cq-settings-button').click();const ref=page.locator('.cq-local-reference');if(!await ref.evaluate(el=>el.open))await ref.locator(':scope > summary').click();return ref;}
+async function openReferences(page){await page.locator('.cq-settings-button').click();await page.locator('[data-settings=reference]').click();const ref=page.locator('.cq-local-reference');if(!await ref.evaluate(el=>el.open))await ref.locator(':scope > summary').click();return ref;}
 const dailyChartPayload=range=>{
   const a={model:'gpt-6.1-sol',inputTokens:1000000,cachedInputTokens:500000,cacheWriteInputTokens:0,cacheWriteKnown:true,outputTokens:100000,totalTokens:1100000};
   const b={...a,inputTokens:2000000,cachedInputTokens:1000000,outputTokens:200000,totalTokens:2200000};
@@ -77,28 +77,30 @@ const dailyChartPayload=range=>{
   return localUsagePayload(range,{models:[{...a,inputTokens:3000000,cachedInputTokens:1500000,outputTokens:300000,totalTokens:3300000}],eventCount:2,partial:true,issues:[issue],daily:[{date:'2026-10-01',models:[a],eventCount:1,partial:false,issues:[]},{date:'2026-10-02',models:[b],eventCount:1,partial:false,issues:[]},{date:'2026-10-04',models:[],eventCount:0,partial:true,issues:[issue]}]});
 };
 
-test('one main page leads with quota estimates and account changes, then local tokens and API equivalent',async()=>{
+test('preview grid separates the primary estimate, account readout and visible usage groups',async()=>{
  const page=await pageFor();try{
   await showLocalUsage(page);const {range,id}=await localUsageRequest(page);const data=localUsagePayload(range);
-  data.interval.account={status:'ok',usedPercent:.75,sampledStartAt:range.intervalStart,sampledEndAt:range.intervalEnd,coverageStartAt:range.intervalStart,coverageEndAt:range.intervalEnd};
   await updateLocalUsage(page,data,id);
   assert.equal(await page.locator('.cq-local-tabs,[role=tablist],.cq-local-page,.cq-local-dates').count(),0);
   assert.equal(await page.locator('[data-period]').count(),4);assert.match(await page.locator('.cq-local-recent-local').innerText(),/本机.*估算/);
-  assert.match(await page.locator('.cq-local-recent-local strong').innerText(),/2/);assert.match(await page.locator('.cq-local-recent-account strong').innerText(),/0.75/);
-  assert.match(await page.locator('.cq-local-recent-account').innerText(),/账号/);assert.equal(await page.locator('.cq-local-total strong').getAttribute('title'),'27,921,500 token');
-  assert.equal(await page.locator('.cq-local-recent-account .cq-interval-coverage').innerText(),'含其他设备');
+  assert.match(await page.locator('.cq-local-recent-local strong').innerText(),/2/);
+  assert.equal(await page.locator('.cq-local-total strong').getAttribute('title'),'27,921,500 token');
   assert.match(await page.locator('.cq-local-cost strong').textContent(),/41\.60/);
-  const [localBox,accountBox]=await Promise.all([page.locator('.cq-local-recent-local').boundingBox(),page.locator('.cq-local-recent-account').boundingBox()]);
-  assert.ok(accountBox.y>=localBox.y+localBox.height-1,'primary quota readings must stack instead of competing for one row');
   assert.equal(await page.locator('.cq-reading-mark').count(),0,'static reading marks are removed');
-  const readings=await page.locator('.cq-local-recent-row strong').evaluateAll(nodes=>nodes.map(node=>{const r=node.getBoundingClientRect(),label=node.parentElement.querySelector('.cq-local-metric-label').getBoundingClientRect();return {right:r.right,left:r.left,labelRight:label.right,textAlign:getComputedStyle(node).textAlign};}));
-  assert.ok(Math.abs(readings[0].right-readings[1].right)<.6,'primary values share one right edge');
-  for(const reading of readings){assert.equal(reading.textAlign,'right');assert.ok(reading.left>=reading.labelRight+7,'primary value occupies the space to the right of its label');}
-
-
-  mkdirSync(join(__dirname,'../.runtime-test/right-aligned-readings-20261104'),{recursive:true});await page.screenshot({path:join(__dirname,'../.runtime-test/right-aligned-readings-20261104/synthetic-main.png')});
+  const layout=await page.locator('.cq-local-result').evaluate(result=>{
+    const primary=result.querySelector('.cq-local-primary-estimate'), label=result.querySelector('.cq-range-dates'), card=result.closest('#codex-quota-popover');
+    return {font:getComputedStyle(primary).fontSize,weight:getComputedStyle(primary).fontWeight,alignment:getComputedStyle(primary).textAlign,
+      sharedLeft:Math.abs(primary.getBoundingClientRect().left-label.getBoundingClientRect().left)<=2,
+      inset:primary.getBoundingClientRect().left-card.getBoundingClientRect().left-parseFloat(getComputedStyle(card).borderLeftWidth)};
+  });
+  assert.deepEqual(layout,{font:'26px',weight:'700',alignment:'left',sharedLeft:true,inset:12});
+  assert.equal(await page.locator('.cq-local-mix').isVisible(),true);
+  const legendRows=await page.locator('.cq-local-mix .cq-local-composition-values > div').evaluateAll(nodes=>new Set(nodes.map(node=>node.getBoundingClientRect().top)).size);
+  assert.equal(legendRows,1,'the compact legend fits the avatar-width card');
+  assert.equal(await page.locator('header .cq-local-refresh').count(),1);
   assert.equal(await page.locator('.cq-local-models').evaluate(el=>el.open),false);
   assert.equal(await page.locator('.cq-local-usage-details').evaluate(el=>el.open),false);
+  assert.equal(await page.locator('.cq-local-highlights').isVisible(),true);
   assert.equal(await page.locator('.cq-local-reference').isVisible(),false);
   assert.equal(await page.locator('.cq-interval-controls').isVisible(),false);
  }finally{await close(page);}
@@ -116,23 +118,54 @@ test('today and week produce one exact local-time range and refresh advances onl
  }finally{await close(page);}
 });
 
-test('the last hour rolls across midnight and the displayed result opens its own editable draft',async()=>{
+test('reopening starts on today after a different range or an unfinished date edit',async()=>{
+ const page=await pageFor(officialPayload(),{width:390,height:800},{timezoneId:'Asia/Shanghai'});try{
+  await page.clock.install({time:new Date('2026-11-04T12:30:00+08:00')});
+  await showLocalUsage(page);const first=await localUsageRequest(page);
+  await updateLocalUsage(page,localUsagePayload(first.range),first.id);
+  await page.locator('[data-period=week]').click();const week=await localUsageRequest(page);
+  await updateLocalUsage(page,localUsagePayload(week.range),week.id);
+  assert.equal(await page.locator('.cq-local-daily').isVisible(),true);
+  await collapse(page);await open(page);
+  const today=await localUsageRequest(page);
+  assert.notEqual(today.id,week.id);
+  assert.equal(today.range.intervalStart,first.range.intervalStart);
+  assert.equal(await page.locator('[data-period][aria-pressed=true]').getAttribute('data-period'),'today');
+  assert.equal(await page.locator('.cq-local-daily').count(),0);
+  await updateLocalUsage(page,localUsagePayload(week.range),week.id);
+  assert.equal(await page.locator('.cq-local-result').getAttribute('aria-busy'),'true');
+  await updateLocalUsage(page,localUsagePayload(today.range),today.id);
+  await page.locator('[data-period=custom]').click();
+  await page.locator('[data-date-field=intervalEnd]').click();
+  await collapse(page);await open(page);
+  assert.equal(await page.locator('.cq-interval-controls').isVisible(),false);
+  assert.equal(await page.locator('.cq-local-calendar').isVisible(),false);
+  assert.equal((await localUsageRequest(page)).id,today.id);
+  const custom=await applyCustom(page);
+  await updateLocalUsage(page,localUsagePayload(custom.range),custom.id);
+  await collapse(page);await open(page);
+  assert.equal(await page.locator('[data-period][aria-pressed=true]').getAttribute('data-period'),'today');
+  assert.equal((await localUsageRequest(page)).range.intervalStart,first.range.intervalStart);
+ }finally{await close(page);}
+});
+
+test('the last ten minutes roll across midnight and the displayed result opens its own editable draft',async()=>{
  const page=await pageFor(officialPayload(),{width:390,height:800},{timezoneId:'Asia/Shanghai',locale:'en-US'});
  try {
-  await page.clock.install({time:new Date('2026-11-04T00:30:00+08:00')});
+  await page.clock.install({time:new Date('2026-11-04T00:05:00+08:00')});
   await showLocalUsage(page);
   const form=page.locator('.cq-interval-controls'),edit=page.locator('.cq-range-dates');
   await page.locator('[data-period=hour]').press('Enter');
   const first=await localUsageRequest(page);
   assert.equal(await form.isVisible(),false);
   assert.deepEqual([first.range.start,first.range.end],['2026-11-03','2026-11-04']);
-  assert.equal(Date.parse(first.range.intervalEnd)-Date.parse(first.range.intervalStart),3600000);
+  assert.equal(Date.parse(first.range.intervalEnd)-Date.parse(first.range.intervalStart),600000);
   await updateLocalUsage(page,localUsagePayload(first.range),first.id);
   await page.clock.runFor(2000);
   await page.locator('.cq-local-refresh').click();
   const refreshed=await localUsageRequest(page);
   assert.ok(Date.parse(refreshed.range.intervalStart)>Date.parse(first.range.intervalStart));
-  assert.equal(Date.parse(refreshed.range.intervalEnd)-Date.parse(refreshed.range.intervalStart),3600000);
+  assert.equal(Date.parse(refreshed.range.intervalEnd)-Date.parse(refreshed.range.intervalStart),600000);
   await updateLocalUsage(page,localUsagePayload(refreshed.range),refreshed.id);
   await page.locator('[data-period=week]').click();
   const loading=await localUsageRequest(page);
@@ -171,7 +204,7 @@ test('custom editor, quick durations, calendar and fine sliders remain drafts un
   assert.equal(await form.isVisible(),true);assert.equal((await localUsageRequest(page)).id,request.id);
   assert.equal(await page.locator('[data-period=today]').getAttribute('aria-pressed'),'true');
   assert.equal(await page.locator('[data-period=custom]').getAttribute('aria-expanded'),'true');
-  for(const minutes of [5,10,30,60]){await form.locator(`[data-interval-minutes="${minutes}"]`).click();assert.equal((await localUsageRequest(page)).id,request.id);const range=await page.evaluate(()=>document.getElementById('cq-local-usage').cqGetInterval(false));assert.equal(Date.parse(range.intervalEnd)-Date.parse(range.intervalStart),minutes*60000);}
+  for(const minutes of [30,60,180,300]){await form.locator(`[data-interval-minutes="${minutes}"]`).click();assert.equal((await localUsageRequest(page)).id,request.id);const range=await page.evaluate(()=>document.getElementById('cq-local-usage').cqGetInterval(false));assert.equal(Date.parse(range.intervalEnd)-Date.parse(range.intervalStart),minutes*60000);}
   const fine=form.locator('.cq-interval-fine');assert.equal(await fine.evaluate(el=>el.open),false);await fine.locator('summary').click();assert.equal(await form.locator('[name=fromSlider]').isVisible(),true);assert.equal(await form.locator('[name=toSlider]').isVisible(),true);assert.deepEqual(await fine.locator('[type=range]').evaluateAll(nodes=>nodes.map(node=>getComputedStyle(node).appearance)),['none','none']);
   await form.locator('[name=fromSlider]').focus();await page.keyboard.press('ArrowLeft');assert.equal((await localUsageRequest(page)).id,request.id);
   await fillInterval(form,'2026-10-01 08:13:21','2026-10-05 17:18:19');await form.locator('[data-date-field=intervalStart]').click();assert.equal(await page.locator('.cq-local-calendar').isVisible(),true);await page.keyboard.press('Escape');assert.equal(await page.locator('.cq-local-calendar').isVisible(),false);assert.equal(await form.locator('[name=intervalStartTime]').inputValue(),'08:13:21');
@@ -230,20 +263,21 @@ test('other priced models use both API reference anchors without counting unknow
   const review={...terra,model:'codex-auto-review'};
   await set([terra,review]);assert.match(await page.locator('.cq-local-recent-local strong').textContent(),/0.5.*1%/);assert.doesNotMatch(await page.locator('.cq-local-recent-local').innerText(),/个模型可估算/);
   assert.equal(await page.locator('.cq-local-total strong').getAttribute('title'),'2,000,000 token');
-  await set([review]);assert.match(await page.locator('.cq-local-recent-local strong').textContent(),/0%/);assert.match(await page.locator('.cq-local-recent-local').innerText(),/审核不占周额度/);assert.match(await page.locator('.cq-local-cost').innerText(),/未计价/);
+  await set([review]);assert.match(await page.locator('.cq-local-recent-local strong').textContent(),/0%/);assert.match(await page.locator('.cq-local-recent-local').innerText(),/审核不占周额度/);
+  assert.match(await page.locator('.cq-local-cost').innerText(),/未计价/);
   await set([review,{...terra,model:'unknown-model'}]);assert.doesNotMatch(await page.locator('.cq-local-recent-local strong').textContent(),/0%/);
   await set([terra],{...reference,apiModels:{'gpt-6-astra':100}});assert.doesNotMatch(await page.locator('.cq-local-recent-local strong').textContent(),/0%/);
  }finally{await close(page)}
 });
 
-test('long dual-estimate ranges and account values stay aligned inside a narrow 260px popup',async()=>{
+test('long dual-estimate ranges stay aligned inside a narrow 228px popup',async()=>{
  const page=await pageFor(officialPayload(),{width:390,height:800});try{
   await showLocalUsage(page);const {range,id}=await localUsageRequest(page);
   const model={model:'gpt-6-astra',inputTokens:1000000,cachedInputTokens:1000000,cacheWriteInputTokens:0,cacheWriteKnown:true,outputTokens:0,totalTokens:1000000};
   const data=localUsagePayload(range,{models:[model],eventCount:1,reference:{planName:'pro',selectedPlan:'pro200',referenceKind:'legacy20x',status:'snapshot',models:{'gpt-6-astra':1000000/1.0614},apiModels:{'gpt-6-astra':1/2.0909}}});
-  data.interval.account={status:'ok',usedPercent:99.99,sampledStartAt:range.intervalStart,sampledEndAt:range.intervalEnd,coverageStartAt:range.intervalStart,coverageEndAt:range.intervalEnd};
   await updateLocalUsage(page,data,id);assert.match(await page.locator('.cq-local-recent-local strong').textContent(),/106\.14.*209\.09/);
-  assert.ok(Math.abs((await geometry(page)).popup.width-260)<1);
+  assert.equal(await page.locator('.cq-local-primary-estimate').evaluate(el=>getComputedStyle(el).fontSize),'26px');
+  assert.ok(Math.abs((await geometry(page)).popup.width-228)<1);
 
   const primary=await page.locator('.cq-local-recent-row strong').evaluateAll(nodes=>nodes.map(node=>{const r=node.getBoundingClientRect(),p=node.parentElement.getBoundingClientRect();return {text:node.textContent,width:node.clientWidth,scrollWidth:node.scrollWidth,left:r.left,right:r.right,parentLeft:p.left,parentRight:p.right}}));
   for(const metric of primary)assert.ok(metric.scrollWidth<=metric.width+1&&metric.left>=metric.parentLeft-1&&metric.right<=metric.parentRight+1,JSON.stringify(metric));
@@ -255,50 +289,33 @@ test('long dual-estimate ranges and account values stay aligned inside a narrow 
  }finally{await close(page);}
 });
 
-test('official account samples retain partial endpoints, gaps and failure states without fabricating zero',async()=>{
+test('account sampling shows one compact readout and preserves missing and partial semantics',async()=>{
  const page=await pageFor();try{
   await showLocalUsage(page);const {range,id}=await localUsageRequest(page);
-  for(const item of [{status:'insufficient_history',usedPercent:null},{status:'reset',usedPercent:null},{status:'counter_decreased',usedPercent:null},{status:'unavailable',usedPercent:null,historyError:'HISTORY_CORRUPT'},{status:'partial',usedPercent:1.25,hasGaps:true},{status:'ok',usedPercent:0}]){
-   const data=localUsagePayload(range);data.interval.account={...data.interval.account,...item,...(['ok','partial'].includes(item.status)?{sampledStartAt:range.intervalStart,sampledEndAt:range.intervalEnd}:{} )};
-   await updateLocalUsage(page,data,id);assert.equal(await page.locator('.cq-local-total strong').getAttribute('title'),'27,921,500 token');
-   if(item.usedPercent===null)assert.doesNotMatch(await page.locator('.cq-local-recent-account strong').innerText(),/0/);
-   else assert.match(await page.locator('.cq-local-recent-account strong').innerText(),new RegExp(String(item.usedPercent)));
-   if(item.status==='insufficient_history')assert.equal(await page.locator('.cq-local-recent-account').evaluate(n=>getComputedStyle(n.querySelector('small')).color===getComputedStyle(n.querySelector('.cq-local-metric-label')).color),true);
-   if(item.status==='partial'){assert.equal(await page.locator('.cq-history-gap').innerText(),'采样有间断');assert.equal(await page.locator('.cq-interval-sampled-range').count(),1);}
-  }
- }finally{await close(page);}
-});
-
-test('cross-cycle account changes show only validated sampled segments, including totals over 100',async()=>{
- const page=await pageFor(officialPayload(),{width:390,height:800});try{
-  await showLocalUsage(page);const {range,id}=await applyCustom(page);
-  const start=Date.parse(range.intervalStart),end=Date.parse(range.intervalEnd),step=(end-start)/8;
-  const at=n=>new Date(start+step*n).toISOString();
-  const segments=[{startAt:at(0),endAt:at(1),usedPercent:85},{startAt:at(2),endAt:at(3),usedPercent:88},{startAt:at(4),endAt:at(5),usedPercent:4}];
   const data=localUsagePayload(range);
-  data.interval.account={...data.interval.account,status:'partial',usedPercent:177,crossReset:true,resetAdjusted:false,fullWindow:false,hasGaps:false,segments,sampledStartAt:segments[0].startAt,sampledEndAt:segments.at(-1).endAt};
-  await updateLocalUsage(page,data,id);
-  assert.match(await page.locator('.cq-local-recent-account strong').innerText(),/177/);
-  assert.match(await page.locator('.cq-local-recent-account').innerText(),/账号已采样变化/);
-  assert.equal(await page.locator('.cq-interval-sampled-range').innerText(),'跨周期 · 3 段');
-  await page.locator('.cq-interval-sampled-range').focus();await page.keyboard.press('Enter');
-  assert.equal(await page.locator('.cq-interval-segments').evaluate(n=>n.open),true);
-  assert.match(await page.locator('.cq-interval-segments').innerText(),/85[\s\S]*88[\s\S]*4/);
-  assert.equal(await page.locator('#cq-local-usage').evaluate(n=>n.scrollWidth<=n.clientWidth+1),true);
-  await page.keyboard.press('Space');assert.equal(await page.locator('.cq-interval-segments').evaluate(n=>n.open),false);
-  assert.notEqual(await page.locator('.cq-local-recent-local strong').innerText(),'—');
-  assert.equal(await page.locator('.cq-local-recent-account strong').evaluate(n=>n.scrollWidth<=n.clientWidth+1),true);
-  data.interval.account.hasGaps=true;data.interval.account.resetAdjusted=true;await updateLocalUsage(page,data,id);
-  assert.match(await page.locator('.cq-local-recent-account').innerText(),/重置时间变化.*有间断/);
-  const zero=segments.map(s=>({...s,usedPercent:0}));data.interval.account={...data.interval.account,usedPercent:0,segments:zero};await updateLocalUsage(page,data,id);
-  assert.match(await page.locator('.cq-local-recent-account strong').innerText(),/0/);
-  data.interval.account={...data.interval.account,status:'reset',usedPercent:null,segments:[],resetAdjusted:false};await updateLocalUsage(page,data,id);
-  assert.equal(await page.locator('.cq-local-recent-account strong').innerText(),'—');assert.match(await page.locator('.cq-local-recent-account').innerText(),/跨周期采样不足/);
-  data.interval.account={...data.interval.account,resetAdjusted:true,segments};await updateLocalUsage(page,data,id);
-  assert.equal(await page.locator('.cq-local-recent-account strong').innerText(),'—');assert.match(await page.locator('.cq-local-recent-account').innerText(),/重置时间变化.*无法累计/);
-  await page.locator('.cq-interval-sampled-range').press('Enter');assert.match(await page.locator('.cq-interval-segments').innerText(),/85[\s\S]*88[\s\S]*4/);
-  data.interval.account={...data.interval.account,status:'partial',usedPercent:177,segments:segments.map((s,i)=>({...s,usedPercent:i===0?84:s.usedPercent}))};await updateLocalUsage(page,data,id);
-  assert.equal(await page.locator('.cq-local-page-note').innerText(),'区间读数暂不可用');
+  const segment={startAt:range.intervalStart,endAt:range.intervalEnd,usedPercent:0};
+  const sample={sampledStartAt:segment.startAt,sampledEndAt:segment.endAt};
+  const row=page.locator('.cq-local-recent-account');
+  for(const [account,value,partial] of [
+    [{...sample,status:'ok',usedPercent:0},'0百分点',false],
+    [{...sample,status:'partial',usedPercent:0,crossReset:true,hasGaps:true,segments:[segment]},'0百分点',true],
+    [{...sample,status:'partial',usedPercent:4,crossReset:true,segments:[segment]},'暂不可用',false],
+    [{status:'insufficient_history',usedPercent:null},'采样不足',false],
+    [undefined,'暂不可用',false]
+  ]){
+    data.interval.account=account;
+    await updateLocalUsage(page,data,id);
+    assert.match(await page.locator('.cq-local-recent-local strong').innerText(),/2%/);
+    assert.equal(await page.locator('.cq-local-total strong').getAttribute('title'),'27,921,500 token');
+    assert.equal(await row.locator('strong').innerText(),value);
+    assert.equal(await row.locator('.cq-account-partial').count(),Number(partial));
+    const measured=value.endsWith('百分点');
+    assert.equal(await row.locator('.cq-account-devices').count(),Number(measured));
+    assert.equal(await row.locator(':scope > *').count(),measured?3:2);
+    assert.doesNotMatch(await row.innerText(),/跨周期|有间断/);
+    const rows=await page.locator('.cq-local-highlights > div').evaluateAll(nodes=>new Set(nodes.map(node=>node.getBoundingClientRect().top)).size);
+    assert.equal(rows,1,'token and API equivalents fit together');
+  }
  }finally{await close(page);}
 });
 
@@ -312,8 +329,9 @@ test('local log quota is a dated observation independent of account sampling', a
   data.interval.logQuota = logQuota;
   await updateLocalUsage(page, data, id);
   const log = page.locator('.cq-local-log-quota');
-  assert.match(await log.innerText(), /日志周额度[\s\S]*已用 0%[\s\S]*账号未核验[\s\S]*日志时间/);
-  assert.match(await page.locator('.cq-local-recent-account').innerText(), /采样不足/);
+  await page.locator('.cq-local-highlights').click();
+  assert.equal(await log.isVisible(),true);
+  assert.match(await log.innerText(), /日志记录[\s\S]*0%[\s\S]*账号未核验/);
   assert.equal(await page.locator('#cq-local-usage').evaluate(n => n.scrollWidth <= n.clientWidth + 1), true);
   logQuota.latestUsedPercent = null;
   await updateLocalUsage(page, data, id);
@@ -322,7 +340,6 @@ test('local log quota is a dated observation independent of account sampling', a
   logQuota.lastAt = new Date(Date.parse(range.intervalEnd) + 1000).toISOString();
   await updateLocalUsage(page, data, id);
   assert.equal(await log.count(), 0);
-  assert.match(await page.locator('.cq-local-recent-account').innerText(), /采样不足/);
  } finally { await close(page); }
 });
 
@@ -341,7 +358,7 @@ test('daily selection and keyboard navigation do not replace whole-range totals 
   await page.locator('.cq-local-chart-nav button').first().click();await page.locator('.cq-local-day[data-date="2026-10-01"]').click();assert.match(await page.locator('.cq-local-day-detail').innerText(),/110万/);assert.equal(await page.locator('.cq-local-total strong').getAttribute('title'),before);
   const labels=await page.locator('.cq-local-day-values > div > span').evaluateAll(nodes=>nodes.map(node=>({text:node.textContent,width:node.getBoundingClientRect().width})));
   assert.deepEqual(labels.map(label=>label.text),['当日 token','API 等值']);
-  assert.ok(labels.every(label=>label.width>9),'daily metric labels are visible beside the readings');
+  assert.ok(labels.every(label=>label.width>0),'daily metric labels remain in the accessibility tree');
   await page.keyboard.press('ArrowRight');assert.equal(await page.locator('.cq-local-day[data-date="2026-10-02"]').getAttribute('aria-pressed'),'true');assert.equal((await localUsageRequest(page)).id,id);
   await page.locator('.cq-local-day[data-date="2026-10-04"]').click();assert.match(await page.locator('.cq-local-day-detail').innerText(),/暂不可用/);
  }finally{await close(page);}
@@ -350,9 +367,12 @@ test('daily selection and keyboard navigation do not replace whole-range totals 
 test('composition and model folds preserve precise quantities and semantic shares without duplicate primary values',async()=>{
  const page=await pageFor();try{
   await showLocalUsage(page);const {range,id}=await localUsageRequest(page);await updateLocalUsage(page,localUsagePayload(range),id);
-  await page.locator('.cq-local-usage-details > summary').click();assert.equal(await page.locator('.cq-local-composition-values > div').count(),3);assert.equal(await page.locator('.cq-local-day').count(),0);
+  await page.locator('.cq-local-usage-details > summary').click();await page.locator('.cq-local-models > summary').click();
+  assert.equal(await page.locator('.cq-local-usage-group .cq-local-composition-values > div').count(),3);assert.equal(await page.locator('.cq-local-day').count(),0);
   assert.equal(await page.locator('.cq-local-cache-track').getAttribute('role'),'meter');assert.match(await page.locator('.cq-local-cache-track').getAttribute('title'),/25,001,000.*2,000,200/);
-  await page.locator('.cq-local-models > summary').click();assert.equal(await page.locator('.cq-local-model').count(),3);assert.equal(await page.locator('.cq-local-model-share').count(),0);assert.equal(await page.locator('.cq-local-model-track[role=meter]').count(),3);
+  assert.equal(await page.locator('.cq-local-model').count(),3);assert.equal(await page.locator('.cq-local-model-share').count(),0);assert.equal(await page.locator('.cq-local-model-track[role=meter]').count(),3);
+  await page.locator('.cq-local-usage-details > summary').click();await updateLocalUsage(page,localUsagePayload(range),id);
+  assert.equal(await page.locator('.cq-local-usage-details').evaluate(el=>el.open),false);assert.equal(await page.locator('.cq-local-models').evaluate(el=>el.open),true);
   assert.equal((await localUsageRequest(page)).id,id);
  }finally{await close(page);}
 });
@@ -366,7 +386,6 @@ test('reference selection lives in settings, preserves the selected exact range 
   await page.locator('.cq-local-reference-plan').selectOption('pro200');const next=await localUsageRequest(page);assert.equal(next.range.referencePlan,'pro200');assert.equal(next.range.intervalStart,range.intervalStart);
   for(let i=0;i<3;i++)await updateLocalUsage(page,localUsagePayload(next.range),next.id);assert.equal(await page.locator('.cq-local-estimate-methods').count(),1);
   const changed=localUsagePayload(next.range,{models:[{model:'gpt-6-astra',inputTokens:1000000,cachedInputTokens:1000000,cacheWriteInputTokens:0,cacheWriteKnown:true,outputTokens:0,totalTokens:1000000}],eventCount:1});
-  changed.interval.account={status:'ok',usedPercent:.5,sampledStartAt:next.range.intervalStart,sampledEndAt:next.range.intervalEnd,coverageStartAt:next.range.intervalStart,coverageEndAt:next.range.intervalEnd};
   await updateLocalUsage(page,changed,next.id);
   const assertInside=frames=>{for(const frame of frames)assert.ok(frame.left>=11&&frame.top>=11&&frame.right<=1013&&frame.bottom<=709,JSON.stringify(frame));};
   assertInside([(await geometry(page)).popup]);await page.emulateMedia({reducedMotion:'no-preference'});await finishAnimations(page);
@@ -388,7 +407,7 @@ test('reference selection lives in settings, preserves the selected exact range 
   await toggle(referenceSummary,true);assert.equal(await page.locator('.cq-local-reference').evaluate(el=>el.open),false);
   assert.equal(await page.locator('#cq-settings .cq-local-detail-body[aria-hidden=true]').count(),0);
   await page.locator('#cq-settings header button').click();await finishAnimations(page);assert.equal(await page.locator('.cq-local-reference').isVisible(),false);
-  assert.match(await page.locator('.cq-local-recent-local strong').textContent(),/0\.23/);assert.match(await page.locator('.cq-local-recent-account strong').textContent(),/0\.5/);
+  assert.match(await page.locator('.cq-local-recent-local strong').textContent(),/0\.23/);
   assert.equal(await page.locator('.cq-local-total strong').getAttribute('title'),'1,000,000 token');assert.match(await page.locator('.cq-local-cost strong').textContent(),/1\.00/);
   assert.equal(await page.locator('.cq-local-reference').count(),1);assert.equal(await page.evaluate(()=>__officialTests.length),0);
   await page.locator('.cq-settings-button').click();await finishAnimations(page);assert.equal(await page.locator('#cq-settings .cq-local-reference').count(),1);
@@ -396,9 +415,8 @@ test('reference selection lives in settings, preserves the selected exact range 
   assert.equal(await page.locator('.cq-local-reference').count(),1);assert.equal(await page.locator('#cq-local-usage .cq-local-reference').count(),1);assert.equal(await page.locator('.cq-local-reference').isVisible(),false);
   await page.locator('.cq-local-refresh').click();const reopened=await localUsageRequest(page);
   const afterClose=localUsagePayload(reopened.range,{models:[{model:'gpt-6-astra',inputTokens:2000000,cachedInputTokens:2000000,cacheWriteInputTokens:0,cacheWriteKnown:true,outputTokens:0,totalTokens:2000000}],eventCount:1});
-  afterClose.interval.account={status:'ok',usedPercent:.8,sampledStartAt:reopened.range.intervalStart,sampledEndAt:reopened.range.intervalEnd,coverageStartAt:reopened.range.intervalStart,coverageEndAt:reopened.range.intervalEnd};
   await updateLocalUsage(page,afterClose,reopened.id);await finishAnimations(page);
-  assert.match(await page.locator('.cq-local-recent-local strong').textContent(),/0\.46/);assert.match(await page.locator('.cq-local-recent-account strong').textContent(),/0\.8/);
+  assert.match(await page.locator('.cq-local-recent-local strong').textContent(),/0\.46/);
   assert.equal(await page.locator('.cq-local-total strong').getAttribute('title'),'2,000,000 token');assert.match(await page.locator('.cq-local-cost strong').textContent(),/2\.00/);assert.equal(await page.locator('.cq-local-reference').count(),1);assert.equal(await page.evaluate(()=>__officialTests.length),0);
  }finally{await close(page);}
 });
@@ -422,8 +440,11 @@ test('custom calendar respects theme, Escape, leap dates and viewport bounds wit
 test('fold animations reverse on the visible frame and leave no layers after closing or reinjection',async()=>{
  const page=await pageFor(officialPayload(),{width:390,height:720},{reducedMotion:'no-preference'});try{
   await showLocalUsage(page);const r=await localUsageRequest(page);await updateLocalUsage(page,localUsagePayload(r.range),r.id);await finishAnimations(page);
+  await page.locator('.cq-local-usage-details > summary').click();await finishAnimations(page);
   const summary=page.locator('.cq-local-usage-details > summary');await summary.click();await page.waitForTimeout(40);await summary.click();await page.waitForTimeout(30);await summary.click();await finishAnimations(page);
-  assert.equal(await page.locator('.cq-local-usage-details').evaluate(el=>el.open),true);await collapse(page);await finishAnimations(page);await assertMotionClean(page);
+  assert.equal(await page.locator('.cq-local-usage-group .cq-local-composition-track').isVisible(),false);await summary.press('Enter');await finishAnimations(page);
+  assert.equal(await page.locator('.cq-local-usage-group .cq-local-composition-track').isVisible(),true);
+  await collapse(page);await finishAnimations(page);await assertMotionClean(page);
   await page.evaluate(source);await settle(page);assert.equal(await page.locator('#codex-quota-trigger').count(),1);assert.equal(await page.locator('.cq-shared-layer,.cq-shared-surface').count(),0);
  }finally{await close(page);}
 });
@@ -431,7 +452,12 @@ test('fold animations reverse on the visible frame and leave no layers after clo
 test('empty, partial and tiny local usage remain distinct and session reset rejects old replies',async()=>{
  const page=await pageFor();try{
   await showLocalUsage(page);const {range,id}=await localUsageRequest(page);
-  await updateLocalUsage(page,localUsagePayload(range,{models:[],eventCount:0}),id);assert.equal(await page.locator('.cq-local-status').innerText(),'无记录');
+  await updateLocalUsage(page,localUsagePayload(range),id);
+  const empty=localUsagePayload(range,{models:[],eventCount:0});
+  await updateLocalUsage(page,empty,id);
+  assert.equal(await page.locator('.cq-local-recent-local strong').innerText(),'无记录');
+  assert.equal(await page.locator('.cq-local-summary-details').count(),0);
+  assert.doesNotMatch(await page.locator('.cq-local-result').innerText(),/未计价|总 token/);
   await updateLocalUsage(page,localUsagePayload(range,{partial:true}),id);assert.match(await page.locator('.cq-local-status').innerText(),/统计不完整/);
   await updateLocalUsage(page,{errorCode:'LOCAL_USAGE_UNAVAILABLE'},id);assert.equal(await page.locator('.cq-local-status').innerText(),'读取失败，显示上次结果');assert.match(await page.locator('.cq-local-recent-local strong').innerText(),/2/);
   await updateLocalUsage(page,localUsagePayload(range,{models:[{model:'gpt-6-astra',inputTokens:1,cachedInputTokens:0,outputTokens:0,totalTokens:1}]}),id);assert.match(await page.locator('.cq-local-recent-local strong').innerText(),/<0\.01/);
@@ -460,7 +486,7 @@ test('stale reference checks retain the confirmed tier and never fall back to an
   await showLocalUsage(page);const {range,id}=await localUsageRequest(page);
   const reference={planName:'pro',selectedPlan:'pro100',status:'stale',lastSuccessAt:'2026-10-28T00:00:00Z',lastAttemptAt:'2026-10-29T00:00:00Z',nextCheckAt:'2026-10-30T00:00:00Z',models:{'gpt-6-astra':438000000,'gpt-6.1-sol':2354000000}};
   await updateLocalUsage(page,localUsagePayload(range,{reference}),id);await openReferences(page);assert.equal(await page.locator('.cq-local-reference-status').textContent(),'');
-  const link=page.locator('.cq-local-weekly-reference a');assert.match(await link.innerText(),/^ModelDial · 更新失败 · 上次核对 /);assert.match(await link.getAttribute('title'),/上次成功.*上次尝试.*下次检查/);
+  const link=page.locator('.cq-modeldial-link');assert.match(await link.innerText(),/^ModelDial\s+更新失败 · 上次核对 /);assert.match(await link.getAttribute('title'),/上次成功.*上次尝试.*下次检查/);
   await updateLocalUsage(page,localUsagePayload(range,{reference:{...reference,status:'ok'}}),id);assert.match(await link.innerText(),/已核对/);
   for(const ref of [{...reference,models:{'gpt-6-astra':0}},undefined]){await updateLocalUsage(page,localUsagePayload(range,{reference:ref}),id);assert.equal(await page.locator('.cq-local-estimate-methods').evaluate(el=>el.hidden),true);assert.doesNotMatch(await page.locator('.cq-local-recent-local strong').textContent(),/0%/);}
  }finally{await close(page);}
@@ -470,7 +496,7 @@ test('model breakdown keeps exact accessible shares, aligned numbers and host-co
  for(const dark of [false,true]){const page=await pageFor(officialPayload(),{width:390,height:800},{deviceScaleFactor:1.25});try{
   if(dark)await page.addStyleTag({content:':root{color-scheme:dark;--color-surface-elevated-secondary:#262724;--color-text:#f1f1eb;--color-text-secondary:#b0b2a8;--color-border:#494b43}'});
   await showLocalUsage(page);const {range,id}=await localUsageRequest(page);const models=[{model:'codex-auto-review',inputTokens:40000,cachedInputTokens:20000,outputTokens:10000,totalTokens:50000},{model:'gpt-6-astra',inputTokens:140000,cachedInputTokens:100000,outputTokens:10000,totalTokens:150000},{model:'gpt-6.1-sol',inputTokens:700000,cachedInputTokens:600000,outputTokens:100000,totalTokens:800000}];
-  await updateLocalUsage(page,localUsagePayload(range,{models}),id);await page.locator('.cq-local-models summary').click();
+  await updateLocalUsage(page,localUsagePayload(range,{models}),id);await page.locator('.cq-local-highlights').click();await page.locator('.cq-local-models > summary').click();
   assert.deepEqual(await page.locator('.cq-local-model-value').evaluateAll(nodes=>nodes.map(n=>n.getAttribute('aria-label'))),['800,000 token','150,000 token','50,000 token']);assert.deepEqual(await page.locator('.cq-local-model-track').evaluateAll(nodes=>nodes.map(n=>Number(n.getAttribute('aria-valuenow')))),[80,15,5]);
   const rows=await page.locator('.cq-local-model').evaluateAll(nodes=>nodes.map(el=>{const rect=n=>{const r=n.getBoundingClientRect();return {left:r.left,right:r.right,width:r.width}};return {name:rect(el.querySelector('.cq-local-model-name')),value:rect(el.querySelector('strong')),track:rect(el.querySelector('.cq-local-model-track')),fill:rect(el.querySelector('i'))}}));
   for(const row of rows)for(const [part,edge]of [['name','left'],['value','right'],['track','left'],['track','right']])assert.ok(Math.abs(row[part][edge]-rows[0][part][edge])<.5);
@@ -487,6 +513,7 @@ test('statistics inner motion retargets selection immediately and preserves exac
   const page=await pageFor(officialPayload(),{width:1024,height:1000});
   try {
     const {range,id}=await customDailyRange(page);await updateLocalUsage(page,dailyChartPayload(range),id);
+
     while(!await page.locator('.cq-local-day[data-date="2026-10-01"]').count())await page.getByRole('button',{name:'查看更早日期'}).click();
     await page.emulateMedia({reducedMotion:'no-preference'});
     const sample=await page.evaluate(()=>{
@@ -516,6 +543,7 @@ test('statistics chart range transitions use current bar heights and shrink empt
   const page=await pageFor(officialPayload(),{width:1024,height:1000});
   try {
     const {range,id}=await customDailyRange(page);await updateLocalUsage(page,dailyChartPayload(range),id);
+
     while(!await page.locator('.cq-local-day[data-date="2026-10-01"]').count())await page.getByRole('button',{name:'查看更早日期'}).click();
     await page.emulateMedia({reducedMotion:'no-preference'});
     const shrinking=await page.evaluate(()=>{
@@ -608,7 +636,7 @@ test('rail popup supports keyboard, light dismissal and uninterrupted reversal w
       p.hidePopover();return result;
     });
     assert.ok(sample.animations>0);assert.ok(sample.opacity>0&&sample.opacity<1);
-    assert.equal(sample.radius,'20px');assert.doesNotMatch(sample.transform,/scale/);
+    assert.equal(sample.radius,'22px');assert.doesNotMatch(sample.transform,/scale/);
     await page.waitForTimeout(40);
     await page.locator('#codex-quota-trigger').click();await page.waitForTimeout(30);
     assert.deepEqual(await page.locator('#codex-quota-trigger').boundingBox(),origin,'entry remains stationary and clickable throughout');
@@ -726,7 +754,7 @@ test('DPR and CSS zoom preserve the native-sized popup gap, clipping and indepen
       const g=await geometry(page);
       assert.ok(g.popup.left>=12-1&&g.popup.right<=720-12+1&&g.popup.top>=12-1&&g.popup.bottom<=800-12+1,JSON.stringify({dpr,zoom,g}));
       assert.ok(Math.abs(g.popup.left-g.trigger.right-4*zoom)<1,`native gap drifted at DPR ${dpr}, zoom ${zoom}: ${JSON.stringify(g)}`);
-      assert.ok(Math.abs(g.popup.width-260*zoom)<1);
+      assert.ok(Math.abs(g.popup.width-228*zoom)<1);
       assert.ok(g.trigger.bottom<=g.help.top);
     }finally{await close(page);}
   }
@@ -790,11 +818,11 @@ test('self-drawn switches expose only relevant controls and survive host reset a
     assert.equal(await page.locator('[name=thresholds]').isVisible(),true);
     assert.equal(await page.locator('[name=system]').isVisible(),true);
     for(const current of await page.locator('.cq-switch-track:visible').all()){
-      const box=await current.boundingBox();assert.equal(box.width,28);assert.equal(box.height,16);
-      assert.equal(await current.evaluate(el=>getComputedStyle(el,'::after').width),'12px');assert.equal(await current.evaluate(el=>getComputedStyle(el,'::after').height),'12px');
+      const box=await current.boundingBox();assert.equal(box.width,40);assert.equal(box.height,24);
+      assert.equal(await current.evaluate(el=>getComputedStyle(el,'::after').width),'20px');assert.equal(await current.evaluate(el=>getComputedStyle(el,'::after').height),'20px');
     }
     assert.notEqual(await track.evaluate(el=>getComputedStyle(el).backgroundColor),off);
-    assert.equal(await track.evaluate(el=>new DOMMatrixReadOnly(getComputedStyle(el,'::after').transform).m41),12);
+    assert.equal(await track.evaluate(el=>new DOMMatrixReadOnly(getComputedStyle(el,'::after').transform).m41),16);
     assert.equal(await track.evaluate(el=>getComputedStyle(el).outlineWidth),'2px');
     assert.equal(await track.evaluate(el=>getComputedStyle(el,'::after').transitionDuration),'0s');
     await page.emulateMedia({reducedMotion:'no-preference'});assert.equal(await track.evaluate(el=>getComputedStyle(el,'::after').transitionDuration),'0.13s');await page.emulateMedia({reducedMotion:'reduce'});
@@ -809,10 +837,12 @@ test('self-drawn switches expose only relevant controls and survive host reset a
     await page.locator('[name=recovery]').check();assert.equal(await page.locator('[name=system]').isVisible(),true);
     assert.equal(await page.locator('[name=thresholds]').isVisible(),false,'recovery alerts do not enable low-quota thresholds');
     await alerts.check();
-    assert.ok(await page.locator('.cq-tools').evaluate(el=>parseFloat(getComputedStyle(el).borderTopWidth)>0));assert.equal(await page.locator('.cq-tools').evaluate(el=>getComputedStyle(el).fontSize),'10.5px');
+    assert.ok(await page.locator('.cq-threshold-row').evaluate(el=>parseFloat(getComputedStyle(el).borderTopWidth)>0));
+    assert.equal(await page.locator('.cq-tools').isVisible(),false);
     await page.emulateMedia({forcedColors:'active'});assert.equal(await track.isVisible(),true);
     assert.notEqual(await track.evaluate(el=>getComputedStyle(el).backgroundColor),await page.locator('[name=system] + .cq-switch-track').evaluate(el=>getComputedStyle(el).backgroundColor));
     await page.emulateMedia({forcedColors:'none'});
+    await page.locator('[data-settings=tools]').click();
     await page.locator('.cq-doctor').click();await page.evaluate(()=>__codexQuotaUpdateDiagnosis({errorCode:'TIMEOUT'}));assert.equal(await page.locator('.cq-copy').isVisible(),false);
     await page.locator('.cq-doctor').click();await page.evaluate(()=>__codexQuotaUpdateDiagnosis({CardVisible:false,StageCodes:['CARD_NOT_VISIBLE']}));assert.match(await page.locator('#cq-diagnosis').innerText(),/CARD_NOT_VISIBLE/);
     assert.equal(await page.locator('.cq-copy').isVisible(),true,'a successful diagnostic response can be copied even when it reports an unhealthy entry');
@@ -868,6 +898,7 @@ test('week chart keeps seven local-day slots, distinguishes missing logs and exc
  const page=await pageFor(officialPayload(),{width:390,height:800},{timezoneId:'Asia/Shanghai'});try{
   await page.clock.install({time:new Date('2026-11-04T12:30:00+08:00')});await showLocalUsage(page);
   await page.locator('[data-period=week]').click();const {range,id}=await localUsageRequest(page);await updateLocalUsage(page,localUsagePayload(range),id);
+  assert.equal(await page.locator('.cq-local-daily').isVisible(),true);
   const slots=page.locator('.cq-local-chart-plot > .cq-local-day[data-date]');
   assert.deepEqual(await slots.evaluateAll(nodes=>nodes.map(n=>n.dataset.date)),['2026-11-02','2026-11-03','2026-11-04','2026-11-05','2026-11-06','2026-11-07','2026-11-08']);
   assert.equal(await slots.locator('button').count(),0,'slot elements themselves represent past/current buttons; no nested future actions');
@@ -888,17 +919,17 @@ test('week chart keeps seven local-day slots, distinguishes missing logs and exc
  }finally{await close(page);}
 });
 
-test('first-read skeleton reserves the normal today and week layout before precise data arrives',async()=>{
- for(const period of ['today','week'])for(const accountState of ['insufficient_history','ok']){const page=await pageFor(officialPayload(),{width:390,height:1000},{timezoneId:'Asia/Shanghai'});try{
+test('first-read skeleton provides content at a comparable height before the result arrives',async()=>{
+ for(const period of ['today','week']){const page=await pageFor(officialPayload(),{width:390,height:1000},{timezoneId:'Asia/Shanghai'});try{
   await page.clock.install({time:new Date('2026-11-04T12:30:00+08:00')});await showLocalUsage(page);
   if(period==='week')await page.locator('[data-period=week]').click();const {range,id}=await localUsageRequest(page);
   assert.equal(await page.locator('.cq-local-skeleton').isVisible(),true);const before=(await geometry(page)).popup.height;
+
   const row={model:'gpt-6-astra',inputTokens:1000000,cachedInputTokens:500000,cacheWriteInputTokens:0,cacheWriteKnown:true,outputTokens:100000,totalTokens:1100000};
   const payload=localUsagePayload(range,{models:[row],eventCount:1});
-  if(accountState==='ok')payload.interval.account={status:'ok',usedPercent:6,sampledStartAt:range.intervalStart,sampledEndAt:range.intervalEnd,coverageStartAt:range.intervalStart,coverageEndAt:range.intervalEnd};
   await updateLocalUsage(page,payload,id);const after=(await geometry(page)).popup.height;
-  console.log(JSON.stringify({skeletonGeometry:{period,accountState,before,after,delta:after-before}}));
-  assert.ok(Math.abs(after-before)<=1,`${period}/${accountState}: skeleton height ${before}, data height ${after}`);
+  console.log(JSON.stringify({skeletonGeometry:{period,before,after,delta:after-before}}));
+  assert.ok(before>180&&Math.abs(after-before)<=60,`${period}: skeleton height ${before}, data height ${after}`);
   assert.equal(await page.locator('.cq-local-skeleton').count(),0);assert.equal(await page.locator('.cq-local-total strong').getAttribute('title'),'1,100,000 token');
  }finally{await close(page);}}
 });
@@ -906,9 +937,10 @@ test('first-read skeleton reserves the normal today and week layout before preci
 test('settings body scrolls inside the anchored popup without visible scrollbars or a moving header',async()=>{
  const page=await pageFor(officialPayload(),{width:390,height:420});try{
   await showLocalUsage(page);const {range,id}=await localUsageRequest(page);await updateLocalUsage(page,localUsagePayload(range),id);
-  await page.locator('.cq-local-source-link').click();await settle(page);
+  await openReferences(page);await settle(page);
   const reference=page.locator('#cq-settings .cq-local-reference');
-  assert.deepEqual(await reference.evaluate(el=>({open:el.open,previous:el.previousElementSibling.className,focused:document.activeElement===el.querySelector(':scope > summary')})),{open:true,previous:'cq-options',focused:true});
+  assert.equal(await reference.evaluate(el=>el.open),true);
+  assert.equal(await page.locator('[data-settings=reference]').getAttribute('aria-pressed'),'true');
   await page.locator('#cq-settings .cq-local-estimate-methods > summary').click();await page.locator('#cq-settings .cq-local-caveats > summary').click();await settle(page);
   const body=page.locator('#cq-settings .cq-settings-body'),header=page.locator('#cq-settings header');
   const before=await header.boundingBox();
@@ -922,16 +954,23 @@ test('settings body scrolls inside the anchored popup without visible scrollbars
 });
 
 
-test('popup adopts the associated native menu measured width across host zoom and later width changes',async()=>{
+test('popup uses the avatar menu width across host zoom and ignores the wider quota menu',async()=>{
  for(const zoom of [1,1.25,1.5]){const page=await pageFor(officialPayload(),{width:720,height:800});try{
   await page.evaluate(zoom=>{document.body.style.zoom=String(zoom);document.body.style.height=(innerHeight/zoom)+'px';},zoom);await settle(page);
-  for(const width of [248,264]){
-   await page.locator('#native-menu').evaluate((el,width)=>el.style.width=width+'px',width);
-   await page.locator('#help').click();await page.locator('#help').evaluate(el=>el.setAttribute('data-state','open'));await settle(page);
-   const nativeWidth=(await page.locator('#native-menu').boundingBox()).width;
-   await page.locator('#codex-quota-trigger').click();await page.locator('#help').evaluate(el=>el.setAttribute('data-state','closed'));await settle(page);
-   assert.equal(await page.locator('#native-menu').evaluate(el=>el.matches(':popover-open')),false);
-   const popup=(await geometry(page)).popup;assert.ok(Math.abs(popup.width-nativeWidth)<1,JSON.stringify({zoom,width,nativeWidth,popup}));assert.ok(popup.left>=11&&popup.right<=709);
+  await page.locator('#help').click();await settle(page);
+  await page.locator('#codex-quota-trigger').click();await settle(page);
+  assert.ok(Math.abs((await geometry(page)).popup.width-228*zoom)<1,'the quota menu does not supply the width');
+  await collapse(page);
+  for(const width of [228,248]){
+   await page.locator('#profile-menu').evaluate((el,width)=>el.style.width=width+'px',width);
+   await page.locator('#profile').click();await settle(page);
+   const nativeWidth=(await page.locator('#profile-menu').boundingBox()).width;
+   await page.locator('#codex-quota-trigger').click();await settle(page);
+   assert.equal(await page.locator('#profile-menu').evaluate(el=>el.matches(':popover-open')),false);
+   const popup=(await geometry(page)).popup;
+   assert.ok(Math.abs(popup.width-nativeWidth)<1,JSON.stringify({zoom,width,nativeWidth,popup}));
+   assert.ok(popup.left>=11&&popup.right<=709);
+   await collapse(page);
   }
  }finally{await close(page);}}
 });
@@ -942,7 +981,7 @@ test('account tier survives helper reinjection and stays isolated between accoun
   await page.evaluate(source);await settle(page);await showLocalUsage(page);
   let {range,id}=await localUsageRequest(page);assert.equal(range.referencePlan,'pro200');
   await updateLocalUsage(page,localUsagePayload(range),id);
-  await page.locator('.cq-settings-button').click();await page.locator('.cq-local-reference > summary').click();
+  await openReferences(page);
   assert.equal(await page.locator('.cq-local-reference-plan').inputValue(),'pro200');
   await page.locator('.cq-local-reference-plan').selectOption('pro100');
   ({range,id}=await localUsageRequest(page));assert.equal(range.referencePlan,'pro100');assert.equal(range.saveReferencePlan,true);
@@ -1070,5 +1109,119 @@ test('turn estimates follow native duration controls and reject stale or incompl
   assert.doesNotMatch(await page.locator('[data-content-search-turn-key="turn-2"] .cq-turn-usage').innerText(),/%/);
   await page.evaluate(id=>__codexQuotaUpdateTurnUsage({errorCode:'LOCAL_USAGE_UNAVAILABLE'},id),third.id);
   assert.match(await page.locator('[data-content-search-turn-key="turn-2"] .cq-turn-usage').innerText(),/暂不可用/);
+ }finally{await close(page);}
+});
+
+
+test('shared columns, selection markers and popup animation edges align under CSS zoom',async()=>{
+ for (const zoom of [1.25,1.5]) {
+  const page=await pageFor(officialPayload(),{width:720,height:800},{locale:'en-US',deviceScaleFactor:1.25,timezoneId:'Asia/Shanghai'});
+  try {
+   await page.clock.install({time:new Date('2026-11-18T12:30:00+08:00')});
+   await page.evaluate(zoom=>{document.body.style.zoom=String(zoom);document.body.style.height=(innerHeight/zoom)+'px';},zoom);
+   await showLocalUsage(page);const {range,id}=await localUsageRequest(page);await updateLocalUsage(page,localUsagePayload(range),id);
+   await page.locator('[data-period=custom]').click();await page.locator('[data-interval-minutes="60"]').click();
+   const alignment=await page.evaluate(()=>{
+    const rect=s=>document.querySelector(s).getBoundingClientRect(), center=r=>r.top+r.height/2;
+    const compare=(first,second,edges)=>Math.max(...edges.map(edge=>Math.abs(rect(first)[edge]-rect(second)[edge])));
+    return {
+     date:compare('[name=intervalStart]','[name=intervalEnd]',['left','right']),
+     time:compare('[name=intervalStartTime]','[name=intervalEndTime]',['left','right']),
+     icons:Math.abs(center(rect('.cq-settings-button svg'))-center(rect('.cq-local-refresh svg'))),
+     period:compare('[data-period][aria-pressed=true]','.cq-local-period-marker',['left','top','right','bottom']),
+     preset:compare('[data-interval-minutes][aria-pressed=true]','.cq-interval-preset-marker',['left','top','right','bottom']),
+    };
+   });
+   for(const [name,error] of Object.entries(alignment))assert.ok(error<.2,`${zoom} ${name} is off by ${error}px`);
+   await page.locator('[data-period=custom]').click();await page.emulateMedia({reducedMotion:'no-preference'});
+   const compareFrames=async(selector,pane,reverse=false)=>{
+    const result=await page.evaluate(({selector,pane,reverse})=>{
+     const popup=document.getElementById('codex-quota-popover');
+     const sample=()=>{
+      const r=popup.getBoundingClientRect(),style=getComputedStyle(popup),scale=r.width/parseFloat(style.width);
+      const edges=/^inset\(([^)]*?)(?: round|\))/.exec(style.clipPath)?.[1].split(' ').map(parseFloat);
+      return {top:r.top+(edges?.[0]||0)*scale,bottom:r.bottom-(edges?.[2]??edges?.[0]??0)*scale,width:r.width,pane:document.querySelector(pane)?.getBoundingClientRect().width};
+     };
+     const pause=time=>{for(const a of popup.getAnimations()){a.pause();a.currentTime=time;}};
+     const button=document.querySelector(selector),before=sample();button.click();pause(0);const after=sample();
+     if(!reverse)return {before,after};
+     pause(75);const midpoint=sample();button.click();pause(0);return {before,after,midpoint,reversed:sample()};
+    },{selector,pane,reverse});
+    for(const [first,last] of [[result.before,result.after],...(reverse?[[result.midpoint,result.reversed]]:[])]) {
+     for(const edge of ['top','bottom','width'])assert.ok(Math.abs(first[edge]-last[edge])<.75,JSON.stringify({zoom,edge,first,last}));
+     assert.ok(last.pane<=last.width&&last.width-last.pane<4,JSON.stringify({zoom,last}));
+    }
+    await finishAnimations(page);await assertMotionClean(page);
+   };
+   await compareFrames('.cq-local-highlights','#cq-local-usage',true);
+   await compareFrames('.cq-settings-button','#cq-settings');
+   await page.emulateMedia({reducedMotion:'reduce'});
+   const settingsError=await page.locator('.cq-settings-tabs').evaluate(tabs=>Math.abs(tabs.querySelector('button[aria-pressed=true]').getBoundingClientRect().left-tabs.querySelector('i').getBoundingClientRect().left));
+   assert.ok(settingsError<.2);
+   await page.locator('#cq-settings header button').click();await page.locator('[data-period=week]').click();
+   const week=await localUsageRequest(page);await updateLocalUsage(page,localUsagePayload(week.range),week.id);
+   const chartError=await page.locator('.cq-local-chart-plot').evaluate(plot=>{
+    const center=node=>{const rect=node.getBoundingClientRect();return rect.left+rect.width/2;};
+    return Math.abs(center(plot.querySelector('.cq-local-day-selection'))-center(plot.querySelector('[aria-pressed=true]')));
+   });
+   assert.ok(chartError<.2,`${zoom} chart marker is off by ${chartError}px`);
+  } finally {await close(page);}
+ }
+});
+
+test('settings inherits the visible opening frame when today loads mid-animation',async()=>{
+ const page=await pageFor(officialPayload(),{width:720,height:800},{reducedMotion:'no-preference'});
+ try {
+  await page.evaluate(()=>{
+   const info=console.info;
+   console.info=(...args)=>{if(args[0]==='__codexQuotaLocalUsageRequest__')globalThis.__codexQuotaLocalUsageTestRequestId=args[1];info.apply(console,args);};
+  });
+  await page.locator('#codex-quota-trigger').click();
+  await page.waitForFunction(()=>document.querySelector('#codex-quota-popover[data-cq-rail-motion]'));
+  const {range,id}=await localUsageRequest(page);
+  const frames=await page.evaluate(({payload,id})=>{
+   const popup=document.getElementById('codex-quota-popover');
+   const hold=(animation,time)=>{animation.pause();animation.currentTime=time;};
+   const sample=()=>{
+    const r=popup.getBoundingClientRect(),css=getComputedStyle(popup);
+    const inset=/^inset\(([^)]*?)(?: round|\))/.exec(css.clipPath)?.[1].split(' ').map(parseFloat);
+    return {left:r.left,top:r.top+(inset?.[0]||0),bottom:r.bottom-(inset?.[2]??inset?.[0]??0),opacity:Number(css.opacity)};
+   };
+   for(const animation of popup.getAnimations())hold(animation,75);
+   __codexQuotaUpdateLocalUsage(payload,id);
+   const resize=popup.getAnimations().find(animation=>animation.effect.getKeyframes()[0].clipPath);
+   if(resize)hold(resize,55);
+   const before=sample();document.querySelector('.cq-settings-button').click();
+   for(const animation of popup.getAnimations())hold(animation,0);
+   return {before,after:sample(),resize:Boolean(resize)};
+  },{payload:localUsagePayload(range),id});
+  assert.equal(frames.resize,true,'a reply during opening still animates the height');
+  for(const edge of ['top','bottom','left','opacity'])assert.ok(Math.abs(frames.before[edge]-frames.after[edge])<(edge==='opacity'?.01:.75),JSON.stringify({edge,...frames}));
+  await finishAnimations(page);await assertMotionClean(page);
+ } finally {await close(page);}
+});
+
+test('preview panes follow their content and keep the full date editor reachable in short windows',async()=>{
+ const page=await pageFor(officialPayload(),{width:390,height:720},{timezoneId:'Asia/Shanghai'});try{
+  await page.clock.install({time:new Date('2026-11-04T12:30:00+08:00')});
+  await showLocalUsage(page);let {range,id}=await localUsageRequest(page);await updateLocalUsage(page,localUsagePayload(range),id);
+  const today=(await geometry(page)).popup;
+  await page.locator('[data-period=week]').click();({range,id}=await localUsageRequest(page));await updateLocalUsage(page,localUsagePayload(range),id);
+  const week=(await geometry(page)).popup;assert.ok(week.height>today.height&&week.width===today.width);
+  await page.locator('.cq-settings-button').click();await settle(page);
+  const settings=(await geometry(page)).popup;assert.ok(settings.height<today.height&&settings.width===today.width);
+  for(const section of ['reference','tools','alerts']){
+   await page.locator(`[data-settings=${section}]`).click();
+   assert.equal(await page.locator(`[data-settings=${section}]`).getAttribute('aria-pressed'),'true');
+  }
+  await page.locator('#cq-settings header button').click();
+  await page.setViewportSize({width:390,height:360});await settle(page);
+  await page.locator('[data-period=custom]').click();await page.locator('[data-date-field=intervalEnd]').click();await settle(page);
+  const small=(await geometry(page)).popup;
+  assert.ok(small.top>=11&&small.bottom<=349&&small.height<=336,JSON.stringify(small));
+  const scroller=page.locator('.cq-local-body');
+  assert.ok(await scroller.evaluate(el=>el.scrollHeight>el.clientHeight&&getComputedStyle(el).scrollbarWidth==='none'));
+  await page.locator('.cq-local-calendar [data-close]').click();await page.locator('.cq-interval-actions [type=submit]').click();
+  assert.notEqual((await localUsageRequest(page)).id,id);
  }finally{await close(page);}
 });
