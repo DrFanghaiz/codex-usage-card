@@ -898,12 +898,14 @@
   let localReferencePlan="", localReferenceScope=globalThis.__codexQuotaSessionScope;
   localReferencePlan=globalThis.__codexQuotaReferencePlan || "";
   if (!["pro100","pro200","pro500"].includes(localReferencePlan)) localReferencePlan="";
-  // OpenAI Standard short-context list prices, USD / 1M tokens, checked 2026-10-30.
+  // OpenAI Standard short-context prices in USD per million tokens; GPT-6.2 checked 2026-11-19.
   const localApiPrices = new Map([
+    ["gpt-6.2-astra", [8, .4, 40, 10, 20]], ["gpt-6.2-sol", [2, .1, 10, 2.5, 5]],
     ["gpt-6-astra", [10, 1, 50, 12.5, 25]], ["gpt-6.1-sol", [2, .1, 10, 2.5, 5]],
     ["gpt-6.1-terra", [1, .05, 5, 1.25, 2.5]], ["gpt-6-luna", [.1, .01, .5, .125, .25]],
     ["gpt-6-sol", [2, .2, 10, 2.5, 2.5]], ["gpt-5.6-sol", [4, .4, 20, 5, 10]],
   ]);
+  const localProxyPredecessors = new Map([["gpt-6.2-astra","gpt-6-astra"],["gpt-6.2-sol","gpt-6.1-sol"]]);
   const localIssueLabels = {
     SOURCE_UNCONFIRMED: words("来源未确认", "Unconfirmed source"),
     BASELINE_MISSING: words("历史起点缺失", "Missing history baseline"),
@@ -929,10 +931,15 @@
     const directApi=covered.length && priced.every(({row,cost})=>cost && apiBaselines.has(row.model))
       ? priced.reduce((sum,{row,cost})=>[sum[0]+cost[0]/apiBaselines.get(row.model)*100,sum[1]+cost[1]/apiBaselines.get(row.model)*100],[0,0]) : null;
     const anchors=['gpt-6-astra','gpt-6.1-sol'].map(name=>apiBaselines.get(name));
-    const proxy=anchors.every(value=>Number.isFinite(value) && value>0)
-      ? models.filter(row=>row.model!==quotaExemptModel && !baselines.has(row.model)).map(row=>({row,cost:apiEquivalent(row)})).filter(item=>item.cost) : [];
-    const proxyCost=proxy.reduce((sum,{cost})=>[sum[0]+cost[0],sum[1]+cost[1]],[0,0]);
-    const indirect=proxy.length ? [proxyCost[0]/Math.max(...anchors)*100,proxyCost[1]/Math.min(...anchors)*100] : [0,0];
+    const fallback=anchors.every(value=>Number.isFinite(value) && value>0) ? [Math.max(...anchors),Math.min(...anchors)] : null;
+    const proxy=models.flatMap(row=>{
+      if(row.model===quotaExemptModel || baselines.has(row.model))return [];
+      const predecessor=localProxyPredecessors.get(row.model), reference=apiBaselines.get(predecessor);
+      const basis=predecessor ? [reference,reference] : fallback;
+      const cost=basis?.[0]>0 ? apiEquivalent(row) : null;
+      return cost ? [{row,range:[cost[0]/basis[0]*100,cost[1]/basis[1]*100]}] : [];
+    });
+    const indirect=proxy.reduce((sum,{range})=>[sum[0]+range[0],sum[1]+range[1]],[0,0]);
     const directRange=token===null ? [0,0] : directApi ? [Math.min(token,directApi[0]),Math.max(token,directApi[1])] : [token,token];
     const api=directApi || !covered.length ? [indirect[0]+(directApi?.[0] || 0),indirect[1]+(directApi?.[1] || 0)] : null;
     const counted=covered.length+proxy.length+exempt.length;
@@ -1902,7 +1909,7 @@
     referenceText("section","cq-local-reference-section cq-local-api-reference","");
     for (const [className,label,status,url] of [
       ["cq-modeldial-link","ModelDial","","https://modeldial.com/subscriptions?period=week&view=insights"],
-      ["",words("OpenAI 价格","OpenAI pricing"),"2026.10.30","https://developers.openai.com/api/docs/pricing"],
+      ["",words("OpenAI 价格","OpenAI pricing"),"2026.11.19","https://developers.openai.com/api/docs/pricing"],
     ]) {
       const link=referenceText("a",className,"",links);link.href=url;link.target="_blank";link.rel="noopener noreferrer";
       referenceText("span","",label,link);referenceText("span","",status,link);
@@ -3996,7 +4003,7 @@
         const partial = row.partial || estimate.partial || !estimate.api && !estimate.exemptOnly;
         const state = row.status === 'running' ? words('进行中','In progress') : partial ? words('不完整','Partial') : '';
         const text = `${estimate.proxy ? words('间接估算','Proxy est.') : words('估算','Est.')} ${localEstimateText(estimate)}${state ? ` · ${state}` : ''}`;
-        turnRows.set(id, {text,title:`${turnDescription}${estimate.proxy ? words('；按 Astra 和 Sol 的 API 等值参考间接推算','; approximated from Astra and Sol API-equivalent references') : ''}${estimate.exempt ? words('；自动审核不占周额度','; automatic review uses no weekly quota') : ''}${partial ? words('；部分记录或参考缺失','; incomplete records or reference') : ''}`});
+        turnRows.set(id, {text,title:`${turnDescription}${estimate.proxy ? words('；按已有模型的周 API 等值间接推算','; approximated from weekly API equivalents of established models') : ''}${estimate.exempt ? words('；自动审核不占周额度','; automatic review uses no weekly quota') : ''}${partial ? words('；部分记录或参考缺失','; incomplete records or reference') : ''}`});
       }
       if (row.status === 'running') running = true;
     }
