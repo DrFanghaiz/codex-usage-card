@@ -9,6 +9,7 @@ $strings = $source.Substring($start, $end - $start)
 $harness = @'
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Linq;
@@ -30,6 +31,10 @@ public static class LocalUsageRegressions
     private static string UnstampedTurnEvent(string kind, string root, string turn) { return Json.Serialize(new {type="event_msg",timestamp=(string)null,payload=new {type=kind,root_turn_id=root,turn_id=turn}})+"\n"; }
     private static string TurnRecord(string root, string thread, string response, Dictionary<string,object> usage) { return Json.Serialize(new {type="token_usage_record",payload=new {root_turn_id=root,thread_id=thread,response_id=response,usage=usage}})+"\n"; }
     private static Dictionary<string,object> TurnRead(string root, params string[] ids) { return LocalUsage.Read(root,"2026-09-01","2026-09-02",DateTimeOffset.UtcNow,null,null,ids); }
+    private static Dictionary<string,object> ConversationRead(string root, params string[] ids)
+    {
+        return (Dictionary<string,object>)LocalUsage.Read(root,"2026-09-01","2026-09-02",DateTimeOffset.UtcNow,null,null,null,ids)["conversation"];
+    }
     private static Dictionary<string,object> Turn(Dictionary<string,object> result, int index=0) { return ((List<Dictionary<string,object>>)result["turns"])[index]; }
     private static string Meta(string provider) { return Json.Serialize(new { type="session_meta", payload=new { model_provider=provider } }) + "\n"; }
     private static string Model(string model) { return Json.Serialize(new { type="turn_context", payload=new { model=model } }) + "\n"; }
@@ -483,6 +488,24 @@ public static class LocalUsageRegressions
         File.AppendAllText(mainFile,TurnEvent("task_started","root-2","root-2")+E(2,3,total,more,"pro")+TurnRecord("root-2","main-thread","response-3",more)+TurnEvent("task_complete","root-2","root-2"),new UTF8Encoding(false));
         var second=Turn(TurnRead(turnRoot,"root-1","root-2"),1);
         Check(Total(second)==6 && !(bool)second["partial"] && (string)second["status"]=="complete","Incremental scan keeps separate root turn attribution");
+        var grandchildFile=Path.Combine(turnSessions,"grandchild.jsonl");
+        var grandchildMeta=childMeta.Replace("child-thread","grandchild-thread").Replace("main-thread","child-thread");
+        File.WriteAllText(grandchildFile,grandchildMeta+Model("gpt-6.1-sol")+TimedTurnEvent("task_started","root-1","grandchild-1",1)+E(2,2,more,more,"pro")+
+            TurnRecord("root-1","grandchild-thread","response-grandchild",more)+TimedTurnEvent("task_complete","root-1","grandchild-1",3),new UTF8Encoding(false));
+        var forkFile=Path.Combine(turnSessions,"fork.jsonl");
+        var forkMeta=Json.Serialize(new {type="session_meta",payload=new {model_provider="openai",id="branch-thread",parent_thread_id="main-thread",timestamp=Stamp(1,0)}})+"\n";
+        File.WriteAllText(forkFile,forkMeta+Model("gpt-6-astra")+TurnEvent("task_started","branch-root","branch-root")+E(2,2,m,m,"pro")+
+            TurnRecord("branch-root","branch-thread","response-branch",m)+TurnEvent("task_complete","branch-root","branch-root"),new UTF8Encoding(false));
+        var conversation=ConversationRead(turnRoot,"root-2");
+        Check(Total(conversation)==45 && (int)conversation["eventCount"]==4 && !(bool)conversation["partial"],
+            "Cumulative totals include all owned roots and linked nested workers, deduplicate archive copies and exclude independent branches");
+        Check(ConversationRead(turnRoot,"root-1","branch-root")==null && ConversationRead(turnRoot,"root-2","missing")==null,
+            "Mixed or unverified conversation anchors are unavailable");
+        File.AppendAllText(forkFile,TurnEvent("task_started","root-1","root-1"),new UTF8Encoding(false));
+        Check(ConversationRead(turnRoot,"root-1")==null,"Two claimed conversation owners cannot resolve the anchor");
+        conversation=ConversationRead(turnRoot,"root-2");
+        Check(Total(conversation)==6 && (bool)conversation["partial"],"Ambiguous historical roots are omitted and reported as incomplete");
+        File.Delete(forkFile);File.Delete(grandchildFile);
         Check((string)Turn(TurnRead(turnRoot,"missing"))["status"]=="unavailable","Missing turn is unavailable instead of a claimed zero");
         File.AppendAllText(mainFile,TurnEvent("task_started","root-3","root-3")+E(2,4,C(20,4,3),more,"pro")+TurnEvent("task_complete","root-3","root-3"),new UTF8Encoding(false));
         Check((bool)Turn(TurnRead(turnRoot,"root-3"))["partial"],"Missing cross-check usage record is partial");
@@ -523,7 +546,44 @@ public static class LocalUsageRegressions
         Check((string)finished["status"]=="complete" && !(bool)finished["partial"],"A strictly later completion resolves a stale archived start");
         foreach(var invalid in new[]{new string[0],new[]{"bad/id"},new[]{"duplicate","duplicate"},Enumerable.Range(0,51).Select(x=>"turn-"+x).ToArray()}) {
             bool rejected=false;try{TurnRead(turnRoot,invalid);}catch(ArgumentException){rejected=true;}Check(rejected,"Invalid turn request rejected");
+            rejected=false;try{ConversationRead(turnRoot,invalid);}catch(ArgumentException){rejected=true;}Check(rejected,"Invalid conversation anchors rejected");
         }
+        BenchmarkConversation(Dir(root,"conversation-benchmark"));
+    }
+    private static void BenchmarkConversation(string root)
+    {
+        var sessions=Dir(root,"sessions");
+        for (var file=0;file<48;file++)
+        {
+            var thread="bench-thread-"+file;
+            var history=new StringBuilder(Json.Serialize(new {type="session_meta",payload=new {model_provider="openai",id=thread,timestamp=Stamp(1,0)}})+"\n");
+            history.Append(Model("gpt-6.2-sol"));
+            var turns=file==0 ? 500 : 60;
+            for(var index=1;index<=turns;index++)
+            {
+                var turn=thread+"-root-"+index;
+                var minute=index%60;
+                history.Append(TimedTurnEvent("task_started",turn,turn,minute));
+                history.Append(E(2,minute,C(10*index,2*index,index),C(10,2,1),"pro"));
+                history.Append(TurnRecord(turn,thread,turn+"-response",C(10,2,1)));
+                history.Append(TimedTurnEvent("task_complete",turn,turn,minute));
+            }
+            File.WriteAllText(Path.Combine(sessions,thread+".jsonl"),history.ToString(),new UTF8Encoding(false));
+        }
+        var clock=Stopwatch.StartNew();
+        var result=ConversationRead(root,"bench-thread-0-root-500");
+        var cold=clock.Elapsed.TotalMilliseconds;
+        Check((int)result["eventCount"]==500 && Total(result)==5500 && !(bool)result["partial"],
+            "Long conversation aggregates more than 50 roots with no truncation");
+        var samples=new double[5];
+        for(var index=0;index<samples.Length;index++)
+        {
+            clock.Restart();
+            Check(Total(ConversationRead(root,"bench-thread-0-root-500"))==5500,"Warm conversation result changed");
+            samples[index]=clock.Elapsed.TotalMilliseconds;
+        }
+        Array.Sort(samples);
+        Console.WriteLine("Synthetic conversation: 48 files, 3320 turns, 500 owned; cold {0:F0} ms, median warm {1:F0} ms",cold,samples[2]);
     }
 __LOCAL_USAGE__
 __STRING_VALUE__
@@ -534,7 +594,7 @@ Add-Type -TypeDefinition $harness -ReferencedAssemblies System.dll,System.Core.d
 $root=Join-Path ([IO.Path]::GetTempPath()) ('codex-local-usage-test-'+[Guid]::NewGuid().ToString('N'))
 try {
     [LocalUsageRegressions]::Run($root)
-    'Local usage regressions: 97 existing groups plus per-turn attribution, deduplication, incremental and bounds regressions passed (cumulative, date range, identified copies, independent threads, nested fork history, missing/restored ancestors, cyclic ancestry, warm EOF, append, subsets, truncation, unknown model/provider, inherited baseline, API exclusion, malformed/oversized tails, arbitrary precise intervals, exact partial-day buckets and metadata, unchanged day buckets, interval validation, response privacy).'
+    'Local usage regressions: 97 existing groups plus per-turn and conversation attribution, deduplication, incremental and bounds regressions passed (cumulative, date range, identified copies, independent threads, nested fork history, missing/restored ancestors, cyclic ancestry, warm EOF, append, subsets, truncation, unknown model/provider, inherited baseline, API exclusion, malformed/oversized tails, arbitrary precise intervals, exact partial-day buckets and metadata, unchanged day buckets, interval validation, response privacy).'
 } finally {
     $resolved=[IO.Path]::GetFullPath($root)
     if ($resolved.StartsWith([IO.Path]::GetFullPath([IO.Path]::GetTempPath()),[StringComparison]::OrdinalIgnoreCase) -and [IO.Path]::GetFileName($resolved).StartsWith('codex-local-usage-test-')) {

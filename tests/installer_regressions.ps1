@@ -69,7 +69,7 @@ function Unregister-ScheduledTask {
 }
 function Get-CimInstance {
   param($ClassName)
-  if ($global:installerTest_scenario -in @('migration-failure', 'shortcut-create', 'shortcut-existing', 'startup-prompt', 'helper-window', 'startup-launcher', 'helper-multiple', 'network-legacy-existing', 'network-legacy-migration') -and $global:installerTest_running) {
+  if ($global:installerTest_scenario -in @('migration-failure', 'without-launcher', 'shortcut-existing', 'shortcut-target', 'shortcut-arguments', 'shortcut-working-directory', 'startup-prompt', 'helper-window', 'startup-launcher', 'helper-multiple', 'network-legacy-existing', 'network-legacy-migration') -and $global:installerTest_running) {
     [pscustomobject]@{ ExecutablePath = (Join-Path $global:installerTest_destination 'native-patch\CodexNativeQuotaPatch.next.exe'); ProcessId = 123 }
     if ($global:installerTest_scenario -in @('startup-launcher', 'helper-multiple')) {
       [pscustomobject]@{
@@ -120,7 +120,11 @@ function Copy-Item {
   }
   Microsoft.PowerShell.Management\Copy-Item -LiteralPath $LiteralPath -Destination $Destination -Force:$Force
 }
-function Invoke-WebRequest { param($Uri, $OutFile) Set-Content -LiteralPath $OutFile -Value 'isolated archive' }
+function Invoke-WebRequest {
+  param($Uri, $OutFile, [switch]$UseBasicParsing)
+  Assert $UseBasicParsing 'Archive download must use basic parsing on Windows PowerShell 5.1'
+  Set-Content -LiteralPath $OutFile -Value 'isolated archive'
+}
 function Get-FileHash { param($LiteralPath, $Algorithm) [pscustomobject]@{ Hash = $global:installerTest_expectedSha256 } }
 function Unblock-File { param($LiteralPath) }
 function Expand-Archive {
@@ -133,14 +137,14 @@ function Expand-Archive {
   }
 }
 try {
-  foreach ($global:installerTest_scenario in @('identity', 'legacy-identity', 'arguments', 'working-directory', 'legacy-arguments', 'legacy-working-directory', 'copy-failure', 'module-copy-failure', 'startup', 'fresh-startup', 'skip-success', 'migration-failure', 'shortcut-target', 'shortcut-arguments', 'shortcut-working-directory', 'shortcut-create', 'shortcut-existing', 'shortcut-rollback', 'startup-prompt', 'helper-window', 'startup-launcher', 'helper-multiple', 'official-failure', 'official-undo-failure', 'network-legacy-existing', 'network-legacy-migration')) {
+  foreach ($global:installerTest_scenario in @('identity', 'legacy-identity', 'arguments', 'working-directory', 'legacy-arguments', 'legacy-working-directory', 'copy-failure', 'module-copy-failure', 'startup', 'fresh-startup', 'skip-success', 'migration-failure', 'shortcut-target', 'shortcut-arguments', 'shortcut-working-directory', 'without-launcher', 'shortcut-existing', 'shortcut-rollback', 'startup-prompt', 'helper-window', 'startup-launcher', 'helper-multiple', 'official-failure', 'official-undo-failure', 'network-legacy-existing', 'network-legacy-migration')) {
     $caseRoot = Join-Path $testRoot $global:installerTest_scenario
     $global:installerTest_destination = Join-Path $caseRoot 'installed'
     $global:installerTest_legacyRoot = Join-Path $caseRoot 'legacy'
     $scripts = Join-Path $caseRoot 'skill\scripts'
     $assets = Join-Path $caseRoot 'skill\assets\native-patch'
     New-Item -ItemType Directory -Path $scripts, $assets, (Join-Path $global:installerTest_destination 'native-patch') -Force | Out-Null
-    if ($global:installerTest_scenario -eq 'shortcut-create') {
+    if ($global:installerTest_scenario -eq 'without-launcher') {
       $historyFixture = Join-Path $global:installerTest_destination 'native-patch\account-usage-history\fixture-account\2026-01-01.jsonl'
       New-Item -ItemType Directory -Path (Split-Path -Parent $historyFixture) -Force | Out-Null
       [IO.File]::WriteAllText($historyFixture, "retained history fixture`n", [Text.UTF8Encoding]::new($false))
@@ -152,11 +156,12 @@ try {
     }
     $shortcutPath = Join-Path $caseRoot 'launcher.lnk'
     $previousShortcut = $null
-    if ($global:installerTest_scenario -in @('shortcut-target', 'shortcut-arguments', 'shortcut-working-directory', 'shortcut-existing', 'shortcut-rollback', 'skip-success')) {
+    if ($global:installerTest_scenario -in @('shortcut-target', 'shortcut-arguments', 'shortcut-working-directory', 'shortcut-existing', 'shortcut-rollback', 'skip-success', 'network-legacy-migration')) {
+      $launcherRoot = if ($global:installerTest_scenario -eq 'network-legacy-migration') { $global:installerTest_legacyRoot } else { $global:installerTest_destination }
       $shortcut = (Microsoft.PowerShell.Utility\New-Object -ComObject WScript.Shell).CreateShortcut($shortcutPath)
-      $shortcut.TargetPath = if ($global:installerTest_scenario -in @('shortcut-target', 'skip-success')) { 'C:\unrelated.exe' } else { Join-Path $global:installerTest_destination 'native-patch\CodexNativeQuotaPatch.next.exe' }
+      $shortcut.TargetPath = if ($global:installerTest_scenario -eq 'shortcut-target') { 'C:\unrelated.exe' } else { Join-Path $launcherRoot 'native-patch\CodexNativeQuotaPatch.next.exe' }
       $shortcut.Arguments = if ($global:installerTest_scenario -eq 'shortcut-arguments') { '--other' } else { '--launch' }
-      $shortcut.WorkingDirectory = if ($global:installerTest_scenario -eq 'shortcut-working-directory') { 'C:\unrelated' } else { Join-Path $global:installerTest_destination 'native-patch' }
+      $shortcut.WorkingDirectory = if ($global:installerTest_scenario -eq 'shortcut-working-directory') { 'C:\unrelated' } else { Join-Path $launcherRoot 'native-patch' }
       $shortcut.Description = 'Preserve my exact shortcut metadata'
       $shortcut.Save()
       $previousShortcut = [Convert]::ToBase64String([IO.File]::ReadAllBytes($shortcutPath))
@@ -207,9 +212,11 @@ function Restore-CodexOfficialShortcuts {
 }
 '@
     Set-Content -LiteralPath (Join-Path $scripts 'doctor.ps1') -Value 'new doctor'
+    $successExpected = $global:installerTest_scenario -in @('skip-success', 'without-launcher', 'shortcut-existing', 'shortcut-target', 'shortcut-arguments', 'shortcut-working-directory', 'startup-prompt', 'startup-launcher', 'network-legacy-existing', 'network-legacy-migration')
+    $readyDoctor = "param(`$TaskName, `$InstallRoot); [pscustomobject]@{ ActivationState = 'ready' }"
     Set-Content -LiteralPath (Join-Path $scripts 'configure_network.ps1') -Value 'new network configuration utility'
-    if ($global:installerTest_scenario -in @('migration-failure', 'shortcut-create', 'shortcut-existing', 'network-legacy-existing', 'network-legacy-migration')) {
-      Set-Content -LiteralPath (Join-Path $scripts 'doctor.ps1') -Value "param(`$TaskName, `$InstallRoot); [pscustomobject]@{ ActivationState = 'ready' }"
+    if (($successExpected -and $global:installerTest_scenario -ne 'skip-success') -or $global:installerTest_scenario -eq 'migration-failure') {
+      Set-Content -LiteralPath (Join-Path $scripts 'doctor.ps1') -Value $readyDoctor
     }
     $promptDoctor = "param(`$TaskName, `$InstallRoot); [pscustomobject]@{ ActivationState = 'AwaitingStartupDecision'; StartupPromptVisible = `$true; HelperWindowless = `$false }"
     if ($global:installerTest_scenario -eq 'startup-launcher') { $promptDoctor = $promptDoctor.Replace('HelperWindowless = $false', 'HelperWindowless = $true') }
@@ -234,9 +241,8 @@ function Restore-CodexOfficialShortcuts {
     $global:installerTest_comCreated = 0
     $global:installerTest_officialCalls = 0; $global:installerTest_officialUndos = 0
     $global:installerTest_officialRestores = 0
-    $successExpected = $global:installerTest_scenario -in @('skip-success', 'shortcut-create', 'shortcut-existing', 'startup-prompt', 'startup-launcher', 'network-legacy-existing', 'network-legacy-migration')
     $failure = $null
-    try { $installOutput = & (Join-Path $scripts 'install.ps1') -InstallRoot $global:installerTest_destination -ShortcutPath $shortcutPath -SkipTaskRegistration:($global:installerTest_scenario -eq 'skip-success') | Out-String }
+    try { $installOutput = & (Join-Path $scripts 'install.ps1') -InstallRoot $global:installerTest_destination -ShortcutPath $shortcutPath -SkipTaskRegistration:($global:installerTest_scenario -eq 'skip-success') | Out-String -Width 4096 }
     catch { $failure = $_ }
     Assert (-not [InstallerMutexProbe]::Unavailable($global:installerTest_mutexName)) 'Installation leaked its transaction lock'
     if ($successExpected) {
@@ -246,7 +252,7 @@ function Restore-CodexOfficialShortcuts {
     }
     $officialExpected = if (($successExpected -and $global:installerTest_scenario -ne 'skip-success') -or $global:installerTest_scenario -eq 'official-undo-failure') { 'configured official shortcut' } else { 'original official shortcut' }
     Assert ((Get-Content -LiteralPath $global:installerTest_officialPath -Raw).Trim() -ceq $officialExpected) 'Official shortcut configuration or rollback was not preserved'
-    if ($global:installerTest_scenario -eq 'shortcut-create') {
+    if ($global:installerTest_scenario -eq 'without-launcher') {
       Assert ((Get-FileHash -LiteralPath $historyFixture -Algorithm SHA256).Hash -eq $historyHash) 'Upgrade changed persisted account history'
       Assert ((Get-FileHash -LiteralPath $planFixture -Algorithm SHA256).Hash -eq $planHash) 'Upgrade changed persisted account reference plan'
     }
@@ -281,7 +287,7 @@ function Restore-CodexOfficialShortcuts {
         Assert ((Get-Content -LiteralPath $path -Raw).Trim() -eq $expected) ('Incorrect restored file: ' + $name)
       }
     }
-    if ($global:installerTest_scenario -in @('identity', 'legacy-identity', 'arguments', 'working-directory', 'legacy-arguments', 'legacy-working-directory', 'shortcut-target', 'shortcut-arguments', 'shortcut-working-directory')) {
+    if ($global:installerTest_scenario -in @('identity', 'legacy-identity', 'arguments', 'working-directory', 'legacy-arguments', 'legacy-working-directory')) {
       Assert ($global:installerTest_stopped -eq 0) 'Stopped a task before all identity checks'
       Assert (-not $global:installerTest_registered) 'Changed a task before all identity checks'
       Assert ($global:installerTest_unregistered -eq 0) 'Removed a task before all identity checks'
@@ -324,7 +330,7 @@ function Restore-CodexOfficialShortcuts {
     $doctorPath = Join-Path $global:installerTest_destination 'scripts\doctor.ps1'
     if ($global:installerTest_scenario -eq 'fresh-startup') { Assert (-not (Test-Path -LiteralPath $doctorPath)) 'Fresh install left a doctor script' }
     else {
-      $expectedDoctor = if ($global:installerTest_scenario -in @('startup-prompt', 'startup-launcher')) { $promptDoctor } elseif ($global:installerTest_scenario -in @('shortcut-create', 'shortcut-existing', 'network-legacy-existing', 'network-legacy-migration')) { "param(`$TaskName, `$InstallRoot); [pscustomobject]@{ ActivationState = 'ready' }" } elseif ($global:installerTest_scenario -eq 'skip-success') { 'new doctor' } else { 'old doctor' }
+      $expectedDoctor = if ($global:installerTest_scenario -in @('startup-prompt', 'startup-launcher')) { $promptDoctor } elseif ($global:installerTest_scenario -eq 'skip-success') { 'new doctor' } elseif ($successExpected) { $readyDoctor } else { 'old doctor' }
       Assert ((Get-Content -LiteralPath $doctorPath -Raw).Trim() -eq $expectedDoctor) 'Incorrect doctor deployment or rollback'
     }
     $repairModulePath = Join-Path $global:installerTest_destination 'scripts\official_shortcuts.ps1'
@@ -334,34 +340,38 @@ function Restore-CodexOfficialShortcuts {
       Assert ((Get-Content -LiteralPath $repairModulePath -Raw).Trim() -ceq $expectedRepairModule) 'Incorrect shortcut repair module deployment or rollback'
     }
     if ($global:installerTest_scenario -eq 'module-copy-failure') { Assert ($failure -like '*Injected shortcut repair module copy failure*' -and $global:installerTest_started -eq 1) 'Repair module copy failure did not roll back and restart the old Helper' }
-    if ($previousShortcut) {
+    $launcherBackups = @(Get-ChildItem -LiteralPath $global:installerTest_destination -Filter 'launch-shortcut.lnk' -File -Recurse)
+    if ($global:installerTest_scenario -in @('shortcut-existing', 'network-legacy-migration')) {
+      Assert (-not (Test-Path -LiteralPath $shortcutPath)) 'Owned launcher was left on the desktop'
+      Assert ($launcherBackups.Count -eq 1 -and [Convert]::ToBase64String([IO.File]::ReadAllBytes($launcherBackups[0].FullName)) -ceq $previousShortcut) 'Backup did not preserve the launcher bytes'
+      Assert ($installOutput -match 'LegacyLauncherBackup\s*:\s*.+launch-shortcut\.lnk') 'Launcher backup was not reported'
+    } elseif ($previousShortcut) {
       Assert ([Convert]::ToBase64String([IO.File]::ReadAllBytes($shortcutPath)) -ceq $previousShortcut) 'Existing shortcut bytes changed during installation or rollback'
-    } elseif ($global:installerTest_scenario -in @('shortcut-create', 'startup-prompt', 'startup-launcher', 'network-legacy-existing', 'network-legacy-migration')) {
-      $shortcut = (Microsoft.PowerShell.Utility\New-Object -ComObject WScript.Shell).CreateShortcut($shortcutPath)
-      Assert ($shortcut.TargetPath -eq (Join-Path $global:installerTest_destination 'native-patch\CodexNativeQuotaPatch.next.exe')) 'Shortcut target is incorrect'
-      Assert ($shortcut.Arguments -ceq '--launch') 'Shortcut launch arguments are incorrect'
-      Assert ($shortcut.WorkingDirectory -eq (Join-Path $global:installerTest_destination 'native-patch')) 'Shortcut working directory is incorrect'
+      Assert ($launcherBackups.Count -eq 0) 'Installer backed up a shortcut it should leave alone'
     } else {
-      Assert (-not (Test-Path -LiteralPath $shortcutPath)) 'Failed installation left a new shortcut'
+      Assert (-not (Test-Path -LiteralPath $shortcutPath)) 'Installer created a desktop shortcut'
     }
     if ($global:installerTest_scenario -eq 'skip-success') { Assert ($global:installerTest_comCreated -eq 0 -and $global:installerTest_officialCalls -eq 0) 'Skip registration accessed shell shortcuts' }
-    if ($global:installerTest_scenario -in @('shortcut-target', 'shortcut-arguments', 'shortcut-working-directory', 'shortcut-create')) {
-      $global:installerTest_running = $global:installerTest_scenario -eq 'shortcut-create'
-      if ($global:installerTest_scenario -eq 'shortcut-create') {
+    if ($global:installerTest_scenario -in @('shortcut-target', 'shortcut-arguments', 'shortcut-working-directory', 'without-launcher', 'shortcut-existing')) {
+      $global:installerTest_running = $global:installerTest_scenario -eq 'without-launcher'
+      if ($global:installerTest_scenario -eq 'shortcut-existing') {
+        Copy-Item -LiteralPath $launcherBackups[0].FullName -Destination $shortcutPath
+      }
+      if ($global:installerTest_scenario -eq 'without-launcher') {
         New-Item -ItemType Directory -Path (Join-Path $global:installerTest_destination 'official-shortcuts') -Force | Out-Null
         Set-Content -LiteralPath (Join-Path $global:installerTest_destination 'official-shortcuts\state.json') -Value '{}'
       }
       $uninstallOutput = & (Join-Path $scripts 'uninstall.ps1') -InstallRoot $global:installerTest_destination -ShortcutPath $shortcutPath | Out-String
       Assert ($global:installerTest_officialRestores -eq 1) 'Uninstall must synchronize restoration even before a shortcut state file exists'
       Assert (-not (Test-Path -LiteralPath $repairModulePath)) 'Uninstall retained the repair module after synchronized restoration'
-      if ($global:installerTest_scenario -eq 'shortcut-create') {
+      if ($global:installerTest_scenario -eq 'without-launcher') {
         Assert ($global:installerTest_officialRestores -eq 1) 'Uninstall did not restore the official shortcut'
         Assert ((Get-FileHash -LiteralPath $historyFixture -Algorithm SHA256).Hash -eq $historyHash) 'Uninstall removed or changed persisted account history'
         Assert (-not (Test-Path -LiteralPath $repairModulePath)) 'Uninstall retained the repair module after restoring shortcuts'
         Assert ($uninstallOutput -match 'OfficialShortcutsRestored\s*:\s*1') 'Uninstall did not report restored official shortcut'
         Assert ((Get-Content -LiteralPath $global:installerTest_officialPath -Raw).Trim() -ceq 'original official shortcut') 'Uninstall removed or failed to restore original official link'
       }
-      if ($previousShortcut) {
+      if ($previousShortcut -and $global:installerTest_scenario -ne 'shortcut-existing') {
         Assert ([Convert]::ToBase64String([IO.File]::ReadAllBytes($shortcutPath)) -ceq $previousShortcut) 'Uninstall changed an unrelated shortcut'
       } else { Assert (-not (Test-Path -LiteralPath $shortcutPath)) 'Uninstall left its exact shortcut' }
     }

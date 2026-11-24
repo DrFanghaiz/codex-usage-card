@@ -19,6 +19,10 @@ __IMPLEMENTATION__
         ReferencePlans.Write(root, A, "pro200");
         ReferencePlans.Write(root, B, "pro100");
         Check(ReferencePlans.Read(root, A) == "pro200" && ReferencePlans.Read(root, B) == "pro100");
+        ReferencePlans.Write(root, B, "pro200-current");
+        Check(ReferencePlans.Read(root, A) == "pro200" && ReferencePlans.Read(root, B) == "pro200-current");
+        Check(ReferencePlans.Tier(ReferencePlans.Read(root, B)) == "200-current" && ReferencePlans.Tier(ReferencePlans.Read(root, A)) == "200");
+        ReferencePlans.Write(root, B, "pro100");
         try { ReferencePlans.Write(root, A, "../pro500"); throw new Exception("Invalid tier accepted"); }
         catch (ArgumentException) { }
     }

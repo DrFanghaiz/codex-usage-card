@@ -6,9 +6,9 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$releaseTag = 'v3.1.2'
+$releaseTag = 'v3.2.0'
 $archiveName = 'codex-usage-card.skill.zip'
-$expectedSha256 = 'D7957E4B254A125E30EBA6CD729A7CD7A445D7D8CB379F6C6A0D6816E5B09F06'
+$expectedSha256 = '7826DDF9D52A46DE2A879BE44A057A1360746403481ECEA18529015112071861'
 $archiveUrl = 'https://github.com/DrFanghaiz/codex-usage-card/releases/download/{0}/{1}' -f $releaseTag, $archiveName
 
 if ($env:OS -ne 'Windows_NT') {
@@ -49,7 +49,7 @@ $relativeFiles = @(
 
 try {
   New-Item -ItemType Directory -Path $stagingRoot -Force | Out-Null
-  Invoke-WebRequest -Uri $archiveUrl -OutFile $archivePath
+  Invoke-WebRequest -UseBasicParsing -Uri $archiveUrl -OutFile $archivePath
 
   $actualSha256 = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash
   if (-not [String]::Equals($actualSha256, $expectedSha256, [StringComparison]::OrdinalIgnoreCase)) {
