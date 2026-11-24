@@ -1,17 +1,17 @@
 # Codex Usage Card
 
-Codex Usage Card v3.1.2 在官方额度图标上方提供本机用量分析入口，并在回复用时或消息摘要旁显示本机额度估算。统计页默认打开「今日」，也支持近 10 分钟、本周和自选区间。参考套餐按账号保存在本机。
+Codex Usage Card v3.2.0 在官方额度图标上方提供本机用量分析入口，并在回复用时或消息摘要旁显示本机额度估算。统计页默认打开「今日」，也支持近 10 分钟、本周和自选区间。参考套餐按账号保存在本机。
 
-以下安装命令对应 v3.1.2。
+以下安装命令对应 v3.2.0。
 
 ## 一键安装
 
-要求：Windows 11、PowerShell 7，以及能够正常启动的 Codex 桌面端。卡内自检使用标准安装位置 `%ProgramFiles%\PowerShell\7\pwsh.exe`。
+支持 Windows 11、Windows 自带的 PowerShell 5.1 和 PowerShell 7。需要能够正常启动的 Codex 桌面端。
 
-在 PowerShell 7 中运行：
+在 Windows PowerShell 或 PowerShell 7 中运行以下命令。
 
 ```powershell
-$installer = Join-Path $env:TEMP 'install-codex-usage-card.ps1'; Invoke-WebRequest 'https://raw.githubusercontent.com/DrFanghaiz/codex-usage-card/v3.1.2/install.ps1' -OutFile $installer; Unblock-File -LiteralPath $installer; & $installer
+$installer = Join-Path $env:TEMP 'install-codex-usage-card.ps1'; Invoke-WebRequest -UseBasicParsing 'https://raw.githubusercontent.com/DrFanghaiz/codex-usage-card/v3.2.0/install.ps1' -OutFile $installer; Unblock-File -LiteralPath $installer; & $installer
 ```
 
 安装器会校验发布包的 SHA-256，把 Skill 安装到 `$CODEX_HOME\skills`（未设置时为 `$env:USERPROFILE\.codex\skills`），把无窗口修复器部署到 `$env:LOCALAPPDATA\CodexUsageCard`，并注册当前用户的计划任务 `Codex Usage Card`。从旧版升级时，只迁移路径与动作完全匹配的旧任务。安装完成后会输出 `ActivationState`、`StageCodes` 和 `CardVisible` 等只读验收结果；Codex 未运行时显示等待状态，不把已完成安装误报为失败。
@@ -23,6 +23,14 @@ python "$env:USERPROFILE\.codex\skills\.system\skill-installer\scripts\install-s
 ```
 
 安装后重新启动 Codex，使新 Skill 出现在可用 Skill 列表中。
+
+## v3.2.0 安装、自检与对话用量
+
+- 从原来的 Codex 快捷方式启动。升级成功后，已确认属于额度卡的旧桌面快捷方式会移入安装备份。
+- 支持 Windows PowerShell 5.1 安装和卡内自检。复制诊断可同时查看后台版本、已加载界面和匹配结果。
+- 同套餐的 6.2 周参考可直接用于估算。现行 Pro 200 和旧 Pro 20x 分别选择，已保存的旧套餐继续保留。
+- 展开「本对话累计」可查看当前对话的本机 Token、API 等值和额度估算。
+- 发布包校验值见 [v3.2.0 发布记录](docs/releases/v3.2.0.md)。
 
 ## v3.1.2 GPT‑6.2 用量估算
 
@@ -116,12 +124,12 @@ python "$env:USERPROFILE\.codex\skills\.system\skill-installer\scripts\install-s
 - 官方时间圆环从真实重置时间戳按 7 天或 5 小时窗口计算，复用同一个单次计时器按分钟更新，不额外请求网络。只有原生重置文字而没有时间戳时保留文字与空轨道，不猜测周期。
 - 登录配置短暂不完整时通过文件系统事件等待恢复，不做每秒轮询，也不会永久退出。
 - 按用户要求恢复 v1.9 的启动逻辑：Helper 启动时记录并保护已经打开的 Codex；之后从官方入口新启动且缺少调试端口的主进程，在核实会话、PID、创建时间和路径后自动结束，最多等待 5 秒退出，再携带动态 loopback 调试参数重开一次，不再弹出确认框。同一进程身份最多处理一次；网络、登录及额度错误不触发重启。
-- 桌面“Codex（额度卡）”入口保留为可选项，由无窗口启动器查询当前用户注册的 Codex 包和主应用 ID，通过 Windows 包激活接口携带动态 loopback 调试参数启动，保留 MSIX 程序包身份；客户端更新后无需改快捷方式。已有 Codex 时只尝试唤回，无论该窗口是否带调试端口；没有现有进程时启动一次。Codex++ 等已带端口的启动保持不变。
+- 用原有 Codex 入口启动。升级后旧启动器的备份位置由安装结果中的 `LegacyLauncherBackup` 报告。
 - 自动重启等待原进程退出后，会提交替代启动，由 Codex 自己处理单实例竞争；短暂的转发进程不会取消重开。启动诊断保存在 `%LOCALAPPDATA%\CodexUsageCard\startup.log`，仅记录阶段、PID 和失败信息，不记录账号或命令行；`relaunch-returned` 只代表启动调用返回，实际入口状态以 doctor 为准。
 - Codex 更新、重启、调试端口变化或页面重载后，后台修复器会重新发现页面并注入控件。
 - 侧栏收起后，同一入口移入导航栏底部帮助按钮上方；展开后回到列表底部。可见性按视口和各级 overflow 裁剪区的交集判断，并观察裁剪祖先的尺寸变化，兼容列表列保留宽度、由父容器裁剪收起的宿主布局。doctor 与 Python 自检使用相同判断，避免把被裁剪的入口报告为正常。找不到有效宿主锚点时入口隐藏，观察器在锚点恢复后重新挂载。
 
-Codex 必须暴露本机调试端口，修复器才能向页面注入控件。可以继续使用官方入口，后台会为新启动的客户端补上端口。安装或升级 Helper 前已经存在的无调试会话不会被结束，需要在方便时关闭后重新从官方入口启动一次；桌面“Codex（额度卡）”也可直接带参数启动。无可连接进程时后台等待窗口显示或激活事件，避免依赖可能被普通用户权限拒绝的系统进程跟踪，不轮询或不断重启尝试恢复。若官方彻底删除调试入口、阻止启动参数或改变内部额度组件契约，修复器会明确失效，不会用猜测规则伪装成功。
+Codex 必须暴露本机调试端口，修复器才能向页面加载控件。后台会为从官方入口新启动的客户端补上端口。安装或升级 Helper 前已经存在的无调试会话需要在方便时关闭，再从官方入口启动一次。无可连接进程时后台等待窗口显示或激活事件，避免依赖可能被普通用户权限拒绝的系统进程跟踪，不轮询或不断重启尝试恢复。若官方彻底删除调试入口、阻止启动参数或改变内部额度组件契约，修复器会报告连接不可用。
 
 历史上的 v1.0–v1.7 只挂接已经开放端口的客户端；启动脚本或 Codex++ 从第一次启动就附带连接参数时，可以一次打开便加载额度卡。v1.8 才加入普通入口的自动二次重启。恢复前一种体验需要入口在第一次启动时传入参数，单独回退控件 UI 不会给普通启动补上端口。
 

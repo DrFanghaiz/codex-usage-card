@@ -13,6 +13,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
+using System.Linq;
 using System.Net;
 using System.Security.Cryptography;
 using System.Text;
@@ -158,7 +159,7 @@ public static class ModelDialRegression
         var migratedTokens=(Dictionary<string,object>)migrated["models"];var migratedUsd=(Dictionary<string,object>)migrated["apiModels"];
         Assert((double)migratedTokens["gpt-6-astra"]==876923076.9230769d&&(double)migratedTokens["gpt-6.1-sol"]==4707692307.692307d,"Use explicit current weekly values, never monthly or a derived replacement");
         Assert((double)migratedUsd["gpt-6-astra"]==1337.076923076923d&&(double)migratedUsd["gpt-6.1-sol"]==961.8461538461538d,"Current weekly USD retains source precision");
-        ModelDialReferences.ReadLegacy(currentHtml,url=>canonical+new string(' ',770050-canonical.Length));
+        ModelDialReferences.ReadLegacy(currentHtml,url=>canonical.PadRight(1082159));
         Console.WriteLine("PASS proven 20x migration and identical duplicate literal rows in measured larger assets");
         var metadataOnly="[{\"id\":\"openai-pro-200-gpt-6-astra\",\"group\":\"OpenAI\",\"plan\":\"Pro 200\"},{\"id\":\"openai-pro-200-gpt-6.1-sol\",\"group\":\"OpenAI\",\"plan\":\"Pro 200\"}]";
         int metadataCandidates=0;ModelDialReferences.ReadLegacy(currentHtml,url=>++metadataCandidates==1?metadataOnly:canonical);
@@ -171,11 +172,44 @@ public static class ModelDialRegression
             canonical.Replace("\"archive\":false","\"archive\":true"),canonical.Replace("\"conflict\":false","\"conflict\":true"),
             canonical.Replace("\"allowance_multiplier\":2","\"allowance_multiplier\":1"),canonical.Replace("gpt-6-astra-20261005","gpt-6.1-sol-20261005"),
             canonical.Replace("876923076.9230769","438461538.4615384"),canonical.Replace("weekly_tokens","month_only"),
-            canonical+canonical.Replace("876923076.9230769","876923077"),canonical+new string(' ',1048577)})
+            canonical+canonical.Replace("876923076.9230769","876923077"),canonical.PadRight(1572865)})
         {bool rejected=false;try{ModelDialReferences.ReadLegacy(currentHtml,url=>bad);}catch(InvalidDataException){rejected=true;}Assert(rejected,"Reject unproven, conflicting, reduced or oversized canonical data");}
         bool htmlBound=false;try{ModelDialReferences.ReadLegacy(new string(' ',524289),url=>{throw new Exception("Oversized HTML must not request assets");});}catch(InvalidDataException){htmlBound=true;}
         Assert(htmlBound,"HTML limit remains 512 KiB while scripts have their measured independent bound");
         Console.WriteLine("PASS migration proof, same-model projection, archive flags, duplicates and independent response limits");
+        var modern62 = currentHtml.Replace("gpt-6-astra","gpt-6.2-astra").Replace("gpt-6.1-sol","gpt-6.2-sol");
+        var currentPro62 = "{\"id\":\"openai-pro-200-gpt-6.2-astra\",\"provider\":\"openai\",\"plan\":\"Pro 200\",\"currency\":\"USD\",\"monthly_price\":200,\"record_status\":\"current\",\"weekly_tokens\":1696798125.732136,\"weekly_api_equivalent_usd\":1337.076923076923,\"archive\":false}";
+        var source62 = canonical + currentPro62;
+        var model62Root = Path.Combine(root,"gpt62");
+        Directory.CreateDirectory(model62Root);
+        var model62State=ModelDialReferences.Check(model62Root,now,()=>modern62,url=>source62);
+        Assert(model62State["errorCode"]==null&&model62State["legacyErrorCode"]==null,"Current 6.2-only source and canonical legacy data both update");
+        ModelDialReferences.Check(model62Root,now.AddMinutes(1),()=>{throw new Exception("A fresh cache must not fetch");});
+        foreach(var tier in new[]{"plus","100","200-current","500"})
+        {
+            var selected62=ModelDialReferences.Snapshot(tier=="plus"?"plus":"pro",tier);
+            Assert((string)selected62["selectedPlan"]==(tier=="plus"?"plus":"pro"+tier)&&
+                (string)selected62["referenceKind"]=="current","Current tier retains its own identity");
+            var tokens62=(Dictionary<string,object>)selected62["models"];
+            var usd62=(Dictionary<string,object>)selected62["apiModels"];
+            Assert((double)tokens62["gpt-6.2-astra"]==438000000&&(double)tokens62["gpt-6.2-sol"]==2354000000,"Direct 6.2 token references survive cache reload");
+            Assert((double)usd62["gpt-6.2-astra"]==669&&(double)usd62["gpt-6.2-sol"]==481,"Direct 6.2 API references survive cache reload");
+        }
+        var legacy62=(Dictionary<string,object>)ModelDialReferences.Snapshot("pro","200")["models"];
+        Assert(legacy62.Count==2&&!legacy62.ContainsKey("gpt-6.2-astra"),"Do not substitute modern Pro 200 for legacy 20x");
+        var historicalPro62=currentPro62.Replace("openai-pro-200-","openai-pro-20x-").Replace("\"Pro 200\"","\"Pro 20x\"").Replace("\"current\"","\"historical\"");
+        ModelDialReferences.Check(model62Root,now.AddDays(1),()=>modern62,url=>source62+historicalPro62);
+        ModelDialReferences.Check(model62Root,now.AddDays(1).AddMinutes(1),()=>{throw new Exception("A fresh cache must not fetch");});
+        var legacySelected62=ModelDialReferences.Snapshot("pro","200");
+        legacy62=(Dictionary<string,object>)legacySelected62["models"];
+        var legacyUsd62=(Dictionary<string,object>)legacySelected62["apiModels"];
+        Assert((double)legacy62["gpt-6.2-astra"]==1696798125.732136d&&(double)legacyUsd62["gpt-6.2-astra"]==1337.076923076923d,"Explicit historical 6.2 data may be used and cached");
+        Assert(!legacy62.ContainsKey("gpt-6.2-sol"),"Without historical 6.2 data use only indirect estimate");
+        bool mislabeled=false;
+        try{ModelDialReferences.ReadLegacy(modern62,url=>source62+currentPro62.Replace("openai-pro-200-","openai-pro-20x-"));}
+        catch(InvalidDataException){mislabeled=true;}
+        Assert(mislabeled,"A legacy ID alone cannot disguise a current Pro 200 payload");
+        Console.WriteLine("PASS direct 6.2 weekly references, legacy isolation and explicit historical cache round trip");
         var independent=Path.Combine(root,"independent");Directory.CreateDirectory(independent);
         ModelDialReferences.Check(independent,now,()=>html,fetchAsset);
         ModelDialReferences.Check(independent,now.AddDays(1),()=>currentHtml.Replace("Token：亿","Token：万"),url=>canonical);

@@ -22,7 +22,7 @@ internal static class CodexNativeQuotaPatch
     private static string NativeScript;
     private static int NextCommandId;
     private const int IoDeadlineMilliseconds = 15000;
-    private const string ProductVersion = "3.1.2";
+    private const string ProductVersion = "3.2.0";
     private static volatile string SessionScope = Guid.NewGuid().ToString("N");
     private static string LoginFingerprint;
     private static int SessionGeneration;
@@ -251,7 +251,7 @@ internal static class CodexNativeQuotaPatch
         var intervalStart = range != null && range.ContainsKey("intervalStart") ? StringValue(range, "intervalStart") : null;
         var intervalEnd = range != null && range.ContainsKey("intervalEnd") ? StringValue(range, "intervalEnd") : null;
         var referencePlan = range == null ? "" : StringValue(range, "referencePlan");
-        var proTier = referencePlan == "pro100" || referencePlan == "pro200" || referencePlan == "pro500" ? referencePlan.Substring(3) : "";
+        var proTier = ReferencePlans.Tier(referencePlan);
         var target = socket.Endpoint;
         var scope = socket.Scope;
         var generation = socket.Generation;
@@ -311,15 +311,17 @@ internal static class CodexNativeQuotaPatch
         object raw;
         var values = query != null && query.TryGetValue("turnIds", out raw) ? raw as object[] : null;
         var ids = values == null ? null : values.Select(value => value as string).ToArray();
+        var anchors = query != null && query.TryGetValue("conversationTurnIds", out raw) ? raw as object[] : null;
+        var conversationIds = anchors == null ? null : anchors.Select(value => value as string).ToArray();
         var plan = query == null ? "" : StringValue(query, "referencePlan");
-        var tier = plan == "pro100" || plan == "pro200" || plan == "pro500" ? plan.Substring(3) : "";
+        var tier = ReferencePlans.Tier(plan);
         var target = socket.Endpoint; var scope = socket.Scope; var generation = socket.Generation;
         Task.Run(() => {
             Dictionary<string, object> payload;
             try
             {
-                if (ids == null) throw new ArgumentException("Missing turn identifiers");
-                payload = LocalUsage.Read(ConfigurationRoot(), "2022-01-01", DateTime.Today.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture), DateTimeOffset.UtcNow, null, null, ids);
+                if ((ids == null) == (conversationIds == null)) throw new ArgumentException("Expected one usage scope");
+                payload = LocalUsage.Read(ConfigurationRoot(), "2022-01-01", DateTime.Today.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture), DateTimeOffset.UtcNow, null, null, ids, conversationIds);
                 var official = LastPlan;
                 var planName = official != null && official["scope"] == scope ? official["plan"] : "";
                 payload["reference"] = ModelDialReferences.Snapshot(planName, tier);
@@ -516,9 +518,11 @@ internal static class CodexNativeQuotaPatch
         {
             return Read(root, start, end, DateTimeOffset.UtcNow);
         }
-        public static Dictionary<string, object> Read(string root, string start, string end, DateTimeOffset now, string intervalStart = null, string intervalEnd = null, string[] turnIds = null)
+        public static Dictionary<string, object> Read(string root, string start, string end, DateTimeOffset now, string intervalStart = null, string intervalEnd = null, string[] turnIds = null, string[] conversationTurnIds = null)
         {
-            if (turnIds != null && (turnIds.Length == 0 || turnIds.Length > 50 || turnIds.Any(id => !ValidTurnId(id)) || turnIds.Distinct().Count() != turnIds.Length))
+            var requestedIds = turnIds ?? conversationTurnIds;
+            if ((turnIds != null && conversationTurnIds != null) || (requestedIds != null &&
+                (requestedIds.Length == 0 || requestedIds.Length > 50 || requestedIds.Any(id => !ValidTurnId(id)) || requestedIds.Distinct().Count() != requestedIds.Length)))
                 throw new ArgumentException("Invalid turn identifiers");
             var first = Date(start);
             var last = Date(end);
@@ -636,6 +640,7 @@ internal static class CodexNativeQuotaPatch
                         selected[key] = entry;
                 }
                 if (turnIds != null) return TurnPayload(turnIds, selected, present, queryIssues, history, inherited, snapshots);
+                if (conversationTurnIds != null) return ConversationPayload(conversationTurnIds, selected, present, queryIssues, history, inherited, snapshots);
                 var overall = new Bucket();
                 var intervalBucket = hasInterval ? new Bucket() : null;
                 var intervalDays = hasInterval ? new SortedDictionary<DateTime, Bucket>() : null;
@@ -735,10 +740,57 @@ internal static class CodexNativeQuotaPatch
             log.TurnActivities[root + "/" + operation] = new TurnActivity { Root = root, Active = active,
                 At = timed ? (DateTimeOffset?)at : null };
         }
-        private static Dictionary<string, object> TurnPayload(string[] ids, Dictionary<string, Entry> selected, HashSet<string> present, List<Issue> issues, Dictionary<string, string> history, HashSet<string> inherited, Dictionary<string, DateTimeOffset> snapshots)
+        private static Dictionary<string, object> ConversationPayload(string[] anchors, Dictionary<string, Entry> selected, HashSet<string> present, List<Issue> issues, Dictionary<string, string> history, HashSet<string> inherited, Dictionary<string, DateTimeOffset> snapshots)
+        {
+            var result = new Dictionary<string, object> { { "conversation", null } };
+            var owners = new Dictionary<string, string>();
+            var ambiguous = new HashSet<string>();
+            var logs = present.Select(file => Logs[file]).ToArray();
+            foreach (var log in logs)
+            {
+                if (log.Subagent || log.Thread == null) continue;
+                foreach (var turn in log.StartedTurns)
+                {
+                    string existing;
+                    if (!owners.TryGetValue(turn, out existing)) owners.Add(turn, log.Thread);
+                    else if (existing != log.Thread) ambiguous.Add(turn);
+                }
+            }
+            string owner;
+            if (!owners.TryGetValue(anchors[0], out owner) || anchors.Any(anchor => ambiguous.Contains(anchor) ||
+                !owners.ContainsKey(anchor) || owners[anchor] != owner) || logs.Any(log => log.Thread == owner && log.Subagent)) return result;
+            var roots = owners.Where(pair => pair.Value == owner && !ambiguous.Contains(pair.Key)).Select(pair => pair.Key).ToArray();
+            var wanted = new HashSet<string>(roots);
+            // Child work must share an owned root and an explicit, unambiguous parent chain.
+            var children = logs.Where(log => log.Thread != null).GroupBy(log => log.Thread)
+                .Where(group => group.First().Parent != null && group.All(log => log.Subagent && log.Parent == group.First().Parent))
+                .ToLookup(group => group.First().Parent, group => group.Key);
+            var related = new HashSet<string> { owner };
+            var pending = new Queue<string>(); pending.Enqueue(owner);
+            while (pending.Count > 0)
+                foreach (var child in children[pending.Dequeue()]) if (related.Add(child)) pending.Enqueue(child);
+            var files = new HashSet<string>(logs.Where(log => related.Contains(log.Thread) &&
+                (log.Thread != owner || !log.Subagent)).Select(log => log.FileKey), StringComparer.OrdinalIgnoreCase);
+            var incomplete = ambiguous.Overlaps(logs.Where(log => log.Thread == owner && !log.Subagent).SelectMany(log => log.StartedTurns));
+            var tracked = new Dictionary<string, Entry>();
+            foreach (var pair in selected)
+            {
+                var entry = pair.Value;
+                if (entry.RootTurn == null || !wanted.Contains(entry.RootTurn)) continue;
+                if (related.Contains(entry.Thread)) tracked.Add(pair.Key, entry);
+                else incomplete = true;
+            }
+            if (tracked.Count == 0) return result;
+            var total = TurnPayload(roots, tracked, files, issues, history, inherited, snapshots, true, incomplete);
+            result["conversation"] = total;
+            return result;
+        }
+        private static Dictionary<string, object> TurnPayload(string[] ids, Dictionary<string, Entry> selected, HashSet<string> present, List<Issue> issues, Dictionary<string, string> history, HashSet<string> inherited, Dictionary<string, DateTimeOffset> snapshots, bool summarize = false, bool incomplete = false)
         {
             var wanted = new HashSet<string>(ids);
-            var buckets = ids.ToDictionary(id => id, id => new Bucket());
+            var summary = summarize ? new Bucket() : null;
+            var counted = summarize ? new HashSet<string>() : null;
+            var buckets = summarize ? null : ids.ToDictionary(id => id, id => new Bucket());
             var started = new HashSet<string>();
             var completed = new HashSet<string>();
             var aborted = new HashSet<string>();
@@ -809,12 +861,13 @@ internal static class CodexNativeQuotaPatch
                 if (!issueKeys.Add(issue.Code + "/" + issueKey)) continue;
                 if (issue.Code == "FILE_UNREADABLE") { partial.UnionWith(ids); continue; }
                 if (issue.RootTurn != null && wanted.Contains(issue.RootTurn) && issue.AffectsTotals)
-                { buckets[issue.RootTurn].Add(issue); partial.Add(issue.RootTurn); }
+                { (summary ?? buckets[issue.RootTurn]).Add(issue); partial.Add(issue.RootTurn); }
             }
             foreach (var entry in selected.Values)
             {
                 if (entry.RootTurn == null || !wanted.Contains(entry.RootTurn)) continue;
-                buckets[entry.RootTurn].Add(entry);
+                (summary ?? buckets[entry.RootTurn]).Add(entry);
+                if (counted != null) counted.Add(entry.RootTurn);
                 var key = entry.RootTurn + "/" + entry.Thread + "/" + entry.LastKey;
                 int count;
                 if (entry.LastKey == null || entry.Usage.Key != entry.LastKey || entry.Thread == null || !records.TryGetValue(key, out count) || count == 0)
@@ -822,6 +875,13 @@ internal static class CodexNativeQuotaPatch
                 else records[key] = count - 1;
             }
             foreach (var pair in records) if (pair.Value > 0) partial.Add(pair.Key.Split('/')[0]);
+            if (summary != null)
+            {
+                var total = summary.Payload();
+                total["partial"] = incomplete || (bool)total["partial"] || partial.Count > 0 || aborted.Count > 0 ||
+                    active.Count > 0 || counted.Count != wanted.Count || !wanted.IsSubsetOf(completed);
+                return total;
+            }
             var turns = new List<Dictionary<string, object>>();
             foreach (var id in ids)
             {
@@ -1659,6 +1719,29 @@ internal static class CodexNativeQuotaPatch
         return result;
     }
 
+    private static void DescribeUiBuild(Dictionary<string, object> payload, string bundle, Dictionary<string, object> active, string helperVersion)
+    {
+        var expected = Regex.Match(bundle ?? "", @"(?m)^// UI build: (?<version>[0-9]+(?:\.[0-9]+){2}) (?<hash>[a-f0-9]{64})\r?$");
+        var uiVersion = active == null ? null : StringValue(active, "version");
+        var uiHash = active == null ? null : StringValue(active, "hash");
+        var versionKnown = Regex.IsMatch(uiVersion ?? "", @"\A[0-9]{1,9}(?:\.[0-9]{1,9}){2}\z");
+        var hashKnown = Regex.IsMatch(uiHash ?? "", @"\A[a-f0-9]{64}\z");
+        bool? matches = null;
+        if (versionKnown && uiVersion != helperVersion) matches = false;
+        else if (expected.Success && versionKnown && hashKnown)
+            matches = expected.Groups["version"].Value == helperVersion && expected.Groups["hash"].Value == uiHash;
+        payload["HelperVersion"] = helperVersion;
+        payload["UiVersion"] = versionKnown ? uiVersion : null;
+        payload["UiBuildMatches"] = matches;
+        if (matches != true)
+        {
+            object raw;
+            var codes = payload.TryGetValue("StageCodes", out raw) ? raw as List<string> : null;
+            if (codes == null) { codes = new List<string>(); payload["StageCodes"] = codes; }
+            codes.Add(matches == false ? "UI_BUILD_MISMATCH" : "UI_BUILD_UNVERIFIED");
+        }
+    }
+
     private static void PublishDiagnosis(CdpSocket socket)
     {
         Dictionary<string, object> payload;
@@ -1670,10 +1753,10 @@ internal static class CodexNativeQuotaPatch
             if (!File.Exists(script)) throw new FileNotFoundException();
             var command = "$ErrorActionPreference='Stop'; [Console]::OutputEncoding=[Text.Encoding]::UTF8; & '" +
                 script.Replace("'", "''") + "' -InstallRoot '" + root.Replace("'", "''") + "' | ConvertTo-Json -Compress -Depth 4";
+            var pwsh = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), @"PowerShell\7\pwsh.exe");
             var startInfo = new ProcessStartInfo {
-                // Doctor uses the PowerShell 7 runtime required by the installer.
-                FileName = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
-                    @"PowerShell\7\pwsh.exe"),
+                FileName = File.Exists(pwsh) ? pwsh : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System),
+                    @"WindowsPowerShell\v1.0\powershell.exe"),
                 Arguments = "-NoProfile -NonInteractive -EncodedCommand " + Convert.ToBase64String(Encoding.Unicode.GetBytes(command)),
                 UseShellExecute = false, CreateNoWindow = true, WindowStyle = ProcessWindowStyle.Hidden,
                 RedirectStandardOutput = true, RedirectStandardError = true, StandardOutputEncoding = Encoding.UTF8
@@ -1701,6 +1784,10 @@ internal static class CodexNativeQuotaPatch
             // Never publish process output, exception messages, file paths, or account data.
             payload = new Dictionary<string, object> { { "errorCode", "DIAGNOSIS_UNAVAILABLE" } };
         }
+        var response = Evaluate(socket, "globalThis.__codexQuotaUiBuild ?? null");
+        var remote = response.ContainsKey("result") ? response["result"] as Dictionary<string, object> : null;
+        var active = remote != null && remote.ContainsKey("value") ? remote["value"] as Dictionary<string, object> : null;
+        DescribeUiBuild(payload, NativeScript, active, ProductVersion);
         Evaluate(socket, "globalThis.__codexQuotaUpdateDiagnosis(" + Json.Serialize(payload) + ")");
     }
 
@@ -1846,7 +1933,8 @@ internal static class CodexNativeQuotaPatch
             if (accountKey == null || !Regex.IsMatch(accountKey, @"\A[A-Za-z0-9+/]{43}=\z")) throw new ArgumentException("Invalid account key");
             return Path.Combine(root, "account-reference-plans", accountKey.Replace('+', '-').Replace('/', '_').TrimEnd('=') + ".txt");
         }
-        private static bool Valid(string plan) { return plan == "" || plan == "pro100" || plan == "pro200" || plan == "pro500"; }
+        private static bool Valid(string plan) { return plan == "" || plan == "pro100" || plan == "pro200" || plan == "pro200-current" || plan == "pro500"; }
+        public static string Tier(string plan) { return !String.IsNullOrEmpty(plan) && Valid(plan) ? plan.Substring(3) : ""; }
         public static string Read(string root, string accountKey)
         {
             if (accountKey == null) return "";
@@ -2872,8 +2960,10 @@ internal static class CodexNativeQuotaPatch
     {
         private const string SourceUrl = "https://modeldial.com/subscriptions?period=week&view=insights";
         private const int MaximumResponse = 524288;
-        private const int MaximumScriptResponse = 1048576;
+        private const int MaximumScriptResponse = 1572864;
         private static readonly int[] CheckIntervalsHours = { 24, 1, 3, 6 };
+        private static readonly string[] LegacyAnchors = { "gpt-6-astra", "gpt-6.1-sol" };
+        private static readonly string[] Gpt62Models = { "gpt-6.2-astra", "gpt-6.2-sol" };
         private static readonly object Gate = new object();
         private static volatile Dictionary<string, object> Current = Empty();
 
@@ -2887,6 +2977,12 @@ internal static class CodexNativeQuotaPatch
             DateTimeOffset stamp;
             return raw is string && DateTimeOffset.TryParseExact((string)raw, "o", CultureInfo.InvariantCulture, DateTimeStyles.None, out stamp) && stamp <= now.AddMinutes(5)
                 ? (DateTimeOffset?)stamp : null;
+        }
+
+        private static bool HasCatalogModels(Dictionary<string, object> models)
+        {
+            return (models.ContainsKey("gpt-6-astra") || models.ContainsKey("gpt-6.2-astra")) &&
+                (models.ContainsKey("gpt-6.1-sol") || models.ContainsKey("gpt-6.2-sol"));
         }
 
         public static Dictionary<string, object> Parse(string html, bool api = false)
@@ -2917,7 +3013,7 @@ internal static class CodexNativeQuotaPatch
                 models[model] = (double)(api ? tokens : tokens * 100000000m);
             }
             foreach (Dictionary<string, object> models in plans.Values)
-                if (!api && (!models.ContainsKey("gpt-6-astra") || !models.ContainsKey("gpt-6.1-sol"))) throw new InvalidDataException("Incomplete ModelDial plans");
+                if (!api && !HasCatalogModels(models)) throw new InvalidDataException("Incomplete ModelDial plans");
             return plans;
         }
 
@@ -2928,10 +3024,12 @@ internal static class CodexNativeQuotaPatch
             var models = new Dictionary<string, object>(); var apiModels = new Dictionary<string, object>();
             var migrated = script.Contains("replace(/^openai-pro-20x-(gpt-(?:6(?:\\.1-sol|-astra|-sol)|5\\.6-sol))$/,\"openai-pro-200-$1\")") &&
                 Regex.IsMatch(script, @"""OpenAI:Pro 20x""\s*===\s*\w+\s*\?\s*""OpenAI:Pro 200""");
-            foreach (var model in new[] { "gpt-6-astra", "gpt-6.1-sol" })
+            foreach (var model in LegacyAnchors.Concat(Gpt62Models))
             {
                 var matches = Regex.Matches(script, "\\{\\s*\"id\"\\s*:\\s*\"openai-pro-20x-" + Regex.Escape(model) + "\"");
                 var canonical = matches.Count == 0;
+                // A current Pro 200 row is not evidence of a legacy 6.2 allowance.
+                if (canonical && Gpt62Models.Contains(model)) continue;
                 if (canonical && migrated) matches = Regex.Matches(script, "\\{\\s*\"id\"\\s*:\\s*\"openai-pro-200-" + Regex.Escape(model) + "\"");
                 if (matches.Count == 0 || !canonical && matches.Count != 1) throw new InvalidDataException("Missing or ambiguous legacy reference");
                 string literal = null;
@@ -3022,7 +3120,7 @@ internal static class CodexNativeQuotaPatch
                 {
                     object rawModels;
                     var models = plans.TryGetValue(tier, out rawModels) ? rawModels as Dictionary<string, object> : null;
-                    if (models == null || !models.ContainsKey("gpt-6-astra") || !models.ContainsKey("gpt-6.1-sol")) { validated.Clear(); break; }
+                    if (models == null || !HasCatalogModels(models)) { validated.Clear(); break; }
                     var values = new Dictionary<string, object>();
                     foreach (var item in models)
                     {
@@ -3067,17 +3165,23 @@ internal static class CodexNativeQuotaPatch
                 foreach (var key in new[] { "models", "apiModels" })
                 {
                     object rawModels; var models = legacy.TryGetValue(key, out rawModels) ? rawModels as Dictionary<string, object> : null;
-                    if (models == null || models.Count != 2) { valid = false; break; }
+                    if (models == null || !LegacyAnchors.All(models.ContainsKey)) { valid = false; break; }
                     var values = new Dictionary<string, object>();
-                    foreach (var model in new[] { "gpt-6-astra", "gpt-6.1-sol" })
+                    foreach (var model in models.Keys)
                     {
                         double value;
-                        if (!NumberValue(models, model, out value) || value <= 0 || value > (key == "models" ? 10000000000000 : 10000000)) valid = false;
+                        if ((!LegacyAnchors.Contains(model) && !Gpt62Models.Contains(model)) || !NumberValue(models, model, out value) ||
+                            value <= 0 || value > (key == "models" ? 10000000000000 : 10000000)) { valid = false; break; }
                         values[model] = value;
                     }
+                    if (!valid) break;
                     validated[key] = values;
                 }
-                if (valid) { validated["sourceUrl"] = legacy["sourceUrl"]; validated["checkedAt"] = legacy["checkedAt"]; state["legacy"] = validated; }
+                if (valid && new HashSet<string>(((Dictionary<string, object>)validated["models"]).Keys)
+                    .SetEquals(((Dictionary<string, object>)validated["apiModels"]).Keys))
+                {
+                    validated["sourceUrl"] = legacy["sourceUrl"]; validated["checkedAt"] = legacy["checkedAt"]; state["legacy"] = validated;
+                }
             }
             if (StringValue(saved, "legacyErrorCode") == "REFERENCE_CHECK_FAILED") state["legacyErrorCode"] = "REFERENCE_CHECK_FAILED";
             if (StringValue(saved, "errorCode") == "REFERENCE_CHECK_FAILED") state["errorCode"] = "REFERENCE_CHECK_FAILED";
@@ -3159,7 +3263,8 @@ internal static class CodexNativeQuotaPatch
         {
             var state = Current;
             var tier = String.Equals(planName, "plus", StringComparison.OrdinalIgnoreCase) ? "plus" :
-                String.Equals(planName, "pro", StringComparison.OrdinalIgnoreCase) && (selectedProTier == "100" || selectedProTier == "200" || selectedProTier == "500") ? selectedProTier : null;
+                String.Equals(planName, "pro", StringComparison.OrdinalIgnoreCase) &&
+                    (selectedProTier == "100" || selectedProTier == "200" || selectedProTier == "200-current" || selectedProTier == "500") ? selectedProTier : null;
             var plans = state["plans"] as Dictionary<string, object>;
             if (tier == "200")
             {
@@ -3174,8 +3279,9 @@ internal static class CodexNativeQuotaPatch
                     { "lastAttemptAt", state["lastAttemptAt"] }, { "nextCheckAt", state.ContainsKey("nextCheckAt") ? state["nextCheckAt"] : null }, { "sourceUrl", SourceUrl } };
             }
             var apiPlans = state["apiPlans"] as Dictionary<string, object>;
-            return new Dictionary<string, object> { { "planName", planName }, { "selectedPlan", tier == null ? null : tier == "plus" ? "plus" : "pro" + tier }, { "models", tier != null && plans != null ? plans[tier] : null },
-                { "apiModels", tier != null && apiPlans != null ? apiPlans[tier] : null }, { "referenceKind", "current" }, { "referenceSnapshotAt", state["lastSuccessAt"] != null ? ((string)state["lastSuccessAt"]).Substring(0, 10) : null }, { "referenceSourceUrl", SourceUrl },
+            var catalogTier = tier == "200-current" ? "200" : tier;
+            return new Dictionary<string, object> { { "planName", planName }, { "selectedPlan", tier == null ? null : tier == "plus" ? "plus" : "pro" + tier }, { "models", catalogTier != null && plans != null ? plans[catalogTier] : null },
+                { "apiModels", catalogTier != null && apiPlans != null ? apiPlans[catalogTier] : null }, { "referenceKind", "current" }, { "referenceSnapshotAt", state["lastSuccessAt"] != null ? ((string)state["lastSuccessAt"]).Substring(0, 10) : null }, { "referenceSourceUrl", SourceUrl },
                 { "status", tier == null ? String.Equals(planName, "pro", StringComparison.OrdinalIgnoreCase) ? "needs_plan" : "unavailable" : plans == null ? "unavailable" : state["errorCode"] != null ? "stale" : "ok" },
                 { "lastSuccessAt", state["lastSuccessAt"] }, { "lastAttemptAt", state["lastAttemptAt"] },
                 { "nextCheckAt", state.ContainsKey("nextCheckAt") ? state["nextCheckAt"] : null }, { "sourceUrl", SourceUrl } };

@@ -88,26 +88,18 @@ $taskActionMatches = {
 
 $existingTask = $null
 $legacyTask = $null
-$existingShortcut = $false
 $shortcutMatches = {
-  param($Shortcut)
+  param($Shortcut, [string]$ExpectedExecutable)
   return -not [String]::IsNullOrWhiteSpace($Shortcut.TargetPath) -and
     -not [String]::IsNullOrWhiteSpace($Shortcut.WorkingDirectory) -and
-    [String]::Equals([IO.Path]::GetFullPath($Shortcut.TargetPath), $executable, [StringComparison]::OrdinalIgnoreCase) -and
-    [String]::Equals([IO.Path]::GetFullPath($Shortcut.WorkingDirectory), $installDirectory, [StringComparison]::OrdinalIgnoreCase) -and
+    [String]::Equals([IO.Path]::GetFullPath($Shortcut.TargetPath), $ExpectedExecutable, [StringComparison]::OrdinalIgnoreCase) -and
+    [String]::Equals([IO.Path]::GetFullPath($Shortcut.WorkingDirectory), (Split-Path -Parent $ExpectedExecutable), [StringComparison]::OrdinalIgnoreCase) -and
     $Shortcut.Arguments -ceq '--launch'
 }
 if (-not $SkipTaskRegistration) {
   . (Join-Path $PSScriptRoot 'official_shortcuts.ps1')
   $ShortcutPath = [IO.Path]::GetFullPath($ShortcutPath)
   if ([IO.Path]::GetExtension($ShortcutPath) -ine '.lnk') { throw 'ShortcutPath must be a .lnk file.' }
-  $shortcutShell = New-Object -ComObject WScript.Shell
-  $existingShortcut = Test-Path -LiteralPath $ShortcutPath
-  if ($existingShortcut -and
-      (-not (Test-Path -LiteralPath $ShortcutPath -PathType Leaf) -or
-       -not (& $shortcutMatches ($shortcutShell.CreateShortcut($ShortcutPath))))) {
-    throw ('The existing shortcut does not match this installation and was not changed: {0}' -f $ShortcutPath)
-  }
   $existingTask = Get-ScheduledTask -TaskPath '\' -TaskName $TaskName -ErrorAction SilentlyContinue
   if ($existingTask) {
     if ($existingTask.Actions.Count -ne 1) {
@@ -133,9 +125,6 @@ if (-not $SkipTaskRegistration) {
 
 $backupDirectory = Join-Path $InstallRoot ('backups\' + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $backupDirectory -Force | Out-Null
-if ($existingShortcut) {
-  Copy-Item -LiteralPath $ShortcutPath -Destination (Join-Path $backupDirectory 'launch-shortcut.lnk')
-}
 foreach ($file in $deploymentFiles) {
   $installedPath = Join-Path $InstallRoot $file.Relative
   if (Test-Path -LiteralPath $installedPath -PathType Leaf) {
@@ -156,7 +145,7 @@ $taskChanged = $false
 $legacyChanged = $false
 $processesStopped = $false
 $filesChanged = $false
-$shortcutCreated = $false
+$launcherBackup = $null
 $officialShortcutTransaction = $null
 $networkPath = Join-Path $installDirectory 'network-settings.json'
 $legacyProxyPath = Join-Path $installDirectory 'api-proxy.dat'
@@ -212,19 +201,6 @@ try {
   $officialShortcutTransaction = Install-CodexOfficialShortcuts -InstallRoot $InstallRoot -BackupDirectory $backupDirectory
   if ($officialShortcutTransaction.Status -in @('NotFound', 'PackageNotFound')) {
     Write-Warning ('Official shortcut arguments were not configured ({0}). Existing native package shortcuts are required; virtual Start menu entries cannot store these arguments.' -f $officialShortcutTransaction.Status)
-  }
-
-  if (-not $existingShortcut) {
-    $stagedShortcut = Join-Path $backupDirectory 'new-launch-shortcut.lnk'
-    $shortcut = $shortcutShell.CreateShortcut($stagedShortcut)
-    $shortcut.TargetPath = $executable
-    $shortcut.Arguments = '--launch'
-    $shortcut.WorkingDirectory = $installDirectory
-    $shortcut.Description = 'Launch Codex with the usage card.'
-    $shortcut.Save()
-    New-Item -ItemType Directory -Path (Split-Path -Parent $ShortcutPath) -Force | Out-Null
-    Move-Item -LiteralPath $stagedShortcut -Destination $ShortcutPath
-    $shortcutCreated = $true
   }
 
   $userId = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
@@ -284,17 +260,19 @@ try {
     Unregister-ScheduledTask -TaskPath '\' -TaskName $legacyTaskName -Confirm:$false
     # Retain the legacy files alongside the saved task XML for recovery.
   }
+  # Move the old launcher only after the upgraded Helper has started and migration has succeeded.
+  if (Test-Path -LiteralPath $ShortcutPath -PathType Leaf) {
+    $shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut($ShortcutPath)
+    if ((& $shortcutMatches $shortcut $executable) -or ($legacyTask -and (& $shortcutMatches $shortcut $legacyExecutable))) {
+      $launcherBackup = Join-Path $backupDirectory 'launch-shortcut.lnk'
+      Move-Item -LiteralPath $ShortcutPath -Destination $launcherBackup
+    }
+  }
 } catch {
   $installFailure = $_
   $officialShortcutRollbackFailure = $null
   $networkRollbackFailure = $null
   try {
-    if ($shortcutCreated -and (Test-Path -LiteralPath $ShortcutPath)) {
-      if (-not (& $shortcutMatches ($shortcutShell.CreateShortcut($ShortcutPath)))) {
-        throw 'Shortcut identity changed during installation; refusing to remove it during rollback.'
-      }
-      Remove-Item -LiteralPath $ShortcutPath -Force
-    }
     if ($taskChanged) {
       $rollbackTask = Get-ScheduledTask -TaskPath '\' -TaskName $TaskName -ErrorAction SilentlyContinue
       if ($rollbackTask) {
@@ -367,7 +345,7 @@ try {
 [pscustomobject]@{
   Installed = $true
   InstallRoot = $InstallRoot
-  ShortcutPath = $ShortcutPath
+  LegacyLauncherBackup = $launcherBackup
   OfficialShortcutStatus = $officialShortcutTransaction.Status
   OfficialShortcutsConfigured = $officialShortcutTransaction.ConfiguredCount
   OfficialShortcutsAlreadyConfigured = $officialShortcutTransaction.AlreadyConfiguredCount

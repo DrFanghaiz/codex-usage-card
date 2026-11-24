@@ -565,6 +565,24 @@ __HTTP_METHODS__
         diagnosis["ActivationState"] = "secret";
         diagnosis["CardKind"] = "secret";
         Check(!Json.Serialize(SanitizeDiagnosis(diagnosis)).Contains("secret"), "Doctor string fields are allowlisted");
+        var buildHash = new string('a', 64);
+        var bundle = "// UI build: 3.2.0 " + buildHash + "\n";
+        var activeBuild = new Dictionary<string, object> { { "version", "3.2.0" }, { "hash", buildHash } };
+        safe = SanitizeDiagnosis(diagnosis);
+        DescribeUiBuild(safe, bundle, activeBuild, "3.2.0");
+        Check((string)safe["HelperVersion"] == "3.2.0" && (string)safe["UiVersion"] == "3.2.0" &&
+            (bool)safe["UiBuildMatches"], "Doctor verified the actual renderer build");
+        activeBuild["hash"] = new string('b', 64);
+        DescribeUiBuild(safe, bundle, activeBuild, "3.2.0");
+        Check(!(bool)safe["UiBuildMatches"] && ((List<string>)safe["StageCodes"]).Contains("UI_BUILD_MISMATCH"), "Same-version mismatches are reported");
+        activeBuild["version"] = "3.1.2";
+        DescribeUiBuild(safe, bundle, activeBuild, "3.2.0");
+        Check((string)safe["UiVersion"] == "3.1.2" && !(bool)safe["UiBuildMatches"], "Older renderer differs from the helper");
+        activeBuild["version"] = "secret";
+        DescribeUiBuild(safe, bundle, activeBuild, "3.2.0");
+        Check(safe["UiVersion"] == null && safe["UiBuildMatches"] == null &&
+            ((List<string>)safe["StageCodes"]).Contains("UI_BUILD_UNVERIFIED") && !Json.Serialize(safe).Contains("secret"),
+            "Unverified metadata stays unverified and cannot leak arbitrary renderer data");
         diagnosis["Installed"] = "secret";
         try { SanitizeDiagnosis(diagnosis); throw new Exception("Non-boolean diagnosis accepted"); }
         catch (InvalidOperationException) { }

@@ -106,6 +106,61 @@ test('preview grid separates the primary estimate, account readout and visible u
  }finally{await close(page);}
 });
 
+test('conversation totals are on demand, available with an empty interval, and discard stale views',async()=>{
+ const page=await pageFor();try{
+  await page.evaluate(()=>{
+   const info=console.info;globalThis.conversationRequests=[];globalThis.officialRequests=0;
+   console.info=(...args)=>{
+    if(args[0]==='__codexQuotaTurnUsageRequest__')conversationRequests.push({id:args[1],query:structuredClone(__codexQuotaTurnUsageQuery)});
+    if(args[0]==='__codexQuotaOfficialRequest__')officialRequests++;
+    info.apply(console,args);
+   };
+   document.querySelector('#chat').innerHTML='<div data-content-search-turn-key="root-two"><div class="text-size-chat text-secondary"><button>用时 1m</button></div></div>';
+  });
+  await showLocalUsage(page);const local=await localUsageRequest(page);
+  await updateLocalUsage(page,localUsagePayload(local.range,{eventCount:0,models:[]}),local.id);
+  await page.waitForFunction(()=>conversationRequests.length===1);
+  const first=await page.evaluate(()=>conversationRequests[0]);
+  assert.deepEqual(first.query.turnIds,['root-two']);
+  await page.evaluate(id=>__codexQuotaUpdateTurnUsage({turns:[]},id),first.id);
+  const section=page.locator('.cq-local-conversation'),summary=section.locator('summary'),output=section.locator('output');
+  assert.equal(await section.evaluate(node=>node.open),false);
+  assert.equal(await page.evaluate(()=>conversationRequests.filter(x=>x.query.conversationTurnIds).length),0);
+  await summary.click();
+  await page.waitForFunction(()=>conversationRequests.some(x=>x.query.conversationTurnIds));
+  const request=await page.evaluate(()=>conversationRequests.find(x=>x.query.conversationTurnIds));
+  assert.deepEqual(request.query.conversationTurnIds,['root-two']);
+  await page.locator('[data-period=week]').click();
+  const week=await localUsageRequest(page);
+  await updateLocalUsage(page,localUsagePayload(week.range),week.id);
+  assert.equal(await page.locator('.cq-local-usage-details .cq-local-conversation').count(),1);
+  await page.locator('.cq-local-highlights').click();
+  assert.equal(await page.evaluate(()=>conversationRequests.filter(x=>x.query.conversationTurnIds).length),1);
+  const model={model:'gpt-6.2-sol',inputTokens:1000000,cachedInputTokens:0,outputTokens:100000,totalTokens:1100000};
+  const reference={status:'ok',planName:'plus',selectedPlan:'plus',models:{'gpt-6.2-sol':100000000},apiModels:{'gpt-6.2-sol':200}};
+  const result={reference,conversation:{eventCount:3,partial:true,models:[model],issues:[]}};
+  await page.evaluate(({result,id})=>__codexQuotaUpdateTurnUsage(result,id),{result,id:request.id});
+  assert.match(await output.innerText(),/110万 token.*API 等值.*\$3\.00.*估算.*不完整/);
+  assert.equal(await page.evaluate(()=>officialRequests),0);
+  await collapse(page);await open(page);
+  const today=await localUsageRequest(page);
+  await updateLocalUsage(page,localUsagePayload(today.range,{eventCount:0,models:[]}),today.id);
+  assert.equal(await section.evaluate(node=>node.open),false);
+  assert.equal(await output.textContent(),'');
+  assert.equal(await page.evaluate(()=>conversationRequests.filter(x=>x.query.conversationTurnIds).length),1);
+  await summary.click();
+  await page.waitForFunction(()=>conversationRequests.filter(x=>x.query.conversationTurnIds).length===2);
+  const stale=await page.evaluate(()=>conversationRequests.filter(x=>x.query.conversationTurnIds)[1].id);
+  await page.evaluate(({result,id})=>{
+   document.querySelector('[data-content-search-turn-key]').dataset.contentSearchTurnKey='other-thread';
+   __codexQuotaUpdateTurnUsage(result,id);
+  },{result,id:stale});
+  await page.waitForFunction(()=>document.querySelector('.cq-local-conversation output').textContent.includes('暂不可用'));
+  assert.doesNotMatch(await output.innerText(),/token|%/);
+  assert.equal(await page.evaluate(()=>conversationRequests.filter(x=>x.query.conversationTurnIds).length),2);
+ }finally{await close(page);}
+});
+
 test('today and week produce one exact local-time range and refresh advances only that range',async()=>{
  const page=await pageFor(officialPayload(),{width:1024,height:800},{timezoneId:'Asia/Shanghai'});try{
   await page.clock.install({time:new Date('2026-11-04T12:30:00+08:00')});await showLocalUsage(page);let r=await localUsageRequest(page);
@@ -405,6 +460,16 @@ test('reference selection lives in settings, preserves the selected exact range 
   await showLocalUsage(page);let {range,id}=await localUsageRequest(page);const ref={planName:'pro',selectedPlan:null,status:'needs_plan',models:null,apiModels:null};
   await updateLocalUsage(page,localUsagePayload(range,{reference:ref}),id);assert.doesNotMatch(await page.locator('.cq-local-recent-local strong').innerText(),/0%/);
   await openReferences(page);assert.equal(await page.locator('#cq-settings .cq-local-reference').count(),1);
+  await page.locator('.cq-local-reference-plan').selectOption('pro200-current');
+  const catalog=await localUsageRequest(page);
+  assert.equal(catalog.range.referencePlan,'pro200-current');
+  assert.equal(catalog.range.saveReferencePlan,true);
+  const model='gpt-6.2-astra';
+  const sample={model,inputTokens:1000000,cachedInputTokens:1000000,outputTokens:0,totalTokens:1000000,cacheWriteKnown:true};
+  const directReference={...ref,selectedPlan:'pro200-current',referenceKind:'current',status:'ok',models:{[model]:100000000},apiModels:{[model]:100}};
+  await updateLocalUsage(page,localUsagePayload(catalog.range,{models:[sample],eventCount:1,reference:directReference}),catalog.id);
+  assert.match(await page.locator('.cq-local-recent-local strong').textContent(),/0\.4–1%/);
+  assert.equal(await page.locator('.cq-local-method-note').count(),0);
   await page.locator('.cq-local-reference-plan').selectOption('pro200');const next=await localUsageRequest(page);assert.equal(next.range.referencePlan,'pro200');assert.equal(next.range.intervalStart,range.intervalStart);
   for(let i=0;i<3;i++)await updateLocalUsage(page,localUsagePayload(next.range),next.id);assert.equal(await page.locator('.cq-local-estimate-methods').count(),1);
   const changed=localUsagePayload(next.range,{models:[{model:'gpt-6-astra',inputTokens:1000000,cachedInputTokens:1000000,cacheWriteInputTokens:0,cacheWriteKnown:true,outputTokens:0,totalTokens:1000000}],eventCount:1});
@@ -868,6 +933,16 @@ test('self-drawn switches expose only relevant controls and survive host reset a
     await page.locator('.cq-doctor').click();await page.evaluate(()=>__codexQuotaUpdateDiagnosis({errorCode:'TIMEOUT'}));assert.equal(await page.locator('.cq-copy').isVisible(),false);
     await page.locator('.cq-doctor').click();await page.evaluate(()=>__codexQuotaUpdateDiagnosis({CardVisible:false,StageCodes:['CARD_NOT_VISIBLE']}));assert.match(await page.locator('#cq-diagnosis').innerText(),/CARD_NOT_VISIBLE/);
     assert.equal(await page.locator('.cq-copy').isVisible(),true,'a successful diagnostic response can be copied even when it reports an unhealthy entry');
+    const build=await page.evaluate(()=>globalThis.__codexQuotaUiBuild);
+    assert.match(build.version,/^\d+\.\d+\.\d+$/);
+    assert.match(build.hash,/^[a-f0-9]{64}$/);
+    await page.evaluate(version=>__codexQuotaUpdateDiagnosis({HelperVersion:version,UiVersion:'3.1.2',UiBuildMatches:false,StageCodes:['UI_BUILD_MISMATCH']}),build.version);
+    const diagnosis=page.locator('#cq-diagnosis');
+    assert.ok((await diagnosis.innerText()).includes(`后台版本: v${build.version}`));
+    assert.match(await diagnosis.innerText(),/已加载界面: v3\.1\.2[\s\S]*版本一致性: 不匹配/);
+    await page.evaluate(version=>__codexQuotaUpdateDiagnosis({errorCode:'DIAGNOSIS_UNAVAILABLE',HelperVersion:version,UiVersion:version,UiBuildMatches:true}),build.version);
+    assert.match(await diagnosis.innerText(),/版本一致性: 匹配/);
+    assert.equal(await page.locator('.cq-copy').isVisible(),true,'version evidence is copyable when the shell check fails');
     await page.locator('#cq-settings header button').click();assert.equal(await page.locator('.cq-settings-button').evaluate(el=>el===document.activeElement),true);
     await page.evaluate(source);await page.locator('.cq-settings-button').click();assert.equal(await page.locator('[name=alerts]').isChecked(),true);assert.equal(await page.locator('#codex-quota-popover').count(),1);
   }finally{await context.close();}
