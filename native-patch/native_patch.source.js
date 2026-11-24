@@ -1152,7 +1152,7 @@
       const diagnosis=document.createElement("button");diagnosis.type="button";diagnosis.textContent=words("运行自检","Run diagnosis");diagnosis.onclick=()=>{openSettings(diagnosis,".cq-doctor");document.querySelector('#cq-settings .cq-doctor').click();};
       placeholder.append(label,reason,retry,diagnosis);
     }
-    result.append(placeholder,panel.cqConversation);
+    result.append(placeholder);
   };
   const renderLocalComposition = (data,chart,addText,compact=false) => {
     chart.classList.add("cq-local-composition");
@@ -1670,8 +1670,7 @@
         const fill=addText("i", "", "", meter);fill.hidden=!share;fill.style.width=(share || 0)+"%";
         meter.title=share===null ? words("无已知占比", "Share unavailable") : words(`占本机 token ${localPercent(share)}%`, `${localPercent(share)}% of local tokens`);
       }
-      usageDetails.append(panel.cqConversation);
-    } else result.append(panel.cqConversation);
+    }
     // Reference coverage never changes which recorded tokens are counted.
     if(excluded && localUsageBaselines.size) addText("p","cq-local-excluded",words(`${compactLocalTokens(excluded).text} token 无周参考`,`${compactLocalTokens(excluded).text} tokens without weekly references`),reference.querySelector(".cq-local-weekly-reference"));
     if(unpriced) addText("p","cq-local-excluded",words(`${compactLocalTokens(unpriced).text} token 未计价`,`${compactLocalTokens(unpriced).text} tokens not priced`),reference.querySelector(".cq-local-api-reference"));
@@ -1891,13 +1890,6 @@
     settings.append(toolIcon("settings", "")); settings.onclick = () => openSettings(settings);
     panel.querySelector('header').append(settings,refresh); syncReleaseUI();
     panel.querySelector(".cq-local-result").setAttribute("aria-label", words("用量统计结果", "Usage statistics results"));
-    const conversation=document.createElement("details");conversation.className="cq-local-conversation";
-    const conversationSummary=document.createElement("summary");conversationSummary.textContent=words("本对话累计", "Conversation total");
-    conversationSummary.append(toolIcon("back", "cq-local-detail-arrow"));
-    const conversationTotal=document.createElement("output");conversationTotal.setAttribute("role","status");
-    conversation.append(conversationSummary,conversationTotal);
-    conversation.ontoggle=()=>{if(conversation.open)requestConversationUsage(conversation,conversationTotal);};
-    panel.cqConversation=conversation;
     panel.querySelector("summary").textContent = words("口径与来源", "Scope and sources");
     panel.querySelector("summary").append(toolIcon("back", "cq-local-detail-arrow"));
     panel.querySelector("details p").textContent = words(
@@ -2504,7 +2496,10 @@
       #cq-local-usage .cq-local-highlights:hover { text-decoration:underline dotted; text-underline-offset:2px; }
       #cq-local-usage .cq-local-highlights:focus-visible { outline-offset:0; border-radius:4px; }
       #cq-local-usage .cq-local-usage-details > .cq-local-detail-body { padding-top:8px; }
-      #cq-local-usage .cq-local-conversation output { color:var(--cq-muted); overflow-wrap:anywhere; }
+      #cq-conversation-trigger { anchor-name:--cq-conversation; -webkit-app-region:no-drag; flex:0 1 auto; min-width:0; max-width:30vw; min-height:24px; margin-inline-start:4px; border:0; border-radius:6px; padding:0 6px; background:transparent; color:var(--color-text-secondary, CanvasText); font:inherit; font-size:11px; line-height:16px; font-variant-numeric:tabular-nums; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; cursor:pointer; }
+      #cq-conversation-trigger:hover, #cq-conversation-trigger[aria-expanded="true"] { background:var(--color-background-primary-ghost-hover, ButtonFace); }
+      #cq-conversation-trigger:focus-visible { outline:2px solid currentColor; outline-offset:1px; }
+      #cq-conversation-total { position:fixed; position-anchor:--cq-conversation; inset:auto; top:anchor(bottom); left:clamp(12px,anchor(left),max(12px,calc(100% - 240px))); box-sizing:border-box; width:min(228px,calc(100vw - 24px)); margin:6px 0 0; padding:8px 12px; border:1px solid var(--color-border, ButtonBorder); border-radius:var(--radius-sm,8px); background:var(--color-surface-elevated-secondary, Canvas); color:var(--color-text, CanvasText); box-shadow:var(--shadow-dropdown-overlay, 0 6px 18px #0002); font:inherit; font-size:11px; line-height:17px; font-variant-numeric:tabular-nums; white-space:pre-line; overflow-wrap:anywhere; }
       #cq-local-usage .cq-local-mix { margin-top:12px; }
       #cq-local-usage .cq-local-mix .cq-local-composition-track { height:8px; margin:0; border-radius:99px; }
       #cq-local-usage .cq-local-mix .cq-local-composition-values { display:flex; flex-wrap:wrap; gap:2px 8px; margin:6px 0 0; }
@@ -3702,7 +3697,6 @@
         openingPending = false;
         popup.removeAttribute("data-cq-opening");
         animatePopover(false);
-        resetConversationUsage();
         hideRefreshMessage();
         popup.querySelectorAll(".cq-refresh-icon").forEach(stopMotion);
         popup.querySelectorAll(".cq-local-refresh > svg,.cq-range-spinner").forEach(stopMotion);
@@ -3885,14 +3879,22 @@
   let turnObserver, turnTextObserver, turnThemeObserver, turnScanTimer, turnRequestTimer, turnRefreshTimer;
   let turnTextTargets = [];
   let turnPending = null, turnGeneration = 0, turnSequence = 0, turnInstalled = false, turnScope;
-  let conversationRead = null;
-  const turnSelector = '[data-content-search-turn-key] .text-size-chat.text-secondary > button';
+  let conversationRead = null, conversationTitle, conversationTitleText;
+  const toolbarSelector = '[data-app-shell-header-toolbar="true"]';
+  const conversationTitleSelector = `${toolbarSelector} .text-conversation-title`;
+  const turnKeySelector = '[data-content-search-turn-key]';
+  const conversationTrigger = document.createElement("button");
+  const conversationOutput = document.createElement("output");
+  const conversationName = words("本对话累计用量", "Conversation usage total");
+  const conversationLabel = words("累计用量", "Total usage");
+  const turnSelector = `${turnKeySelector} .text-size-chat.text-secondary > button`;
   const turnDescription = words('本机额度估算，非官方实际扣量', 'Local quota estimate, not actual account usage');
   const turnButtons = () => {
     const candidates = [...document.querySelectorAll(turnSelector)];
-    if (turnTextObserver && (candidates.length !== turnTextTargets.length || candidates.some((button,index) => button !== turnTextTargets[index]))) {
+    if (turnTextObserver && (candidates.length !== turnTextTargets?.length || candidates.some((button,index) => button !== turnTextTargets[index]))) {
       turnTextObserver.disconnect();
       for (const button of candidates) turnTextObserver.observe(button,{characterData:true,subtree:true});
+      if (conversationTitle) turnTextObserver.observe(conversationTitle,{childList:true,characterData:true,subtree:true});
       turnTextTargets = candidates;
     }
     return candidates.filter(button => {
@@ -3914,10 +3916,38 @@
     clearTimeout(turnScanTimer);
     turnScanTimer = setTimeout(scanTurns, delay);
   };
+  const setConversationSummary = (summary = '') => {
+    conversationTrigger.textContent=summary || conversationLabel;
+    conversationTrigger.setAttribute("aria-label",summary ? `${conversationName} · ${summary}` : conversationName);
+  };
   const resetConversationUsage = () => {
-    const detail=document.getElementById("cq-local-usage")?.cqConversation;
-    if (detail) { detail.open=false; detail.querySelector("output").textContent=""; }
     conversationRead=null;
+    if (conversationOutput.matches(':popover-open')) conversationOutput.hidePopover();
+    conversationOutput.textContent="";
+    setConversationSummary();
+    conversationTrigger.setAttribute("aria-expanded","false");
+  };
+  const mountConversationUsage = () => {
+    const title=[...document.querySelectorAll(conversationTitleSelector)].find(node=>node.getClientRects().length);
+    if(title!==conversationTitle || title?.textContent!==conversationTitleText) {
+      resetConversationUsage();
+      if(conversationTitle!==title) {
+        conversationTitle=title;
+        turnTextTargets=null;
+      }
+      conversationTitleText=title?.textContent;
+    }
+    if (!title) {
+      conversationTrigger.remove();conversationOutput.remove();
+    } else {
+      if (title.nextElementSibling!==conversationTrigger) title.after(conversationTrigger);
+      if (!conversationOutput.isConnected) document.body.append(conversationOutput);
+      if (conversationOutput.matches(":popover-open") && !CSS.supports("top: anchor(bottom)")) {
+        const rect=conversationTrigger.getBoundingClientRect();
+        conversationOutput.style.top=`${rect.bottom}px`;
+        conversationOutput.style.left=`${Math.max(12,Math.min(rect.left,innerWidth-240))}px`;
+      }
+    }
   };
   const resetTurnUsage = () => {
     turnGeneration++;
@@ -3970,23 +4000,34 @@
     return [...new Set(buttons.map(button => button.closest('[data-content-search-turn-key]').getAttribute('data-content-search-turn-key')))];
   };
   const turnUnavailable = () => ({text:words('估算暂不可用','Estimate unavailable'),title:turnDescription});
-  const conversationUnavailable=()=>words("本对话用量暂不可用","Conversation usage unavailable");
-  const requestConversationUsage = (detail,output) => {
-    const anchors = new Map(turnButtons().map(button=>[button.closest('[data-content-search-turn-key]').dataset.contentSearchTurnKey,button]));
-    if (!anchors.size || !globalThis.__codexQuotaSessionScope) {output.textContent=conversationUnavailable();return;}
-    conversationRead={detail,output,anchors,queued:true};
-    output.textContent=words("正在读取…","Reading…");
+  const showConversationUnavailable = () => {
+    setConversationSummary();
+    conversationOutput.textContent=words("本对话用量暂不可用","Conversation usage unavailable");
+  };
+  const requestConversationUsage = () => {
+    const transcripts=[...document.querySelectorAll('[data-thread-find-target]')].filter(node=>node.getClientRects().length);
+    const nodes=transcripts.length===1 ? [...transcripts[0].querySelectorAll(turnKeySelector)].slice(-50) :
+      transcripts.length===0 ? turnButtons().map(button=>button.closest(turnKeySelector)) : [];
+    const anchors=new Map(nodes.filter(node=>/^[a-zA-Z0-9-]{1,80}$/.test(node.dataset.contentSearchTurnKey))
+      .map(node=>[node.dataset.contentSearchTurnKey,node]));
+    if (!anchors.size || !globalThis.__codexQuotaSessionScope) {
+      conversationRead=null;
+      showConversationUnavailable();
+      return;
+    }
+    conversationRead={anchors,transcript:transcripts[0],queued:true};
+    conversationOutput.textContent=words("正在读取…","Reading…");
     scheduleTurnScan(0);
   };
-  const conversationCurrent = read => read.detail.isConnected && read.detail.open &&
-    [...read.anchors].every(([id,button])=>button.getClientRects().length &&
-      button.closest('[data-content-search-turn-key]')?.dataset.contentSearchTurnKey===id);
+  const conversationCurrent = read => conversationTitle?.isConnected && conversationTitle.textContent===conversationTitleText &&
+    (!read.transcript || read.transcript.getClientRects().length) &&
+    [...read.anchors].every(([id,node])=>node.isConnected && node.dataset.contentSearchTurnKey===id);
   const showConversationUsage = (read,data,baselines,apiBaselines) => {
-    if (conversationRead!==read || !conversationCurrent(read)) return;
+    if (conversationRead!==read || !conversationOutput.matches(":popover-open") || !conversationCurrent(read)) return;
     if (!data || !validLocalModels(data.models) || !data.models.length || !Number.isSafeInteger(data.eventCount) || data.eventCount<1 ||
-        typeof data.partial!=="boolean" || !validLocalIssues(data.issues)) {read.output.textContent=conversationUnavailable();return;}
+        typeof data.partial!=="boolean" || !validLocalIssues(data.issues)) {showConversationUnavailable();return;}
     const tokens=data.models.reduce((sum,row)=>sum+row.totalTokens,0);
-    if (!Number.isSafeInteger(tokens)) {read.output.textContent=conversationUnavailable();return;}
+    if (!Number.isSafeInteger(tokens)) {showConversationUnavailable();return;}
     const estimate=localQuotaEstimate(data.models,baselines,apiBaselines);
     const costs=data.models.map(apiEquivalent).filter(Boolean);
     const cost=costs.reduce((sum,row)=>[sum[0]+row[0],sum[1]+row[1]],[0,0]);
@@ -3999,16 +4040,17 @@
     }
     if(estimate.range) lines.push(`${estimate.proxy ? words("间接估算","Proxy est.") : words("估算","Est.")} ${localEstimateText(estimate)}`);
     if(data.partial || estimate.partial) lines.push(words("不完整","Partial"));
-    read.output.textContent=lines.join(" · ");
+    conversationOutput.textContent=lines.join("\n");
+    setConversationSummary(estimate.range ? localEstimateText(estimate) : lines[0]);
   };
   const scanTurns = () => {
     if (!turnInstalled || document.visibilityState === 'hidden') return;
     const plan = turnPlan(), scope = globalThis.__codexQuotaSessionScope;
     if (turnScope !== scope) { resetTurnUsage(); turnScope = scope; }
+    mountConversationUsage();
     const ids = renderTurns();
-    if (conversationRead && (!conversationCurrent(conversationRead) || ids.some(id=>!conversationRead.anchors.has(id)))) {
-      conversationRead.output.textContent=conversationUnavailable();
-      conversationRead=null;
+    if (conversationRead && !conversationCurrent(conversationRead)) {
+      resetConversationUsage();
     }
     if (!scope || turnPending) return;
     const conversation=conversationRead?.queued ? conversationRead : null;
@@ -4093,14 +4135,30 @@
   const installTurnUsage = () => {
     if (turnInstalled) return;
     turnInstalled = true;
+    conversationTrigger.id="cq-conversation-trigger";
+    conversationTrigger.type="button";
+    conversationTrigger.setAttribute("popovertarget","cq-conversation-total");
+    conversationTrigger.title=conversationName;
+    conversationOutput.id="cq-conversation-total";
+    conversationOutput.setAttribute("popover","auto");
+    conversationOutput.setAttribute("role","status");
+    resetConversationUsage();
+    conversationOutput.addEventListener("toggle",({newState})=>{
+      if(!turnInstalled) return;
+      const open=newState==="open";
+      conversationTrigger.setAttribute("aria-expanded",String(open));
+      if(open)requestConversationUsage();
+      else if(conversationRead)conversationRead.queued=false;
+    });
     turnTextObserver = new MutationObserver(() => scheduleTurnScan());
     turnObserver = new MutationObserver(records => {
       for (const record of records) {
         if (record.type === 'attributes') { scheduleTurnScan(); break; }
-        if (record.target.closest?.('.cq-turn-usage,#codex-quota-popover,#codex-quota-trigger')) continue;
+        if (record.target.closest?.('.cq-turn-usage,#codex-quota-popover,#codex-quota-trigger,#cq-conversation-trigger,#cq-conversation-total')) continue;
         const target = record.target;
         if (target.closest?.(turnSelector) || target.matches?.('.text-size-chat.text-secondary') && [...record.addedNodes,...record.removedNodes].some(node => !node.classList?.contains('cq-turn-usage')) ||
             [...record.addedNodes,...record.removedNodes].some(node => node.nodeType === 1 && (node.matches('[data-content-search-turn-key]') || node.querySelector('[data-content-search-turn-key]') ||
+              node.matches(toolbarSelector) || node.querySelector(toolbarSelector) || target.closest?.(toolbarSelector) && (node.matches('.text-conversation-title') || node.querySelector('.text-conversation-title')) ||
               target.closest?.('[data-content-search-turn-key]') && (node.matches('.text-size-chat.text-secondary') || node.querySelector('.text-size-chat.text-secondary'))))) {
           scheduleTurnScan();
           break;
@@ -4123,6 +4181,7 @@
       document.removeEventListener('visibilitychange', onTurnEnvironmentChange);
       clearTimeout(turnScanTimer); clearTimeout(turnRequestTimer); clearTimeout(turnRefreshTimer);
       resetTurnUsage();
+      conversationTrigger.remove();conversationOutput.remove();
       delete globalThis.__codexQuotaUpdateTurnUsage;
     };
     scheduleTurnScan(0);

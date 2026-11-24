@@ -106,8 +106,8 @@ test('preview grid separates the primary estimate, account readout and visible u
  }finally{await close(page);}
 });
 
-test('conversation totals are on demand, available with an empty interval, and discard stale views',async()=>{
- const page=await pageFor();try{
+test('conversation totals are on demand, anchored to the title and discard stale views',async()=>{
+ const page=await pageFor(officialPayload(),{width:1024,height:720},{deviceScaleFactor:1.25});try{
   await page.evaluate(()=>{
    const info=console.info;globalThis.conversationRequests=[];globalThis.officialRequests=0;
    console.info=(...args)=>{
@@ -115,48 +115,49 @@ test('conversation totals are on demand, available with an empty interval, and d
     if(args[0]==='__codexQuotaOfficialRequest__')officialRequests++;
     info.apply(console,args);
    };
-   document.querySelector('#chat').innerHTML='<div data-content-search-turn-key="root-two"><div class="text-size-chat text-secondary"><button>用时 1m</button></div></div>';
+   document.querySelector('#chat').innerHTML=`<header data-app-shell-header-toolbar="true" class="flex items-center">
+    <span class="text-conversation-title" style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">当前对话</span>
+   </header><div data-content-search-turn-key="other-panel"><div class="text-size-chat text-secondary"><button>用时 1m</button></div></div>
+   <div data-thread-find-target style="position:absolute;top:1200px"><div data-content-search-turn-key="root-two" style="display:contents">历史轮次</div></div>`;
   });
-  await showLocalUsage(page);const local=await localUsageRequest(page);
-  await updateLocalUsage(page,localUsagePayload(local.range,{eventCount:0,models:[]}),local.id);
   await page.waitForFunction(()=>conversationRequests.length===1);
   const first=await page.evaluate(()=>conversationRequests[0]);
-  assert.deepEqual(first.query.turnIds,['root-two']);
+  assert.deepEqual(first.query.turnIds,['other-panel']);
   await page.evaluate(id=>__codexQuotaUpdateTurnUsage({turns:[]},id),first.id);
-  const section=page.locator('.cq-local-conversation'),summary=section.locator('summary'),output=section.locator('output');
-  assert.equal(await section.evaluate(node=>node.open),false);
+  const trigger=page.locator('.text-conversation-title + #cq-conversation-trigger'),output=page.locator('#cq-conversation-total');
+  assert.equal(await trigger.innerText(),'累计用量');
+  assert.equal(await output.isVisible(),false);
   assert.equal(await page.evaluate(()=>conversationRequests.filter(x=>x.query.conversationTurnIds).length),0);
-  await summary.click();
+  await trigger.press('Enter');
   await page.waitForFunction(()=>conversationRequests.some(x=>x.query.conversationTurnIds));
   const request=await page.evaluate(()=>conversationRequests.find(x=>x.query.conversationTurnIds));
   assert.deepEqual(request.query.conversationTurnIds,['root-two']);
-  await page.locator('[data-period=week]').click();
-  const week=await localUsageRequest(page);
-  await updateLocalUsage(page,localUsagePayload(week.range),week.id);
-  assert.equal(await page.locator('.cq-local-usage-details .cq-local-conversation').count(),1);
-  await page.locator('.cq-local-highlights').click();
-  assert.equal(await page.evaluate(()=>conversationRequests.filter(x=>x.query.conversationTurnIds).length),1);
   const model={model:'gpt-6.2-sol',inputTokens:1000000,cachedInputTokens:0,outputTokens:100000,totalTokens:1100000};
   const reference={status:'ok',planName:'plus',selectedPlan:'plus',models:{'gpt-6.2-sol':100000000},apiModels:{'gpt-6.2-sol':200}};
   const result={reference,conversation:{eventCount:3,partial:true,models:[model],issues:[]}};
   await page.evaluate(({result,id})=>__codexQuotaUpdateTurnUsage(result,id),{result,id:request.id});
-  assert.match(await output.innerText(),/110万 token.*API 等值.*\$3\.00.*估算.*不完整/);
+  assert.match(await output.innerText(),/110万 token\nAPI 等值.*\$3\.00\n估算.*\n不完整/);
+  assert.match(await trigger.innerText(),/1\.1.*1\.5%/);
+  const anchor=await trigger.boundingBox(), popup=await output.boundingBox();
+  assert.ok(Math.abs(popup.x-anchor.x)<1 && popup.y>=anchor.y+anchor.height);
+  await page.setViewportSize({width:390,height:600});
+  const narrow=await output.boundingBox();
+  assert.ok(narrow.x>=11 && narrow.x+narrow.width<=379 && narrow.y+narrow.height<=600);
   assert.equal(await page.evaluate(()=>officialRequests),0);
-  await collapse(page);await open(page);
-  const today=await localUsageRequest(page);
-  await updateLocalUsage(page,localUsagePayload(today.range,{eventCount:0,models:[]}),today.id);
-  assert.equal(await section.evaluate(node=>node.open),false);
-  assert.equal(await output.textContent(),'');
+  await page.keyboard.press('Escape');
+  assert.equal(await output.isVisible(),false);
+  assert.match(await trigger.innerText(),/%/);
   assert.equal(await page.evaluate(()=>conversationRequests.filter(x=>x.query.conversationTurnIds).length),1);
-  await summary.click();
+  await trigger.click();
   await page.waitForFunction(()=>conversationRequests.filter(x=>x.query.conversationTurnIds).length===2);
   const stale=await page.evaluate(()=>conversationRequests.filter(x=>x.query.conversationTurnIds)[1].id);
   await page.evaluate(({result,id})=>{
-   document.querySelector('[data-content-search-turn-key]').dataset.contentSearchTurnKey='other-thread';
+   document.querySelector('.text-conversation-title').firstChild.data='另一个对话';
    __codexQuotaUpdateTurnUsage(result,id);
   },{result,id:stale});
-  await page.waitForFunction(()=>document.querySelector('.cq-local-conversation output').textContent.includes('暂不可用'));
-  assert.doesNotMatch(await output.innerText(),/token|%/);
+  await page.waitForFunction(()=>document.querySelector('#cq-conversation-trigger').textContent==='累计用量');
+  assert.equal(await output.isVisible(),false);
+  assert.equal(await output.textContent(),'');
   assert.equal(await page.evaluate(()=>conversationRequests.filter(x=>x.query.conversationTurnIds).length),2);
  }finally{await close(page);}
 });
