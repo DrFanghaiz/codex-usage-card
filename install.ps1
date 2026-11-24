@@ -6,9 +6,9 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$releaseTag = 'v3.2.1'
+$releaseTag = 'v3.2.2'
 $archiveName = 'codex-usage-card.skill.zip'
-$expectedSha256 = '40788E7A5464456BCA00639B1B46A48FE3F98FEED699B244DE76866C97765656'
+$expectedSha256 = 'B2917FE31403D54988914C20DFC541BF82A8D1E85AB48653596E2BAAE4D0B2F4'
 $archiveUrl = 'https://github.com/DrFanghaiz/codex-usage-card/releases/download/{0}/{1}' -f $releaseTag, $archiveName
 
 if ($env:OS -ne 'Windows_NT') {
