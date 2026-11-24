@@ -136,7 +136,11 @@ test('conversation totals are on demand, anchored to the title and discard stale
   const reference={status:'ok',planName:'plus',selectedPlan:'plus',models:{'gpt-6.2-sol':100000000},apiModels:{'gpt-6.2-sol':200}};
   const result={reference,conversation:{eventCount:3,partial:true,models:[model],issues:[]}};
   await page.evaluate(({result,id})=>__codexQuotaUpdateTurnUsage(result,id),{result,id:request.id});
-  assert.match(await output.innerText(),/110万 token\nAPI 等值.*\$3\.00\n估算.*\n不完整/);
+  assert.deepEqual(await output.locator('dt').allTextContents(),['本机额度估算','Token','API 等值']);
+  assert.deepEqual(await output.locator('dd').allTextContents(),['≈ 1.1–1.5%','110万','≈ $3.00']);
+  assert.equal(await output.locator('p').textContent(),'统计不完整');
+  const details=await output.locator('dl > div:not(.cq-conversation-estimate) dd').evaluateAll(nodes=>nodes.map(node=>node.getBoundingClientRect().right));
+  assert.ok(Math.abs(details[0]-details[1])<1,'detail values share a right edge');
   assert.match(await trigger.innerText(),/1\.1.*1\.5%/);
   const anchor=await trigger.boundingBox(), popup=await output.boundingBox();
   assert.ok(Math.abs(popup.x-anchor.x)<1 && popup.y>=anchor.y+anchor.height);
@@ -368,7 +372,7 @@ test('long dual-estimate ranges stay aligned inside a narrow 228px popup',async(
 });
 
 test('account sampling shows one compact readout and preserves missing and partial semantics',async()=>{
- const page=await pageFor();try{
+ const page=await pageFor(officialPayload(),{width:390,height:720},{deviceScaleFactor:1.25});try{
   await showLocalUsage(page);const {range,id}=await localUsageRequest(page);
   const data=localUsagePayload(range);
   const segment={startAt:range.intervalStart,endAt:range.intervalEnd,usedPercent:0};
@@ -388,8 +392,15 @@ test('account sampling shows one compact readout and preserves missing and parti
     assert.equal(await row.locator('strong').innerText(),value);
     assert.equal(await row.locator('.cq-account-partial').count(),Number(partial));
     const measured=value.endsWith('百分点');
-    assert.equal(await row.locator('.cq-account-devices').count(),Number(measured));
-    assert.equal(await row.locator(':scope > *').count(),measured?3:2);
+    assert.equal(await row.locator(':scope > *').count(),2);
+    assert.match(await row.locator('.cq-local-metric-label').innerText(),/^账号变化/);
+    if(measured)assert.equal(await row.getAttribute('aria-label'),'含其他设备');
+    assert.deepEqual(await row.evaluate(el=>{
+      const value=el.querySelector('strong'),label=el.firstElementChild, box=el.getBoundingClientRect(), end=value.getBoundingClientRect(), shell=el.closest('#codex-quota-popover');
+      return {sameRow:Math.abs(label.getBoundingClientRect().top-end.top)<1,aligned:Math.abs(box.right-end.right)<1&&getComputedStyle(label).textAlign==='left',
+        neutral:!value.hasAttribute('data-cq-measured')||getComputedStyle(value).color===getComputedStyle(document.querySelector('#cq-local-usage')).color,
+        hostSurface:getComputedStyle(shell).backgroundColor===getComputedStyle(document.querySelector('#profile-menu')).backgroundColor};
+    }),{sameRow:true,aligned:true,neutral:true,hostSurface:true});
     assert.doesNotMatch(await row.innerText(),/跨周期|有间断/);
     const rows=await page.locator('.cq-local-highlights > div').evaluateAll(nodes=>new Set(nodes.map(node=>node.getBoundingClientRect().top)).size);
     assert.equal(rows,1,'token and API equivalents fit together');
@@ -591,7 +602,7 @@ test('model breakdown keeps exact accessible shares, aligned numbers and host-co
   rows.forEach((row,i)=>assert.ok(Math.abs(row.fill.width/row.track.width*100-[80,15,5][i])<.5));assert.equal(await page.locator('#cq-local-usage').evaluate(el=>el.scrollWidth-el.clientWidth),0);
   assert.equal(await page.locator('.cq-local-model-track i').evaluateAll(nodes=>new Set(nodes.map(n=>getComputedStyle(n).backgroundColor)).size),1);
   const palette=await page.locator('#cq-local-usage').evaluate(el=>{const local=getComputedStyle(el),popup=getComputedStyle(el.closest('#codex-quota-popover'));return {ink:local.color,localSurface:local.getPropertyValue('--cq-solid').trim().toLowerCase(),popupSurface:popup.getPropertyValue('--cq-solid').trim().toLowerCase(),popupInk:popup.getPropertyValue('--cq-ink').trim().toLowerCase()};});
-  assert.deepEqual(palette,dark?{ink:'rgb(238, 238, 236)',localSurface:'#191918',popupSurface:'#191918',popupInk:'#eeeeec'}:{ink:'rgb(33, 32, 28)',localSurface:'#f9f9f8',popupSurface:'#f9f9f8',popupInk:'#21201c'});
+  assert.deepEqual(palette,dark?{ink:'rgb(238, 238, 236)',localSurface:'#262724',popupSurface:'#262724',popupInk:'#eeeeec'}:{ink:'rgb(33, 32, 28)',localSurface:'#f5f3eb',popupSurface:'#f5f3eb',popupInk:'#21201c'});
 
   await updateLocalUsage(page,localUsagePayload(range,{models:[{...models[0],inputTokens:0,cachedInputTokens:0,outputTokens:0,totalTokens:0}]}),id);assert.equal(await page.locator('.cq-local-model-track').getAttribute('role'),'img');assert.equal(await page.locator('.cq-local-model-track').getAttribute('aria-valuenow'),null);assert.equal(await page.locator('.cq-local-model-track i').getAttribute('hidden'),'');
  }finally{await close(page);}}

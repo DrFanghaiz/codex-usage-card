@@ -1565,15 +1565,15 @@
     } else accountAvailable = accountAvailable && used <= 100;
 
     const accountRow=addText("div","cq-local-recent-account","",values);
-    const accountLabel=addText("span","cq-local-metric-label",accountAvailable ? words("账号","Account") : "",accountRow);
-    accountLabel.hidden=!accountAvailable;
+    const accountLabel=addText("span","cq-local-metric-label",words("账号变化","Account change"),accountRow);
     const measured=addText("strong","",accountAvailable ? `${used>0 ? "+" : ""}${localPercent(used)}` : "",accountRow);
     if (accountAvailable) {
       if (account.status==="partial" || account.hasGaps)addText("span","cq-account-partial",words("部分","Partial"),accountLabel);
       addText("span","cq-account-unit",words("百分点","pp"),measured);
-      measured.title=words("账号采样变化，含其他设备","Account sample change, including other devices");
+      accountRow.title=words("含其他设备","Includes other devices");
+      accountRow.setAttribute("role","group");
+      accountRow.setAttribute("aria-label",accountRow.title);
       measured.dataset.cqMeasured="";
-      addText("span","cq-account-devices",words("含其他设备","Includes other devices"),accountRow);
     } else {
       const reason=account?.status==="insufficient_history" ? words("采样不足","Insufficient samples") : words("暂不可用","Unavailable");
       measured.textContent=reason;
@@ -2394,7 +2394,6 @@
       #cq-local-usage .cq-local-recent-row strong { font-size:24px; line-height:32px; font-weight:650; letter-spacing:-.025em; white-space:nowrap; }
       #cq-local-usage .cq-local-recent-row .cq-local-primary-estimate { display:flex; flex-wrap:wrap; white-space:normal; line-height:24px; }
       #cq-local-usage .cq-local-primary-estimate > span { white-space:nowrap; }
-      #cq-local-usage .cq-local-recent-row > .cq-local-recent-account { grid-template-columns:minmax(0,1fr) auto; }
       #cq-local-usage .cq-account-partial { margin-left:4px; white-space:nowrap; font-size:10px; }
       #cq-local-usage .cq-account-unit { margin-left:2px; font-size:11px; line-height:1; font-weight:500; color:var(--cq-muted); letter-spacing:0; }
       #cq-local-usage .cq-local-highlights { padding:12px 0; border-top:1px solid var(--cq-border); margin:0; gap:12px; }
@@ -2423,20 +2422,20 @@
       #codex-quota-popover {
         --cq-s1:#fdfdfc; --cq-s2:#f9f9f8; --cq-s3:#f1f0ef; --cq-s4:#e9e8e6; --cq-s5:#e2e1de; --cq-s6:#dad9d6;
         --cq-s7:#cfceca; --cq-s8:#bcbbb5; --cq-s9:#8d8d86; --cq-s10:#82827c; --cq-s11:#63635e; --cq-s12:#21201c;
-        --cq-solid:var(--cq-s2); --cq-ink:var(--cq-s12); --cq-muted:var(--cq-s11); --cq-border:var(--cq-s7); --cq-hover:var(--cq-s4); --cq-track:var(--cq-s3);
+        --cq-solid:var(--color-surface-elevated-secondary,var(--cq-s2)); --cq-ink:var(--cq-s12); --cq-muted:var(--cq-s11); --cq-border:var(--cq-s7); --cq-hover:var(--cq-s4); --cq-track:var(--cq-s3);
         --cq-warning:#ce2c31; --cq-warning-bg:#feebec; --cq-warning-border:#f4a9aa; --cq-fill:var(--cq-s12);
         --cq-pane-height:calc(var(--cq-available-height,calc(100dvh - 24px)) - 2px);
         --cq-selection:var(--cq-s1);
-        --cq-account-ink:#237a39; --cq-switch-on:#34c759;
+        --cq-switch-on:#34c759;
         padding:0; border:1px solid transparent; border-radius:22px; background:var(--cq-solid); backdrop-filter:none; overflow:hidden;
         box-shadow:0 1px 1px #0000000a,0 12px 32px -18px #00000040;
       }
       #codex-quota-popover[data-cq-dark] {
-        --cq-account-ink:#30d158; --cq-switch-on:#30d158; --cq-selection:var(--cq-s5);
+        --cq-switch-on:#30d158; --cq-selection:var(--cq-s5);
         --cq-s1:#111110; --cq-s2:#191918; --cq-s3:#222221; --cq-s4:#2a2a28; --cq-s5:#31312e; --cq-s6:#3b3a37;
         --cq-s7:#494844; --cq-s8:#62605b; --cq-s9:#6f6d66; --cq-s10:#7c7b74; --cq-s11:#b5b3ad; --cq-s12:#eeeeec;
         --cq-warning:#ff9592; --cq-warning-bg:#3b1219; --cq-warning-border:#8c333a;
-        --cq-solid:var(--cq-s2); --cq-ink:var(--cq-s12); --cq-muted:var(--cq-s11); --cq-border:var(--cq-s7); --cq-hover:var(--cq-s4); --cq-track:var(--cq-s3); --cq-fill:var(--cq-s12);
+        --cq-solid:var(--color-surface-elevated-secondary,var(--cq-s2)); --cq-ink:var(--cq-s12); --cq-muted:var(--cq-s11); --cq-border:var(--cq-s7); --cq-hover:var(--cq-s4); --cq-track:var(--cq-s3); --cq-fill:var(--cq-s12);
       }
       #cq-local-usage, #cq-local-usage[data-cq-dark] { --cq-solid:inherit; --cq-ink:inherit; --cq-muted:inherit; --cq-border:inherit; --cq-hover:inherit; --cq-track:inherit; --cq-warning:inherit; --cq-fill:inherit; }
       :is(#cq-local-usage,#cq-settings) { --cq-grid-margin:12px; }
@@ -2476,11 +2475,10 @@
       #cq-local-usage .cq-local-primary-estimate > span { white-space:nowrap; }
       #cq-local-usage .cq-local-recent-row .cq-local-primary-estimate[data-unavailable] { font-size:16px; font-weight:600; color:var(--cq-muted); }
       #cq-local-usage .cq-local-recent-local small, #cq-local-usage .cq-choose-reference { margin:3px 0 0; padding:0; font-size:10.5px; line-height:15px; }
-      #cq-local-usage .cq-local-recent-row > .cq-local-recent-account { display:flex; align-items:baseline; flex-wrap:wrap; gap:0 4px; margin:4px 0 0; color:var(--cq-muted); }
+      #cq-local-usage .cq-local-recent-row > .cq-local-recent-account { display:grid; grid-template-columns:minmax(0,1fr) auto; align-items:baseline; gap:8px; margin:6px 0 0; color:var(--cq-muted); line-height:16px; text-align:left; }
       #cq-local-usage .cq-local-recent-account .cq-local-metric-label { display:inline; margin:0; font:inherit; }
-      #cq-local-usage .cq-local-recent-row .cq-local-recent-account strong { display:inline; margin:0; font:inherit; letter-spacing:0; }
-      #cq-local-usage .cq-account-devices { font-size:10.5px; }
-      #cq-local-usage .cq-local-recent-account strong[data-cq-measured] { color:var(--cq-account-ink); font-weight:600; }
+      #cq-local-usage .cq-local-recent-row .cq-local-recent-account strong { margin:0; font:inherit; letter-spacing:0; text-align:right; }
+      #cq-local-usage .cq-local-recent-account strong[data-cq-measured] { color:var(--cq-ink); font-weight:600; }
       #cq-local-usage .cq-account-unit { margin-left:4px; color:inherit; font-size:inherit; }
       #cq-local-usage .cq-local-log-quota { display:flex; flex-wrap:wrap; gap:0 4px; margin-top:8px; color:var(--cq-muted); font-size:11px; line-height:16px; }
       #cq-local-usage .cq-local-log-quota :is(strong,.cq-local-metric-label) { margin:0; font:inherit; }
@@ -2499,7 +2497,15 @@
       #cq-conversation-trigger { anchor-name:--cq-conversation; -webkit-app-region:no-drag; flex:0 1 auto; min-width:0; max-width:30vw; min-height:24px; margin-inline-start:4px; border:0; border-radius:6px; padding:0 6px; background:transparent; color:var(--color-text-secondary, CanvasText); font:inherit; font-size:11px; line-height:16px; font-variant-numeric:tabular-nums; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; cursor:pointer; }
       #cq-conversation-trigger:hover, #cq-conversation-trigger[aria-expanded="true"] { background:var(--color-background-primary-ghost-hover, ButtonFace); }
       #cq-conversation-trigger:focus-visible { outline:2px solid currentColor; outline-offset:1px; }
-      #cq-conversation-total { position:fixed; position-anchor:--cq-conversation; inset:auto; top:anchor(bottom); left:clamp(12px,anchor(left),max(12px,calc(100% - 240px))); box-sizing:border-box; width:min(228px,calc(100vw - 24px)); margin:6px 0 0; padding:8px 12px; border:1px solid var(--color-border, ButtonBorder); border-radius:var(--radius-sm,8px); background:var(--color-surface-elevated-secondary, Canvas); color:var(--color-text, CanvasText); box-shadow:var(--shadow-dropdown-overlay, 0 6px 18px #0002); font:inherit; font-size:11px; line-height:17px; font-variant-numeric:tabular-nums; white-space:pre-line; overflow-wrap:anywhere; }
+      #cq-conversation-total { position:fixed; position-anchor:--cq-conversation; inset:auto; top:anchor(bottom); left:clamp(12px,anchor(left),max(12px,calc(100% - 240px))); box-sizing:border-box; width:min(228px,calc(100vw - 24px)); margin:6px 0 0; padding:12px; border:1px solid var(--color-border, ButtonBorder); border-radius:12px; background:var(--color-surface-elevated-secondary, Canvas); color:var(--color-text, CanvasText); box-shadow:var(--shadow-dropdown-overlay, 0 6px 18px #0002); font:inherit; font-size:11px; line-height:16px; font-variant-numeric:tabular-nums; overflow-wrap:anywhere; }
+      #cq-conversation-total dl, #cq-conversation-total dd { margin:0; }
+      #cq-conversation-total dl > div { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:8px; align-items:baseline; }
+      #cq-conversation-total dl > div + div { margin-top:4px; }
+      #cq-conversation-total dt, #cq-conversation-total p { color:var(--color-text-secondary, CanvasText); }
+      #cq-conversation-total dd { text-align:right; }
+      #cq-conversation-total .cq-conversation-estimate { display:block; margin-bottom:8px; padding-bottom:8px; border-bottom:1px solid var(--color-border, ButtonBorder); }
+      #cq-conversation-total .cq-conversation-estimate dd { margin-top:2px; font-size:18px; line-height:24px; font-weight:600; text-align:left; }
+      #cq-conversation-total p { margin:6px 0 0; }
       #cq-local-usage .cq-local-mix { margin-top:12px; }
       #cq-local-usage .cq-local-mix .cq-local-composition-track { height:8px; margin:0; border-radius:99px; }
       #cq-local-usage .cq-local-mix .cq-local-composition-values { display:flex; flex-wrap:wrap; gap:2px 8px; margin:6px 0 0; }
@@ -2570,7 +2576,7 @@
       #cq-local-usage .cq-local-skeleton { display:block; }
       #cq-local-usage .cq-local-skeleton :is(.cq-local-metric-label,strong,i) { display:block; width:52%; height:12px; margin:0; background:var(--cq-s4); border-radius:4px; color:transparent; }
       #cq-local-usage .cq-local-skeleton .cq-local-recent-local strong { width:72%; height:29px; margin:4px 0; }
-      #cq-local-usage .cq-local-skeleton .cq-local-recent-account strong { width:36%; }
+      #cq-local-usage .cq-local-skeleton .cq-local-recent-account strong { width:48px; }
       #cq-local-usage .cq-local-skeleton .cq-local-skeleton-meta { width:68%; margin-top:6px; }
       #cq-local-usage .cq-local-skeleton .cq-local-skeleton-mix { width:100%; margin-top:12px; }
       #cq-local-usage .cq-local-skeleton .cq-local-skeleton-chart { width:100%; height:72px; margin-top:12px; }
@@ -3884,7 +3890,7 @@
   const conversationTitleSelector = `${toolbarSelector} .text-conversation-title`;
   const turnKeySelector = '[data-content-search-turn-key]';
   const conversationTrigger = document.createElement("button");
-  const conversationOutput = document.createElement("output");
+  const conversationOutput = document.createElement("div");
   const conversationName = words("本对话累计用量", "Conversation usage total");
   const conversationLabel = words("累计用量", "Total usage");
   const turnSelector = `${turnKeySelector} .text-size-chat.text-secondary > button`;
@@ -4031,17 +4037,33 @@
     const estimate=localQuotaEstimate(data.models,baselines,apiBaselines);
     const costs=data.models.map(apiEquivalent).filter(Boolean);
     const cost=costs.reduce((sum,row)=>[sum[0]+row[0],sum[1]+row[1]],[0,0]);
-    const lines=[`${compactLocalTokens(tokens).text} token`];
+    const tokenText=compactLocalTokens(tokens).text;
+    const range=estimate.range ? localEstimateText(estimate) : "";
+    const fields=[];
+    if(range) fields.push([estimate.proxy ? words("本机间接估算","Local proxy estimate") : words("本机额度估算","Local quota estimate"),range,"cq-conversation-estimate"]);
+    fields.push(["Token",tokenText,""]);
     if(costs.length) {
       const equivalent=moneyText(cost[0])+(cost[1]>cost[0] ? `–${moneyText(cost[1])}` : "");
       const partialPrice=costs.length!==data.models.length || data.models.some(row=>row.cacheWriteKnown===false);
       const priceLabel=partialPrice ? words("部分 API 等值","Partial API equivalent") : words("API 等值","API equivalent");
-      lines.push(`${priceLabel} ≈ ${equivalent}`);
+      fields.push([priceLabel,`≈ ${equivalent}`,""]);
     }
-    if(estimate.range) lines.push(`${estimate.proxy ? words("间接估算","Proxy est.") : words("估算","Est.")} ${localEstimateText(estimate)}`);
-    if(data.partial || estimate.partial) lines.push(words("不完整","Partial"));
-    conversationOutput.textContent=lines.join("\n");
-    setConversationSummary(estimate.range ? localEstimateText(estimate) : lines[0]);
+    const readings=document.createElement("dl");
+    for (const [label,value,className] of fields) {
+      const row=document.createElement("div"), name=document.createElement("dt"), number=document.createElement("dd");
+      row.className=className;
+      name.textContent=label;
+      number.textContent=value;
+      row.append(name,number);
+      readings.append(row);
+    }
+    conversationOutput.replaceChildren(readings);
+    if(data.partial || estimate.partial) {
+      const note=document.createElement("p");
+      note.textContent=data.partial ? words("统计不完整","Incomplete usage data") : words("估算不完整","Partial estimate");
+      conversationOutput.append(note);
+    }
+    setConversationSummary(range || `${tokenText} token`);
   };
   const scanTurns = () => {
     if (!turnInstalled || document.visibilityState === 'hidden') return;
