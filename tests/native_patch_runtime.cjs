@@ -381,7 +381,9 @@ test('account sampling shows one compact readout and preserves missing and parti
   for(const [account,value,partial] of [
     [{...sample,status:'ok',usedPercent:0},'0百分点',false],
     [{...sample,status:'partial',usedPercent:0,crossReset:true,hasGaps:true,segments:[segment]},'0百分点',true],
+    [{...sample,status:'partial',usedPercent:0,crossReset:false,hasGaps:true,segments:[segment]},'0百分点',true],
     [{...sample,status:'partial',usedPercent:4,crossReset:true,segments:[segment]},'暂不可用',false],
+    [{status:'reset',usedPercent:null,crossReset:true},'跨周期采样不足',false],
     [{status:'insufficient_history',usedPercent:null},'采样不足',false],
     [undefined,'暂不可用',false]
   ]){
@@ -401,10 +403,20 @@ test('account sampling shows one compact readout and preserves missing and parti
         neutral:!value.hasAttribute('data-cq-measured')||getComputedStyle(value).color===getComputedStyle(document.querySelector('#cq-local-usage')).color,
         hostSurface:getComputedStyle(shell).backgroundColor===getComputedStyle(document.querySelector('#profile-menu')).backgroundColor};
     }),{sameRow:true,aligned:true,neutral:true,hostSurface:true});
-    assert.doesNotMatch(await row.innerText(),/跨周期|有间断/);
+    if(measured)assert.doesNotMatch(await row.innerText(),/跨周期|有间断/);
     const rows=await page.locator('.cq-local-highlights > div').evaluateAll(nodes=>new Set(nodes.map(node=>node.getBoundingClientRect().top)).size);
     assert.equal(rows,1,'token and API equivalents fit together');
   }
+  const boundary=Date.parse(segment.startAt)+(Date.parse(segment.endAt)-Date.parse(segment.startAt))/2;
+  const segments=[{...segment,endAt:new Date(boundary-60000).toISOString(),usedPercent:3},{...segment,startAt:new Date(boundary+60000).toISOString(),usedPercent:2}];
+  data.interval.account={...sample,status:'partial',crossReset:true,resetAdjusted:true,usedPercent:5,segments};
+  await updateLocalUsage(page,data,id);
+  assert.equal(await row.locator('strong').innerText(),'+5百分点');
+  assert.equal(await row.locator('.cq-account-partial').innerText(),'部分');
+  assert.equal(await row.locator('summary, details').count(),0);
+  data.interval.account.segments[1].startAt=segments[0].startAt;
+  await updateLocalUsage(page,data,id);
+  assert.equal(await row.locator('strong').innerText(),'暂不可用');
  }finally{await close(page);}
 });
 
