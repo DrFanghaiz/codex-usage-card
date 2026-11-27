@@ -75,6 +75,17 @@ public static class RecentUsageRegressions
         Check((double)cross["usedPercent"]==8 && (string)cross["status"]=="partial" && (bool)cross["crossReset"] && !(bool)cross["fullWindow"] && crossSegments.Count==2,"Only measured within-cycle changes are summed");
         Check((double)cross["coveredSeconds"]==840 && (string)cross["sampledStartAt"]==Now.AddMinutes(-20).ToString("o") && (string)cross["sampledEndAt"]==Now.ToString("o"),"Disjoint sampled durations exclude the reset gap");Pass("cross-reset observed segments do not invent boundary consumption");
         var clipped=Read("cross",Now.AddMinutes(-15),Now);Check((double)clipped["usedPercent"]==4 && ((List<Dictionary<string,object>>)clipped["segments"]).Count==1 && (string)clipped["sampledStartAt"]==Now.AddMinutes(-4).ToString("o"),"A selected interval cannot borrow an earlier sample");Pass("cross-reset segments respect the selected range");
+        Sample("expired","expired-session",Now.AddMinutes(-20),10,boundary);Sample("expired","expired-session",Now.AddMinutes(-10),14,boundary);
+        Sample("expired","expired-session",Now.AddMinutes(-5),99,boundary);
+        Sample("expired","expired-session",Now.AddMinutes(-4),2,boundary+604800);Sample("expired","expired-session",Now,6,boundary+604800);
+        var expired=Read("expired",Now.AddMinutes(-20),Now);
+        Check((double)expired["usedPercent"]==8 && (string)expired["status"]=="partial" && (bool)expired["hasGaps"] && (bool)expired["crossReset"] && ((List<Dictionary<string,object>>)expired["segments"]).Count==2,"An expired sample must not poison valid pairs around a confirmed reset");
+        Sample("expired-gap","expired-gap-session",Now.AddMinutes(-20),10,Reset);Sample("expired-gap","expired-gap-session",Now.AddMinutes(-10),14,Reset);
+        Sample("expired-gap","expired-gap-session",Now.AddMinutes(-5),99,boundary);
+        Sample("expired-gap","expired-gap-session",Now.AddMinutes(-4),20,Reset);Sample("expired-gap","expired-gap-session",Now,24,Reset);
+        var expiredGap=Read("expired-gap",Now.AddMinutes(-20),Now);
+        Check((double)expiredGap["usedPercent"]==8 && !(bool)expiredGap["crossReset"] && (bool)expiredGap["hasGaps"],"An expired gap is not measured even if the deadline on either side matches");
+        Check(Read("expired-gap",Now.AddMinutes(-10),Now.AddMinutes(-4))["usedPercent"]==null,"An expired gap cannot turn two isolated samples into a measurement");Pass("expired deadlines preserve valid segments without counting the gap");
         Sample("cross-singles","cross-singles-session",Now.AddMinutes(-10),95,boundary);Sample("cross-singles","cross-singles-session",Now.AddMinutes(-4),2,boundary+604800);
         var singles=Read("cross-singles",Now.AddMinutes(-10),Now);Check((bool)singles["crossReset"] && singles["usedPercent"]==null && (string)singles["status"]=="reset","One sample per cycle is not a zero measurement");Pass("single samples across a reset remain unavailable");
         Sample("cross-gap","cross-gap-session",Now.AddMinutes(-20),10,boundary);RecentUsage.Break("cross-gap-session");Sample("cross-gap","cross-gap-session",Now.AddMinutes(-10),14,boundary);
@@ -95,7 +106,7 @@ public static class RecentUsageRegressions
         var shifted=Read("shift",Now.AddMinutes(-20),Now);Check((double)shifted["usedPercent"]==5 && (bool)shifted["resetAdjusted"],"An early change of reset time is not declared a confirmed reset");Pass("reset-time adjustment is reported separately");
         Sample("shift-down","shift-down-session",Now.AddMinutes(-20),80,Reset);Sample("shift-down","shift-down-session",Now.AddMinutes(-10),90,Reset);
         Sample("shift-down","shift-down-session",Now.AddMinutes(-4),2,Reset+30);Sample("shift-down","shift-down-session",Now,6,Reset+30);
-        var shiftDown=Read("shift-down",Now.AddMinutes(-20),Now);Check(shiftDown["usedPercent"]==null && (string)shiftDown["status"]=="reset" && ((List<Dictionary<string,object>>)shiftDown["segments"]).Count==2,"A decrease before the previous reset may be a correction; retain individual measured segments without a total");Pass("ambiguous early decrease exposes segments without combining them");
+        var shiftDown=Read("shift-down",Now.AddMinutes(-20),Now);Check((double)shiftDown["usedPercent"]==14 && (string)shiftDown["status"]=="partial" && (bool)shiftDown["resetAdjusted"] && !(bool)shiftDown["fullWindow"] && ((List<Dictionary<string,object>>)shiftDown["segments"]).Count==2,"An early boundary with a decrease still keeps the verified within-period increments");Pass("early cycle changes sum measured segments without charging the boundary");
         Sample("cross-correction","cross-correction-session",Now.AddMinutes(-20),80,boundary);Sample("cross-correction","cross-correction-session",Now.AddMinutes(-10),90,boundary);
         Sample("cross-correction","cross-correction-session",Now.AddMinutes(-4),5,boundary+604800);Sample("cross-correction","cross-correction-session",Now.AddMinutes(-2),4,boundary+604800);
         Check((string)Read("cross-correction",Now.AddMinutes(-20),Now)["status"]=="counter_decreased" && Read("cross-correction",Now.AddMinutes(-20),Now)["usedPercent"]==null,"Corrections inside a cycle cannot be summed");Pass("cross-reset correction is not counted as consumption");

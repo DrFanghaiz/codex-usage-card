@@ -1547,23 +1547,23 @@
     }
     const account = row.account, used = account?.usedPercent;
     const sampledStart = Date.parse(account?.sampledStartAt), sampledEnd = Date.parse(account?.sampledEndAt);
-    let accountAvailable = ["ok","partial"].includes(account?.status) && Number.isFinite(used) && used >= 0 &&
-      releaseDate(account.sampledStartAt) && releaseDate(account.sampledEndAt) &&
+    const validBounds = releaseDate(account?.sampledStartAt) && releaseDate(account?.sampledEndAt) &&
       sampledStart >= Date.parse(row.start) && sampledStart < sampledEnd && sampledEnd <= Date.parse(row.end);
-    if (accountAvailable && account.crossReset === true) {
-      const segments = account.segments;
-      let previousEnd = sampledStart, sum = 0;
-      accountAvailable = account.status === "partial" && account.fullWindow !== true && Array.isArray(segments) && segments.length > 0 &&
-        Date.parse(segments[0]?.startAt) === sampledStart && segments.every(segment => {
-          const start = Date.parse(segment?.startAt), end = Date.parse(segment?.endAt), amount = segment?.usedPercent;
-          if (!releaseDate(segment?.startAt) || !releaseDate(segment?.endAt) || start < previousEnd || start >= end || end > sampledEnd ||
-              !Number.isFinite(amount) || amount < 0 || amount > 100) return false;
-          previousEnd = end;
-          sum += amount;
-          return true;
-        }) && previousEnd === sampledEnd && Math.abs(sum - used) <= 1e-8 * Math.max(1, sum);
-    } else accountAvailable = accountAvailable && used <= 100;
-
+    const segments=account?.segments;
+    let previousEnd=sampledStart, sum=0;
+    const validSegments=validBounds && Array.isArray(segments) && segments.length>0 &&
+      Date.parse(segments[0]?.startAt)===sampledStart && segments.every(segment=>{
+        const start=Date.parse(segment?.startAt), end=Date.parse(segment?.endAt), amount=segment?.usedPercent;
+        if(!releaseDate(segment?.startAt) || !releaseDate(segment?.endAt) || start<previousEnd || start>=end || end>sampledEnd ||
+            !Number.isFinite(amount) || amount<0 || amount>100) return false;
+        previousEnd=end;
+        sum+=amount;
+        return true;
+      }) && previousEnd===sampledEnd;
+    const accountAvailable=validBounds && ["ok","partial"].includes(account?.status) && Number.isFinite(used) && used>=0 &&
+      (account.crossReset===true || segments?.length
+        ? account.status==="partial" && account.fullWindow!==true && validSegments && Math.abs(sum-used)<=1e-8*Math.max(1,sum)
+        : used<=100);
     const accountRow=addText("div","cq-local-recent-account","",values);
     const accountLabel=addText("span","cq-local-metric-label",words("账号变化","Account change"),accountRow);
     const measured=addText("strong","",accountAvailable ? `${used>0 ? "+" : ""}${localPercent(used)}` : "",accountRow);
@@ -1575,7 +1575,9 @@
       accountRow.setAttribute("aria-label",accountRow.title);
       measured.dataset.cqMeasured="";
     } else {
-      const reason=account?.status==="insufficient_history" ? words("采样不足","Insufficient samples") : words("暂不可用","Unavailable");
+      const reason=account?.status==="reset"
+        ? words("跨周期采样不足","Insufficient cross-cycle samples")
+        : account?.status==="insufficient_history" ? words("采样不足","Insufficient samples") : words("暂不可用","Unavailable");
       measured.textContent=reason;
       measured.title=reason;
       measured.setAttribute("aria-label",reason);

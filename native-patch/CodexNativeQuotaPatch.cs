@@ -22,7 +22,7 @@ internal static class CodexNativeQuotaPatch
     private static string NativeScript;
     private static int NextCommandId;
     private const int IoDeadlineMilliseconds = 15000;
-    private const string ProductVersion = "3.2.2";
+    private const string ProductVersion = "3.2.3";
     private static volatile string SessionScope = Guid.NewGuid().ToString("N");
     private static string LoginFingerprint;
     private static int SessionGeneration;
@@ -2133,31 +2133,43 @@ internal static class CodexNativeQuotaPatch
                 result["coveredSeconds"] = (last.At - first.At).TotalSeconds;
                 if (last.At <= first.At) return result;
                 var epoch = new DateTimeOffset(1970, 1, 1, 0, 0, 0, TimeSpan.Zero);
-                var previous = first;
-                var periodStart = first;
+                Sample previous = null, periodStart = null;
                 var periods = new List<Tuple<Sample, Sample>>();
                 var crossed = false;
-                var ambiguous = false;
+                var expired = false;
                 foreach (var sample in samples)
                 {
-                    if (sample.Reset <= (sample.At - epoch).TotalSeconds) { result["status"] = "reset"; return result; }
-                    if (sample.Segment != previous.Segment) result["hasGaps"] = true;
-                    if (sample.Reset != previous.Reset)
+                    if (sample.Reset <= (sample.At - epoch).TotalSeconds)
                     {
-                        crossed = true; result["crossReset"] = true;
-                        var adjusted = sample.Reset <= previous.Reset || previous.Reset > (sample.At - epoch).TotalSeconds;
-                        if (adjusted) result["resetAdjusted"] = true;
-                        if (adjusted && sample.Used < previous.Used) ambiguous = true;
-                        if (periodStart.At < previous.At) periods.Add(Tuple.Create(periodStart, previous));
-                        periodStart = sample;
+                        if (periodStart != null && periodStart.At < previous.At) periods.Add(Tuple.Create(periodStart, previous));
+                        periodStart = null;
+                        expired = true; result["hasGaps"] = true;
+                        continue;
                     }
-                    else if (sample.Used < previous.Used) { result["status"] = "counter_decreased"; return result; }
+                    if (previous != null)
+                    {
+                        if (sample.Segment != previous.Segment) result["hasGaps"] = true;
+                        if (sample.Reset != previous.Reset)
+                        {
+                            crossed = true; result["crossReset"] = true;
+                            var adjusted = sample.Reset <= previous.Reset || previous.Reset > (sample.At - epoch).TotalSeconds;
+                            if (adjusted) result["resetAdjusted"] = true;
+                            if (periodStart != null && periodStart.At < previous.At) periods.Add(Tuple.Create(periodStart, previous));
+                            periodStart = null;
+                        }
+                        else if (sample.Used < previous.Used) { result["status"] = "counter_decreased"; return result; }
+                    }
+                    if (periodStart == null) periodStart = sample;
                     previous = sample;
                 }
-                if (crossed)
+                if (crossed || expired)
                 {
-                    if (periodStart.At < last.At) periods.Add(Tuple.Create(periodStart, last));
-                    if (periods.Count == 0) { result["status"] = "reset"; return result; }
+                    if (periodStart != null && periodStart.At < previous.At) periods.Add(Tuple.Create(periodStart, previous));
+                    if (periods.Count == 0)
+                    {
+                        if (crossed) result["status"] = "reset";
+                        return result;
+                    }
                     var segments = (List<Dictionary<string, object>>)result["segments"];
                     double observed = 0, seconds = 0;
                     foreach (var period in periods)
@@ -2169,8 +2181,7 @@ internal static class CodexNativeQuotaPatch
                     }
                     result["sampledStartAt"] = segments[0]["startAt"]; result["sampledEndAt"] = segments[segments.Count - 1]["endAt"];
                     result["coveredSeconds"] = seconds;
-                    if (ambiguous) result["status"] = "reset";
-                    else { result["usedPercent"] = observed; result["status"] = "partial"; }
+                    result["usedPercent"] = observed; result["status"] = "partial";
                     return result;
                 }
                 result["usedPercent"] = last.Used - first.Used;
